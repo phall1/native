@@ -420,6 +420,20 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
             return canvas.sampleCanvasRenderAnimations(self.canvasRenderAnimations(), timestamp_ns, output);
         }
 
+        /// Stamp every zero-start animation's clock with the presenting
+        /// frame's recorded timestamp — the layout tweens' first-tick
+        /// discipline applied to render animations, so a declaration made
+        /// mid-dispatch starts its ramp on the frame clock (and session
+        /// replay, which feeds the same recorded timestamps, stamps the
+        /// identical starts). Only the recording plan path calls this;
+        /// previews and screenshots must never advance the clock.
+        pub fn stampCanvasRenderAnimationStarts(self: *RuntimeView, timestamp_ns: u64) void {
+            if (timestamp_ns == 0) return;
+            for (self.canvas_render_animations[0..self.canvas_render_animation_count]) |*animation| {
+                if (animation.start_ns == 0) animation.start_ns = timestamp_ns;
+            }
+        }
+
         pub fn pruneCompletedNoopCanvasRenderAnimations(self: *RuntimeView, timestamp_ns: u64) bool {
             var len: usize = 0;
             var pruned = false;

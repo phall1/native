@@ -272,6 +272,112 @@ test "runtime schedules canvas render animations without display list rebuild" {
     try std.testing.expect(clean_frame.dirty_bounds == null);
 }
 
+test "runtime stamps zero-start render animations at the first recorded plan" {
+    // The needle-sweep regression: a UiApp rebuild triggered by a
+    // non-frame dispatch (command, effect result) declares its
+    // animations with start_ns = 0 — "starts at the first presented
+    // frame that samples it". The recording plan path must stamp that
+    // frame's timestamp (so the tween runs its FULL duration from the
+    // frame that first paints it), while the animation counts as active
+    // and samples at its from-pose until stamped. Basing the start on
+    // the declarer's stale last-frame timestamp instead pre-aged the
+    // tween by the idle gap and the glass showed only the final pose.
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "gpu-canvas-zero-start-animation", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+        }
+    };
+
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: TestApp = .{};
+    try harness.start(app_state.app());
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 40, 20),
+    });
+
+    const commands = [_]canvas.CanvasCommand{.{ .fill_rect = .{
+        .id = 1,
+        .rect = geometry.RectF.init(0, 0, 10, 10),
+        .fill = .{ .color = canvas.Color.rgb8(255, 0, 0) },
+    } }};
+    _ = try harness.runtime.setCanvasDisplayList(1, "canvas", .{ .commands = &commands });
+
+    var render_commands: [1]canvas.RenderCommand = undefined;
+    var render_batches: [1]canvas.RenderBatch = undefined;
+    var resources: [1]canvas.RenderResource = undefined;
+    var resource_cache_entries: [1]canvas.RenderResourceCacheEntry = undefined;
+    var resource_cache_actions: [2]canvas.RenderResourceCacheAction = undefined;
+    var glyphs: [1]canvas.GlyphAtlasEntry = undefined;
+    var changes: [1]canvas.DiffChange = undefined;
+    const frame_storage = canvas.CanvasFrameStorage{
+        .render_commands = &render_commands,
+        .render_batches = &render_batches,
+        .resources = &resources,
+        .resource_cache_entries = &resource_cache_entries,
+        .resource_cache_actions = &resource_cache_actions,
+        .glyph_atlas_entries = &glyphs,
+        .changes = &changes,
+    };
+
+    // Settle the first (full-repaint) frame before declaring animations.
+    const settle_ns: u64 = 4_000_000_000;
+    _ = try harness.runtime.nextCanvasFrame(1, "canvas", .{ .frame_index = 1, .timestamp_ns = settle_ns }, frame_storage);
+
+    // Declared with start_ns = 0, one second duration: were the zero
+    // start read as the epoch, every sample below (seconds in) would
+    // land at progress 1.
+    const animations = [_]canvas.CanvasRenderAnimation{.{
+        .id = 1,
+        .start_ns = 0,
+        .duration_ms = 1_000,
+        .easing = .linear,
+        .from_opacity = 0,
+        .to_opacity = 1,
+        .from_transform = canvas.Affine.translate(10, 0),
+        .to_transform = canvas.Affine.identity(),
+    }};
+    _ = try harness.runtime.setCanvasRenderAnimations(1, "canvas", &animations);
+
+    // Pending: stored start stays 0 and the animation counts as active
+    // (frame scheduling must keep frames coming until it runs).
+    try std.testing.expectEqual(@as(u64, 0), (try harness.runtime.canvasRenderAnimations(1, "canvas"))[0].start_ns);
+    try std.testing.expect(harness.runtime.views[0].canvasRenderAnimationsActive(settle_ns));
+
+    // First recorded plan stamps its timestamp and samples the from-pose.
+    const stamp_ns: u64 = 5_000_000_000;
+    const first_frame = try harness.runtime.nextCanvasFrame(1, "canvas", .{
+        .frame_index = 2,
+        .timestamp_ns = stamp_ns,
+    }, frame_storage);
+    try std.testing.expect(first_frame.requiresRender());
+    try std.testing.expectEqual(@as(f32, 0), first_frame.render_plan.commands[0].opacity);
+    try std.testing.expectEqualDeep(canvas.Affine.translate(10, 0), first_frame.render_plan.commands[0].transform);
+    try std.testing.expectEqual(stamp_ns, (try harness.runtime.canvasRenderAnimations(1, "canvas"))[0].start_ns);
+
+    // The clock then runs from the stamped frame, not from declare time.
+    const mid_frame = try harness.runtime.nextCanvasFrame(1, "canvas", .{
+        .frame_index = 3,
+        .timestamp_ns = stamp_ns + 500_000_000,
+    }, frame_storage);
+    try std.testing.expect(mid_frame.requiresRender());
+    try std.testing.expectEqual(@as(f32, 0.5), mid_frame.render_plan.commands[0].opacity);
+    try std.testing.expectEqualDeep(canvas.Affine.translate(5, 0), mid_frame.render_plan.commands[0].transform);
+
+    const final_frame = try harness.runtime.nextCanvasFrame(1, "canvas", .{
+        .frame_index = 4,
+        .timestamp_ns = stamp_ns + 1_000_000_000,
+    }, frame_storage);
+    try std.testing.expectEqual(@as(f32, 1), final_frame.render_plan.commands[0].opacity);
+    try std.testing.expectEqualDeep(canvas.Affine.identity(), final_frame.render_plan.commands[0].transform);
+    try std.testing.expectEqual(@as(usize, 0), (try harness.runtime.canvasRenderAnimations(1, "canvas")).len);
+}
+
 test "runtime spins visible spinners and parks the view on unmount" {
     const TestApp = struct {
         fn app(self: *@This()) App {
