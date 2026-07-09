@@ -67,6 +67,7 @@ pub const RunOptions = struct {
             .description = manifestStringField("description"),
             .has_web_content = manifestHasWebContent(),
             .declares_tray = manifestDeclaresTrayCapability(),
+            .accessory = manifestMacosAccessory(),
             .window_title = self.window_title,
             .bundle_id = self.bundle_id,
             .icon_path = self.icon_path,
@@ -313,6 +314,17 @@ fn parseHexColor(comptime value: []const u8) ?native_sdk.canvas.Color {
         }
         return native_sdk.canvas.Color.rgb8(channels[0], channels[1], channels[2]);
     }
+}
+
+/// Menu-bar-only apps: app.zon's `.macos = .{ .accessory = true }`.
+/// Rides `AppInfo.accessory` into the macOS host, which adopts the
+/// accessory activation policy (no Dock tile) — the dev-run twin of the
+/// packaged bundle's LSUIElement=true.
+fn manifestMacosAccessory() bool {
+    if (comptime !@hasField(@TypeOf(app_manifest), "macos")) return false;
+    const macos = app_manifest.macos;
+    if (comptime !@hasField(@TypeOf(macos), "accessory")) return false;
+    return macos.accessory;
 }
 
 /// Whether app.zon declares web content — the shared declare-to-use
