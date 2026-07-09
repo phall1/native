@@ -464,6 +464,7 @@ const EventTag = enum(u8) {
     audio = 24,
     video = 25,
     view_focused = 26,
+    tray_popover = 27,
 };
 
 // The bit assignments below are hand-written wire layout: they are
@@ -586,6 +587,10 @@ pub fn encodeEvent(event: platform.Event, buffer: []u8) JournalError![]const u8 
         .tray_action => |item_id| {
             try cursor.writeEnum(EventTag.tray_action);
             try cursor.writeInt(u32, item_id);
+        },
+        .tray_popover => |popover| {
+            try cursor.writeEnum(EventTag.tray_popover);
+            try cursor.writeByte(if (popover.visible) 1 else 0);
         },
         .shortcut => |shortcut| {
             try cursor.writeEnum(EventTag.shortcut);
@@ -803,6 +808,7 @@ pub fn decodeEvent(bytes: []const u8, storage: *EventDecodeStorage) JournalError
             } };
         },
         .tray_action => .{ .tray_action = try cursor.readInt(u32) },
+        .tray_popover => .{ .tray_popover = .{ .visible = (try cursor.readByte()) != 0 } },
         .shortcut => blk: {
             const id = try cursor.readStr();
             const key = try cursor.readStr();
@@ -1584,6 +1590,10 @@ test "event codec round-trips every payload variant" {
     {
         const decoded = try roundTripEvent(.{ .tray_action = 9 });
         try testing.expectEqual(@as(platform.TrayItemId, 9), decoded.tray_action);
+    }
+    {
+        const decoded = try roundTripEvent(.{ .tray_popover = .{ .visible = true } });
+        try testing.expect(decoded.tray_popover.visible);
     }
     {
         const decoded = try roundTripEvent(.{ .window_focused = 4 });
