@@ -546,8 +546,14 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             chrome: ?ChromeOptions = null,
             /// Render animations derived from the model and current tree,
             /// re-applied after every rebuild through
-            /// `setCanvasRenderAnimations` with the latest frame timestamp
-            /// as `start_ns`. Returns the number of animations written to
+            /// `setCanvasRenderAnimations`. `start_ns` is 0 — the
+            /// "starts at the first presented frame that samples it"
+            /// anchor (pass it through to the animations' `start_ns`):
+            /// the presenting frame stamps its recorded timestamp, so a
+            /// rebuild triggered from any dispatch (input, command,
+            /// effect result) animates from its beginning instead of
+            /// being pre-aged by the gap since the previous presented
+            /// frame. Returns the number of animations written to
             /// `out`.
             animations: ?*const fn (model: *const ModelT, tree: *const Ui.Tree, start_ns: u64, out: []canvas.CanvasRenderAnimation) usize = null,
             /// Layout tweens derived from the model and current tree,
@@ -3342,13 +3348,19 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             });
         }
 
-        /// Re-apply the model-derived render animations with the latest
-        /// frame timestamp.
+        /// Re-apply the model-derived render animations. The hook's
+        /// `start_ns` is 0, the "first presented frame stamps me" anchor
+        /// (see `Options.animations`): passing the last frame timestamp
+        /// here — the old behavior — pre-aged every animation declared
+        /// by a non-frame dispatch by the length of the idle gap before
+        /// it, so an effect- or command-driven rebuild after a few
+        /// seconds of idle sampled its tween as already finished and the
+        /// glass showed only the final pose.
         fn scheduleAnimations(self: *Self, runtime: *Runtime, window_id: platform.WindowId) anyerror!void {
             const animations_fn = self.options.animations orelse return;
             const tree = &(self.tree orelse return);
             var animations: [canvas_limits.max_canvas_render_animations_per_view]canvas.CanvasRenderAnimation = undefined;
-            const count = animations_fn(&self.model, tree, self.frame_timestamp_ns, &animations);
+            const count = animations_fn(&self.model, tree, 0, &animations);
             _ = try runtime.setCanvasRenderAnimations(window_id, self.options.canvas_label, animations[0..count]);
         }
 

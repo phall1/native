@@ -922,6 +922,7 @@ pub const RuntimeView = struct {
     pub const copyCanvasFrameRenderOverrides = CanvasFrameMethods.copyCanvasFrameRenderOverrides;
     pub const compactCanvasFrameRenderOverrideNoops = CanvasFrameMethods.compactCanvasFrameRenderOverrideNoops;
     pub const sampleCanvasRenderAnimations = CanvasFrameMethods.sampleCanvasRenderAnimations;
+    pub const stampCanvasRenderAnimationStarts = CanvasFrameMethods.stampCanvasRenderAnimationStarts;
     pub const pruneCompletedNoopCanvasRenderAnimations = CanvasFrameMethods.pruneCompletedNoopCanvasRenderAnimations;
     pub const canvasRenderAnimationsActive = CanvasFrameMethods.canvasRenderAnimationsActive;
     pub const copyCanvasFramePipelineCache = CanvasFrameMethods.copyCanvasFramePipelineCache;

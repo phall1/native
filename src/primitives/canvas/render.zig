@@ -116,6 +116,15 @@ pub const CanvasRenderAnimationLoop = enum {
 
 pub const CanvasRenderAnimation = struct {
     id: ObjectId,
+    /// Animation clock anchor in the presented-frame timestamp domain.
+    /// For one-shots, 0 (the default) means "starts at the first presented frame that
+    /// samples it": the runtime stamps that frame's recorded timestamp
+    /// here before sampling — the layout tweens' first-tick discipline —
+    /// so an animation declared from any dispatch (input, command,
+    /// effect wake) begins its 0→1 ramp on glass instead of being
+    /// pre-aged by however stale the declarer's last frame timestamp
+    /// was. Until stamped, a zero-start animation samples at progress 0
+    /// and counts as active. Loops retain their epoch-anchored phase.
     start_ns: u64 = 0,
     duration_ms: u32 = 0,
     easing: Easing = .standard,
@@ -264,6 +273,15 @@ pub fn sampleCanvasRenderAnimations(animations: []const CanvasRenderAnimation, t
 }
 
 pub fn motionProgress(animation: CanvasRenderAnimation, timestamp_ns: u64) f32 {
+    // Reduced-motion snap stays first: a zero-duration animation is
+    // always at its final pose, stamped or not.
+    if (animation.duration_ms == 0) return easedMotionProgress(animation.easing, animation.spring, 1);
+    // A pending one-shot (zero start: never stamped by a presenting
+    // frame) holds its from-pose. Without this, a zero start reads as
+    // the Unix epoch and every sample lands at progress 1 before the
+    // animation ever ran. Loops are exempt — a zero start only anchors
+    // their phase, it can never age them out.
+    if (animation.loop == .none and animation.start_ns == 0) return easedMotionProgress(animation.easing, animation.spring, 0);
     const raw = switch (animation.loop) {
         .none => rawMotionProgress(animation.start_ns, animation.duration_ms, timestamp_ns),
         .ping_pong => pingPongMotionProgress(animation.start_ns, animation.duration_ms, timestamp_ns),

@@ -508,6 +508,9 @@ pub fn canvasRenderAnimationActive(animation: canvas.CanvasRenderAnimation, time
     // they stay active until explicitly removed, so frame scheduling
     // keeps sampling them.
     if (animation.loop != .none) return true;
+    // Pending zero-start animations haven't been stamped by a presenting
+    // frame yet: their whole run is still ahead of them.
+    if (animation.start_ns == 0) return true;
     if (timestamp_ns <= animation.start_ns) return true;
     const duration_ns = @as(u64, animation.duration_ms) * 1_000_000;
     return timestamp_ns - animation.start_ns < duration_ns;

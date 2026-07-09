@@ -903,6 +903,13 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             frame_options.previous_visual_effect_cache = self.views[index].canvasFrameVisualEffectCache();
             frame_options.previous_glyph_atlas_cache = self.views[index].canvasFrameGlyphAtlasCache();
             frame_options.previous_text_layout_cache = self.views[index].canvasFrameTextLayoutCache();
+            // Recording plans are the presenting clock: stamp zero-start
+            // animations with THIS frame's timestamp before sampling, so
+            // a declaration made mid-dispatch (input, command, effect
+            // wake) begins at the frame that first paints it instead of
+            // at the declarer's stale last-frame timestamp. Previews and
+            // screenshots (record=false) sample without stamping.
+            if (record) self.views[index].stampCanvasRenderAnimationStarts(frame_options.timestamp_ns);
             const scheduled_render_overrides = try self.views[index].sampleCanvasRenderAnimations(
                 frame_options.timestamp_ns,
                 &self.canvas_frame_render_override_samples,
