@@ -901,6 +901,13 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
             frame_options.previous_visual_effect_cache = self.views[index].canvasFrameVisualEffectCache();
             frame_options.previous_glyph_atlas_cache = self.views[index].canvasFrameGlyphAtlasCache();
             frame_options.previous_text_layout_cache = self.views[index].canvasFrameTextLayoutCache();
+            // Recording plans are the presenting clock: stamp zero-start
+            // animations with THIS frame's timestamp before sampling, so
+            // a declaration made mid-dispatch (input, command, effect
+            // wake) begins at the frame that first paints it instead of
+            // at the declarer's stale last-frame timestamp. Previews and
+            // screenshots (record=false) sample without stamping.
+            if (record) self.views[index].stampCanvasRenderAnimationStarts(frame_options.timestamp_ns);
             const scheduled_render_overrides = try self.views[index].sampleCanvasRenderAnimations(
                 frame_options.timestamp_ns,
                 &self.canvas_frame_render_override_samples,
@@ -1197,6 +1204,16 @@ pub fn RuntimeCanvasFrames(comptime Runtime: type) type {
                 }
                 if (self.views[index].canvasRenderAnimationsActive(frame_options.timestamp_ns)) {
                     self.invalidateFor(.state, self.views[index].frame);
+                    // Keep the surface's frame channel armed for the whole
+                    // run: the present-completion reschedule normally
+                    // sustains an animating surface, but a plan whose
+                    // present was skipped (an unchanged sample, a pending
+                    // future start) emits no completion and would strand
+                    // the animation mid-flight. The host folds this into
+                    // its one paced in-flight emission — display-grid
+                    // cadence, no spin — and it costs nothing once the
+                    // animations settle.
+                    try requestCanvasFrameForView(self, index);
                 }
                 // An armed tooltip show delay — and a running anchor-gap
                 // transit grace — only fire on a presented frame's
