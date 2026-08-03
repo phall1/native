@@ -761,6 +761,17 @@ pub const WidgetContextMenuItem = struct {
     separator: bool = false,
 };
 
+/// Which context menus a widget permits. `.automatic` preserves the
+/// platform defaults (declared items first, then SDK text/terminal menus),
+/// `.declared_only` suppresses those SDK defaults while retaining an
+/// app-declared menu, and `.disabled` bypasses context-menu handling so the
+/// secondary-button stream follows ordinary widget routing and capture.
+pub const WidgetContextMenuPolicy = enum {
+    automatic,
+    declared_only,
+    disabled,
+};
+
 /// Per-region edge behavior of a scroll container. `.default` follows
 /// the `ScrollPhysics.overscroll` design token (off by default: scroll
 /// regions pin at their content edges); `.none` and `.rubber_band` pin
@@ -981,6 +992,10 @@ pub const Widget = struct {
     semantics: WidgetSemantics = .{},
     /// App-declared native context menu for this widget (empty = none).
     context_menu: []const WidgetContextMenuItem = &.{},
+    /// Context-menu selection policy. The default preserves every existing
+    /// declared and SDK-provided menu; `.disabled` also leaves secondary
+    /// input available to the ordinary pointer route.
+    context_menu_policy: WidgetContextMenuPolicy = .automatic,
     /// True when the runtime installed a native scroll driver for this
     /// `.scroll_view`: the engine's drawn scrollbar and kinetic physics
     /// stand down — the OS scroller owns feel and the overlay scroller.
