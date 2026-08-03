@@ -1,0 +1,1 @@
+feature: **Per-widget context-menu policy**: Zig views can retain native widget semantics and pointer routing while choosing automatic SDK menus, app-declared menus only, or no menu handling for a widget.

@@ -192,10 +192,11 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
             // pacing no-op.
             self.options.platform.services.noteGpuSurfaceInput(input_event.window_id, input_event.label) catch {};
             // Secondary-button (right/ctrl-click, touch long-press) input
-            // is the context-menu gesture: the press presents the
-            // native menu and the whole button-1 stream is consumed so a
-            // right-click never acts as a primary press.
-            if (ContextMenuMethods().canvasWidgetContextPointerInput(input_event)) {
+            // is normally the context-menu gesture: the press presents the
+            // native menu and the whole button-1 stream is consumed. A
+            // widget with context-menu policy `.disabled` deliberately
+            // keeps the stream on the ordinary routed/captured path.
+            if (ContextMenuMethods().canvasWidgetContextPointerInput(self, input_event)) {
                 if (runtimeFindViewIndex(self, input_event.window_id, input_event.label)) |index| {
                     self.views[index].recordGpuSurfaceInputTimestamp(input_event.timestamp_ns);
                     // A consumed cancel is still the pointer leaving the

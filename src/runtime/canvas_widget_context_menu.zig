@@ -20,6 +20,8 @@
 //! native menu they present no synthesized surface (there are no
 //! app-declared items to mount), while their available keyboard paths
 //! remain unchanged.
+//! `ElementOptions.context_menu_policy` can keep only tier 1 or bypass
+//! this menu path entirely; its `.automatic` default preserves the order.
 //!
 //! Presentation is asynchronous (macOS `popUpMenuPositioningItem` runs a
 //! nested tracking loop): the platform emits a `context_menu_action`
@@ -93,12 +95,22 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
         /// must be consumed by the context-menu path instead of the
         /// primary pointer pipeline (a right-click must never act as a
         /// press).
-        pub fn canvasWidgetContextPointerInput(input_event: platform.GpuSurfaceInputEvent) bool {
+        pub fn canvasWidgetContextPointerInput(self: *Runtime, input_event: platform.GpuSurfaceInputEvent) bool {
             if (input_event.button != 1) return false;
-            return switch (input_event.kind) {
+            const context_pointer = switch (input_event.kind) {
                 .pointer_down, .pointer_up, .pointer_drag, .pointer_move, .pointer_cancel => true,
                 else => false,
             };
+            if (!context_pointer) return false;
+
+            // A disabled policy turns the whole secondary-button lifetime
+            // back into ordinary pointer input. Route here before the menu
+            // branch so the initiating down and its captured drag/up agree,
+            // even when the pointer leaves the widget before release.
+            const routed = CanvasWidgetEventMethods().routeCanvasWidgetPointerInput(self, input_event, &self.widget_event_route_entries) catch return true;
+            const pointer_event = routed orelse return true;
+            const index = runtimeFindViewIndex(self, input_event.window_id, input_event.label) orelse return true;
+            return contextMenuPolicyForRoute(self, index, pointer_event.route) != .disabled;
         }
 
         /// Present the context menu for a secondary-button press: hit-test
@@ -186,6 +198,18 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
                     .view_label = self.views[index].label,
                     .target_id = widget.id,
                     .point = point,
+                } });
+                return;
+            }
+
+            // `.declared_only` stops after the declared-menu tier. Keep the
+            // existing context-press fallback (the on-hold alternative),
+            // but never synthesize an SDK text/terminal menu.
+            if (contextMenuPolicyForRoute(self, index, pointer_event.route) == .declared_only) {
+                try self.dispatchEvent(app, .{ .canvas_widget_context_press = .{
+                    .window_id = input_event.window_id,
+                    .view_label = self.views[index].label,
+                    .press_target = pointer_event.press_target,
                 } });
                 return;
             }
@@ -548,13 +572,34 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
             for (route) |entry| {
                 if (entry.node_index >= self.views[view_index].widget_layout_node_count) continue;
                 const node = self.views[view_index].widget_layout_nodes[entry.node_index];
-                if (node.widget.context_menu.len == 0 or node.widget.state.disabled) continue;
+                if (node.widget.context_menu.len == 0 or node.widget.state.disabled or node.widget.context_menu_policy == .disabled) continue;
                 if (result == null or node.depth >= result_depth) {
                     result = entry.node_index;
                     result_depth = node.depth;
                 }
             }
             return result;
+        }
+
+        /// The deepest explicit policy on a hit route governs the surface.
+        /// This lets a composite widget suppress menus for its plain-text
+        /// descendants while the default `.automatic` adds no inheritance
+        /// or behavior change to existing trees.
+        fn contextMenuPolicyForRoute(self: *const Runtime, view_index: usize, route: []const canvas.WidgetEventRouteEntry) canvas.WidgetContextMenuPolicy {
+            var policy: canvas.WidgetContextMenuPolicy = .automatic;
+            var policy_depth: usize = 0;
+            var found = false;
+            for (route) |entry| {
+                if (entry.node_index >= self.views[view_index].widget_layout_node_count) continue;
+                const node = self.views[view_index].widget_layout_nodes[entry.node_index];
+                if (node.widget.context_menu_policy == .automatic) continue;
+                if (!found or node.depth >= policy_depth) {
+                    policy = node.widget.context_menu_policy;
+                    policy_depth = node.depth;
+                    found = true;
+                }
+            }
+            return policy;
         }
 
         fn CanvasWidgetEventMethods() type {
