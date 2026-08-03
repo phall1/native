@@ -171,6 +171,53 @@ fn createMenuHarness(app: App) !*TestHarness() {
     return harness;
 }
 
+fn installTerminal(
+    harness: *TestHarness(),
+    grid: *canvas.TerminalGrid,
+    policy: canvas.WidgetContextMenuPolicy,
+    pty: u64,
+    text: []const u8,
+) !void {
+    grid.screen_text = text;
+    const terminal = canvas.Widget{
+        .id = 2,
+        .kind = .terminal,
+        .frame = geometry.RectF.init(12, 16, 280, 120),
+        .text = text,
+        .terminal = .{ .pty = pty, .grid = grid },
+        .context_menu_policy = policy,
+        .semantics = .{ .label = "Session" },
+    };
+    var nodes: [2]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &.{terminal} }, geometry.RectF.init(0, 0, 320, 200), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+}
+
+fn testTerminalGrid() canvas.TerminalGrid {
+    return .{
+        .background = canvas.Color.rgba(0, 0, 0, 1),
+        .foreground = canvas.Color.rgba(1, 1, 1, 1),
+        .cursor_color = canvas.Color.rgba(1, 1, 1, 1),
+        .selection_color = canvas.Color.rgba(0, 0.5, 1, 1),
+    };
+}
+
+fn secondaryPointer(kind: platform.GpuSurfaceInputKind, pointer_id: u64, x: f32, y: f32) platform.Event {
+    return .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = kind,
+        .button = switch (kind) {
+            .pointer_down, .pointer_up, .pointer_cancel => 1,
+            else => 0,
+        },
+        .pointer_id = pointer_id,
+        .x = x,
+        .y = y,
+        .timestamp_ns = 1_000_000_000,
+    } };
+}
+
 test "right click over a widget with a declared menu presents it natively and dispatches the selection" {
     var app_state: MenuTestApp = .{};
     const app = app_state.app();
@@ -650,6 +697,104 @@ test "disabled terminal context menus bypass menu handling and retain pointer ro
     try std.testing.expectEqual(@as(canvas.ObjectId, 0), harness.runtime.views[0].canvas_widget_pressed_id);
     try std.testing.expectEqual(@as(u32, 3), app_state.pointer_count);
     try std.testing.expectEqual(@as(u32, 3), app_state.raw_input_count);
+}
+
+test "disabled secondary down retains ordinary capture through automatic terminal rebuild" {
+    var app_state: MenuTestApp = .{};
+    const app = app_state.app();
+    const harness = try createMenuHarness(app);
+    defer harness.destroy(std.testing.allocator);
+
+    var grid = testTerminalGrid();
+    try installTerminal(harness, &grid, .disabled, 7, "shell: idle");
+
+    try harness.runtime.dispatchPlatformEvent(app, secondaryPointer(.pointer_down, 41, 100, 40));
+    try std.testing.expectEqual(@as(u32, 1), app_state.pointer_count);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), harness.runtime.views[0].canvas_widget_pressed_id);
+    try std.testing.expectEqual(.ordinary, harness.runtime.views[0].canvas_widget_secondary_gesture_owner);
+
+    // The model switches terminal process/mode while the gesture stands:
+    // same semantic terminal identity, new pty/text, automatic menu policy.
+    // Retained capture and gesture ownership must survive the adoption.
+    try installTerminal(harness, &grid, .automatic, 8, "agent: running");
+    const rebuilt = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expectEqual(@as(u64, 8), rebuilt.nodes[1].widget.terminal.pty);
+    try std.testing.expectEqualStrings("agent: running", rebuilt.nodes[1].widget.text);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), harness.runtime.views[0].canvas_widget_pressed_id);
+
+    // A different pointer's buttonless release is consumed but cannot
+    // terminate pointer 41's ordinary gesture or clear its shared capture.
+    var other_pointer_up = secondaryPointer(.pointer_up, 42, 100, 40);
+    other_pointer_up.gpu_surface_input.button = 0;
+    try harness.runtime.dispatchPlatformEvent(app, other_pointer_up);
+    try std.testing.expectEqual(@as(u32, 1), app_state.pointer_count);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), harness.runtime.views[0].canvas_widget_pressed_id);
+    try std.testing.expectEqual(.ordinary, harness.runtime.views[0].canvas_widget_secondary_gesture_owner);
+
+    // The matching up follows the down-time ordinary decision despite the
+    // live widget now requesting automatic menus, and releases capture.
+    try harness.runtime.dispatchPlatformEvent(app, secondaryPointer(.pointer_up, 41, 100, 40));
+    try std.testing.expectEqual(@as(u32, 2), app_state.pointer_count);
+    try std.testing.expectEqual(canvas.WidgetPointerPhase.up, app_state.last_pointer_phase);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), app_state.last_pointer_target);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), app_state.last_pointer_captured);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), harness.runtime.views[0].canvas_widget_pressed_id);
+    try std.testing.expectEqual(.none, harness.runtime.views[0].canvas_widget_secondary_gesture_owner);
+    try std.testing.expectEqual(@as(usize, 0), harness.null_platform.context_menu_request_count);
+}
+
+test "disabled secondary down retains ordinary cancel through declared policy rebuild" {
+    var app_state: MenuTestApp = .{};
+    const app = app_state.app();
+    const harness = try createMenuHarness(app);
+    defer harness.destroy(std.testing.allocator);
+
+    var grid = testTerminalGrid();
+    try installTerminal(harness, &grid, .disabled, 7, "shell: idle");
+    try harness.runtime.dispatchPlatformEvent(app, secondaryPointer(.pointer_down, 51, 100, 40));
+    try installTerminal(harness, &grid, .declared_only, 9, "shell: command mode");
+
+    // A secondary-labelled cancel still follows the down-time ordinary
+    // owner after policy changes, clearing pressed capture.
+    try harness.runtime.dispatchPlatformEvent(app, secondaryPointer(.pointer_cancel, 51, 100, 40));
+    try std.testing.expectEqual(@as(u32, 2), app_state.pointer_count);
+    try std.testing.expectEqual(canvas.WidgetPointerPhase.cancel, app_state.last_pointer_phase);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), app_state.last_pointer_target);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 2), app_state.last_pointer_captured);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), harness.runtime.views[0].canvas_widget_pressed_id);
+    try std.testing.expectEqual(.none, harness.runtime.views[0].canvas_widget_secondary_gesture_owner);
+    try std.testing.expectEqual(@as(usize, 0), harness.null_platform.context_menu_request_count);
+}
+
+test "automatic terminal menu gesture stays consumed after disabled rebuild" {
+    var app_state: MenuTestApp = .{};
+    const app = app_state.app();
+    const harness = try createMenuHarness(app);
+    defer harness.destroy(std.testing.allocator);
+
+    var grid = testTerminalGrid();
+    try installTerminal(harness, &grid, .automatic, 7, "shell: idle");
+    try harness.runtime.dispatchPlatformEvent(app, secondaryPointer(.pointer_down, 61, 100, 40));
+    try std.testing.expectEqual(@as(usize, 1), harness.null_platform.context_menu_request_count);
+    try std.testing.expectEqual(@as(u32, 0), app_state.pointer_count);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), harness.runtime.views[0].canvas_widget_pressed_id);
+    try std.testing.expectEqual(.context_menu, harness.runtime.views[0].canvas_widget_secondary_gesture_owner);
+
+    try installTerminal(harness, &grid, .disabled, 8, "agent: running");
+    // Motion commonly carries button=0. The menu-owned decision still
+    // consumes it, so no ordinary press/capture appears after the rebuild.
+    try harness.runtime.dispatchPlatformEvent(app, secondaryPointer(.pointer_drag, 61, 140, 70));
+    try harness.runtime.dispatchPlatformEvent(app, secondaryPointer(.pointer_up, 61, 140, 70));
+    try std.testing.expectEqual(@as(u32, 0), app_state.pointer_count);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 0), harness.runtime.views[0].canvas_widget_pressed_id);
+    try std.testing.expectEqual(.none, harness.runtime.views[0].canvas_widget_secondary_gesture_owner);
+    try std.testing.expectEqual(@as(usize, 1), harness.null_platform.context_menu_request_count);
+
+    // Default behavior remains repeatable after the gesture retires.
+    try installTerminal(harness, &grid, .automatic, 8, "agent: running");
+    try harness.runtime.dispatchPlatformEvent(app, secondaryPointer(.pointer_down, 62, 100, 40));
+    try std.testing.expectEqual(@as(usize, 2), harness.null_platform.context_menu_request_count);
+    try std.testing.expectEqual(@as(u32, 0), app_state.pointer_count);
 }
 
 test "terminal Paste disables after exit and a pending live menu revalidates before dispatch" {

@@ -1,1 +1,2 @@
 feature: **Per-widget context-menu policy**: Zig views can retain native widget semantics and pointer routing while choosing automatic SDK menus, app-declared menus only, or no menu handling for a widget.
+- **Gesture-stable ownership**: secondary-button routing is fixed at pointer-down and retained through matching release or cancellation, so rebuilds cannot leak menu gestures into capture or strand ordinary capture.
