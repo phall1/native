@@ -2298,7 +2298,7 @@ function nscvRenderPlanPolicy(request: Uint8Array): Uint8Array {
   if (request.length !== header + count * 48 + (mode === 0 ? w.getUint32(12, true) : 0) || (mode === 1 && w.getUint32(12, true) > 1)) throw new Error("invalid render planning shape");
   for (let i = 0; i < count; i++) {
     const at = header + i * 48, kind = w.getUint32(at, true);
-    if (kind > 14 || w.getUint32(at + 4, true) > (mode === 0 && kind === 12 ? 2 : 1) || (mode === 1 && w.getUint32(at + 12, true) > 1)) throw new Error("invalid render planning fact");
+    if (kind > 15 || w.getUint32(at + 4, true) > (mode === 0 && kind === 12 ? 2 : 1) || (mode === 1 && w.getUint32(at + 12, true) > 1)) throw new Error("invalid render planning fact");
   }
   if (mode === 1) return nscvRenderBatches(w, count, capacity, flags);
   const result = new Uint8Array(864 + Math.min(count, capacity) * 68), out = new DataView(result.buffer), f = Math.fround, resume = w.getUint32(12, true);
@@ -2350,7 +2350,9 @@ function nscvRenderBatches(w: DataView, count: number, capacity: number, flags: 
   let emitted = 0, failed = 0;
   for (let i = 0; i < count; i++) {
     const at = 32 + i * 48, kind = w.getUint32(at, true), fill = w.getUint32(at + 4, true), opacity = w.getFloat32(at + 8, true), clip = nscvRenderOptional(w, at + 12), bounds = nscvRenderRect(w, at + 32);
-    const pipeline = kind <= 4 ? 0 : kind <= 8 ? fill : kind <= 10 ? 4 : kind === 11 ? 2 : kind === 12 ? 3 : kind === 13 ? 5 : 6;
+    // Kind 15 is the packed cell grid: glyphs plus solid cell rects, batched
+    // with text because glyphs are the part a pipeline switch would cost.
+    const pipeline = kind <= 4 ? 0 : kind <= 8 ? fill : kind <= 10 ? 4 : kind === 11 ? 2 : kind === 12 || kind === 15 ? 3 : kind === 13 ? 5 : 6;
     const previous = 32 + (emitted - 1) * 52;
     if (emitted > 0 && out.getUint32(previous, true) === pipeline && out.getUint32(previous + 4, true) + out.getUint32(previous + 8, true) === i && out.getFloat32(previous + 12, true) === opacity && nscvRenderRectEqual(nscvRenderOptional(out, previous + 16), clip)) {
       out.setUint32(previous + 8, out.getUint32(previous + 8, true) + 1, true); nscvRenderPutRect(out, previous + 36, nscvRenderUnion(nscvRenderRect(out, previous + 36), bounds, flags));
