@@ -59,7 +59,8 @@ pub const fingerprint: u64 = layout_fingerprint.hash(layoutDescription(semantic_
 /// runtime, including command ids and enabled/checked/key state.
 /// Epoch 4: command and app-menu catalog strings in snapshots use
 /// JSON-style escapes so every catalog entry remains exactly one line.
-pub const semantic_epoch: u32 = 4;
+/// Epoch 5: widget snapshots expose the non-default context-menu policy.
+pub const semantic_epoch: u32 = 5;
 
 /// The canonical description the protocol fingerprint hashes: the
 /// command vocabulary (the `Action` enum, reflected — names and values,
