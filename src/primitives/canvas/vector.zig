@@ -541,7 +541,7 @@ pub fn RasterizerType(comptime edge_capacity: usize, comptime crossing_capacity:
         max_x: f32 = 0,
         max_y: f32 = 0,
         /// Scanline scratch for `sweep`, in the struct rather than its
-        /// stack frame so the glyph instantiation's 145 KiB rides the
+        /// stack frame so the glyph instantiation's ~546 KiB rides the
         /// same per-thread heap slot as its edges.
         crossings: [crossing_capacity]Crossing = undefined,
 
@@ -670,7 +670,7 @@ pub fn RasterizerType(comptime edge_capacity: usize, comptime crossing_capacity:
 pub const Rasterizer = RasterizerType(max_edges, max_scanline_crossings);
 
 /// The glyph-fill instantiation, sized by the derived budgets above so
-/// any outline the font registration gate admits rasterizes (~508 KiB —
+/// any outline the font registration gate admits rasterizes (~1.9 MiB —
 /// callers keep one per thread on the heap, never on the stack; see
 /// `fillGlyphPath`).
 pub const GlyphRasterizer = RasterizerType(max_glyph_fill_edges, max_glyph_scanline_crossings);
@@ -742,7 +742,7 @@ pub fn fillPath(
 /// budget-admitted glyph NEVER fails with `VectorPathTooComplex` — the
 /// registration promise ("a registered face always resolves at render
 /// time") holds at the raster layer too. `raster` is caller-owned
-/// storage (~508 KiB: keep one per thread on the heap, e.g. behind
+/// storage (~1.9 MiB: keep one per thread on the heap, e.g. behind
 /// `canvas.lazy_tls`, never on the stack); it is reset here, so it needs
 /// no initialization beyond existing.
 pub fn fillGlyphPath(

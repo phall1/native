@@ -72,16 +72,27 @@ pub const Error = error{
 /// 198 points (Yuji Mai), 10 contours (Geist Mono) — 5-12x headroom.
 ///
 /// Stack shape: the simple-glyph parse buffers
-/// (`flags`/`xs`/`ys`/`end_points`) total ~9.5 KiB and live in exactly
+/// (`flags`/`xs`/`ys`/`end_points`) total 36.5 KiB and live in exactly
 /// ONE frame at a time — simple glyphs are leaves, so composite
 /// recursion stacks only the small component-walk frames (depth <= 4),
-/// never these arrays.
+/// never these arrays. The reference renderer's 133 KiB path builder is
+/// separate per-thread heap scratch, so it does not overlap this storage
+/// on the render-thread stack.
 pub const max_glyph_points: usize = 4096;
 pub const max_glyph_contours: usize = 256;
 pub const max_composite_points: usize = max_glyph_points;
 pub const max_composite_contours: usize = max_glyph_contours;
 pub const max_composite_depth: usize = 4;
 pub const max_composite_components: usize = 8;
+
+const simple_glyph_stack_scratch_bytes =
+    max_glyph_contours * @sizeOf(u16) +
+    max_glyph_points * (@sizeOf(u8) + 2 * @sizeOf(f32));
+comptime {
+    if (simple_glyph_stack_scratch_bytes > 40 * 1024) {
+        @compileError("TrueType simple-glyph stack scratch exceeds its supported 40 KiB bound");
+    }
+}
 
 /// The bundled Geist Regular face (OFL), embedded so the reference
 /// renderer paints real text without any platform font machinery. It

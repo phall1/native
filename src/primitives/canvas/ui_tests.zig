@@ -1550,7 +1550,7 @@ test "terminal context menu policy flows from ElementOptions into the widget tre
     }));
 
     try testing.expectEqual(canvas.WidgetKind.terminal, tree.root.kind);
-    try testing.expectEqual(canvas.WidgetContextMenuPolicy.disabled, tree.root.context_menu_policy);
+    try testing.expectEqual(canvas.WidgetContextMenuPolicy.disabled, tree.root.semantics.context_menu_policy);
 }
 
 test "widget kind codes are pinned: assigned at birth, declaration-order-independent" {

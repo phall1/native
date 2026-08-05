@@ -206,7 +206,7 @@ pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
             const view_index = try automationWidgetTargetViewIndex(self, item.target);
             const node_index = self.views[view_index].canvasWidgetNodeIndexById(item.target.id) orelse return error.InvalidCommand;
             const widget = self.views[view_index].widget_layout_nodes[node_index].widget;
-            if (widget.context_menu_policy == .disabled) return error.ContextMenuDisabled;
+            if (self.views[view_index].widgetLayoutTree().contextMenuPolicyAt(node_index) == .disabled) return error.ContextMenuDisabled;
             if (widget.context_menu.len == 0) return error.ContextMenuUndeclared;
             if (item.item_index >= widget.context_menu.len) return error.ContextMenuItemOutOfRange;
             const declared = widget.context_menu[item.item_index];

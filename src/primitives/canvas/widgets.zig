@@ -750,6 +750,9 @@ pub const WidgetSemantics = struct {
     actions: WidgetActions = .{},
     hidden: bool = false,
     focusable: bool = false,
+    /// Context-menu selection policy. This is retained action metadata and
+    /// occupies existing struct padding, keeping every `Widget` compact.
+    context_menu_policy: WidgetContextMenuPolicy = .automatic,
 };
 
 /// One declared context-menu entry carried on a widget (label/enabled/
@@ -992,10 +995,6 @@ pub const Widget = struct {
     semantics: WidgetSemantics = .{},
     /// App-declared native context menu for this widget (empty = none).
     context_menu: []const WidgetContextMenuItem = &.{},
-    /// Context-menu selection policy. The default preserves every existing
-    /// declared and SDK-provided menu; `.disabled` also leaves secondary
-    /// input available to the ordinary pointer route.
-    context_menu_policy: WidgetContextMenuPolicy = .automatic,
     /// True when the runtime installed a native scroll driver for this
     /// `.scroll_view`: the engine's drawn scrollbar and kinetic physics
     /// stand down — the OS scroller owns feel and the overlay scroller.

@@ -3693,8 +3693,11 @@ pub fn Ui(comptime Msg: type) type {
                     .max_size = if (kind == .resizable) .{} else .{ .width = options.width, .height = options.height },
                 },
                 .style = options.style,
-                .semantics = options.semantics,
-                .context_menu_policy = options.context_menu_policy,
+                .semantics = semantics: {
+                    var semantics = options.semantics;
+                    semantics.context_menu_policy = options.context_menu_policy;
+                    break :semantics semantics;
+                },
                 .window_drag = options.window_drag,
                 .overscroll = options.overscroll,
                 .resize_duration_ms = options.resize_duration,

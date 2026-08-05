@@ -265,9 +265,9 @@ pub fn RuntimeAutomationSnapshot(comptime Runtime: type) type {
         }
 
         fn automationWidgetContextMenuPolicy(layout: canvas.WidgetLayoutTree, id: canvas.ObjectId) []const u8 {
-            const node = layout.findById(id) orelse return "";
-            if (node.widget.context_menu_policy == .automatic) return "";
-            return @tagName(node.widget.context_menu_policy);
+            const policy = layout.contextMenuPolicyById(id);
+            if (policy == .automatic) return "";
+            return @tagName(policy);
         }
 
         pub fn frameDiagnostics(self: *Runtime) FrameDiagnostics {

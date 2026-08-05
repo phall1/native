@@ -114,7 +114,7 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
                     return true;
                 };
                 const owner: @TypeOf(view.canvas_widget_secondary_gesture_owner) = if (routed) |pointer_event|
-                    if (contextMenuPolicyForRoute(self, index, pointer_event.route) == .disabled) .ordinary else .context_menu
+                    if (contextMenuPolicyForTarget(self, index, pointer_event.target) == .disabled) .ordinary else .context_menu
                 else
                     .context_menu;
                 view.canvas_widget_secondary_gesture_owner = owner;
@@ -145,6 +145,15 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
                 return true;
             }
 
+            // Desktop mouse streams share pointer_id=0 across every button.
+            // Only the secondary up that matches the initiating action may
+            // retire this owner; a chorded primary release remains ordinary
+            // and leaves the later secondary release live. Pointer cancel is
+            // whole-pointer termination and remains valid without a button.
+            if (input_event.kind == .pointer_up and input_event.button != 1) {
+                return false;
+            }
+
             const consume = owner == .context_menu;
             if (input_event.kind == .pointer_up or input_event.kind == .pointer_cancel) {
                 view.canvas_widget_secondary_gesture_owner = .none;
@@ -172,6 +181,7 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
             const pointer_event = routed orelse return;
             const index = runtimeFindViewIndex(self, input_event.window_id, input_event.label) orelse return;
             const point = geometry.PointF.init(input_event.x, input_event.y);
+            const policy = contextMenuPolicyForTarget(self, index, pointer_event.target);
 
             var items: [platform.max_context_menu_items]platform.ContextMenuItem = undefined;
             const has_presenter = self.options.platform.services.show_context_menu_fn != null;
@@ -245,7 +255,7 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
             // `.declared_only` stops after the declared-menu tier. Keep the
             // existing context-press fallback (the on-hold alternative),
             // but never synthesize an SDK text/terminal menu.
-            if (contextMenuPolicyForRoute(self, index, pointer_event.route) == .declared_only) {
+            if (policy == .declared_only) {
                 try self.dispatchEvent(app, .{ .canvas_widget_context_press = .{
                     .window_id = input_event.window_id,
                     .view_label = self.views[index].label,
@@ -618,7 +628,7 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
             for (route) |entry| {
                 if (entry.node_index >= self.views[view_index].widget_layout_node_count) continue;
                 const node = self.views[view_index].widget_layout_nodes[entry.node_index];
-                if (node.widget.context_menu.len == 0 or node.widget.state.disabled or node.widget.context_menu_policy == .disabled) continue;
+                if (node.widget.context_menu.len == 0 or node.widget.state.disabled) continue;
                 if (result == null or node.depth >= result_depth) {
                     result = entry.node_index;
                     result_depth = node.depth;
@@ -627,25 +637,9 @@ pub fn RuntimeCanvasWidgetContextMenu(comptime Runtime: type) type {
             return result;
         }
 
-        /// The deepest explicit policy on a hit route governs the surface.
-        /// This lets a composite widget suppress menus for its plain-text
-        /// descendants while the default `.automatic` adds no inheritance
-        /// or behavior change to existing trees.
-        fn contextMenuPolicyForRoute(self: *const Runtime, view_index: usize, route: []const canvas.WidgetEventRouteEntry) canvas.WidgetContextMenuPolicy {
-            var policy: canvas.WidgetContextMenuPolicy = .automatic;
-            var policy_depth: usize = 0;
-            var found = false;
-            for (route) |entry| {
-                if (entry.node_index >= self.views[view_index].widget_layout_node_count) continue;
-                const node = self.views[view_index].widget_layout_nodes[entry.node_index];
-                if (node.widget.context_menu_policy == .automatic) continue;
-                if (!found or node.depth >= policy_depth) {
-                    policy = node.widget.context_menu_policy;
-                    policy_depth = node.depth;
-                    found = true;
-                }
-            }
-            return policy;
+        fn contextMenuPolicyForTarget(self: *const Runtime, view_index: usize, target: ?canvas.WidgetHit) canvas.WidgetContextMenuPolicy {
+            const hit = target orelse return .automatic;
+            return self.views[view_index].widgetLayoutTree().contextMenuPolicyAt(hit.index);
         }
 
         fn clearCanvasWidgetContextGesture(self: *Runtime, window_id: platform.WindowId, label: []const u8) void {
