@@ -51,9 +51,9 @@ const font_ttf = @import("font_ttf.zig");
 /// admits — a simple glyph's maxima and a composite's flattened maxima
 /// (`maxp.maxCompositePoints`/`maxCompositeContours`, which is what
 /// this builder actually receives when a composite renders). The
-/// budgets are currently equal, so the max is 1408 either way; the
+/// budgets are currently equal, so the max is 4864 either way; the
 /// derivation keeps capacity honest if they ever diverge. Stack shape:
-/// at 28 B per element this is ~39 KiB in `drawGlyphOutline`; the edge
+/// at 28 B per element this is ~133 KiB in `drawGlyphOutline`; the edge
 /// accumulator below it is the per-thread heap-resident
 /// `vector.GlyphRasterizer` (see `reference_glyph_raster_scratch`), so
 /// the builder is the only glyph raster state on the stack.
@@ -65,7 +65,7 @@ const reference_glyph_path_capacity: usize = @max(
 /// Per-thread rasterizer for glyph fills: `vector.GlyphRasterizer`'s
 /// derived budgets guarantee every outline the font registration gate
 /// admits rasterizes (never a block fallback), which sizes it at
-/// ~508 KiB — a per-thread heap slot behind one TLS pointer (the
+/// ~1.9 MiB — a per-thread heap slot behind one TLS pointer (the
 /// lazy_tls pattern), not a stack temporary and not static TLS. Only
 /// threads that ink a glyph through the reference renderer allocate it.
 /// The array carries no default and stays uninitialized, exactly like
@@ -1123,7 +1123,6 @@ fn referenceScaleCommand(command: RenderCommand, scale: f32) RenderCommand {
 fn referenceScaleRect(rect: geometry.RectF, scale: f32) geometry.RectF {
     return geometry.RectF.init(rect.x * scale, rect.y * scale, rect.width * scale, rect.height * scale);
 }
-
 
 fn referencePixelCenter(x: usize, y: usize) geometry.PointF {
     return geometry.PointF.init(@as(f32, @floatFromInt(x)) + 0.5, @as(f32, @floatFromInt(y)) + 0.5);
