@@ -5,7 +5,7 @@ const cache = @import("render_cache_policy.zig");
 const Affine = @import("drawing.zig").Affine;
 comptime {
     const fields = @typeInfo(canvas.CanvasCommand).@"union".fields;
-    const names = .{ "push_clip", "pop_clip", "push_opacity", "pop_opacity", "transform", "fill_rect", "stroke_rect", "fill_rounded_rect", "draw_line", "fill_path", "stroke_path", "draw_image", "draw_text", "shadow", "blur" };
+    const names = .{ "push_clip", "pop_clip", "push_opacity", "pop_opacity", "transform", "fill_rect", "stroke_rect", "fill_rounded_rect", "draw_line", "fill_path", "stroke_path", "draw_image", "draw_text", "shadow", "blur", "cell_grid" };
     if (fields.len != names.len) @compileError("update the compiled render command wire tags");
     for (names, 0..) |name, i| if (!std.mem.eql(u8, name, fields[i].name)) @compileError("compiled render command wire tag changed");
 }
