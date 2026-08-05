@@ -1115,6 +1115,10 @@ pub const testing = struct {
         return runtime.canvasFrameScratchStorage();
     }
 
+    /// By POINTER, deliberately: a `RuntimeView` is multiple megabytes
+    /// of retained frame storage (a terminal's cell grid alone is 640
+    /// KB), so taking one by value copies the whole thing onto the
+    /// caller's stack and overflows a test thread.
     pub fn runtimeViewInfo(view: anytype) platform.ViewInfo {
         return view.info();
     }
