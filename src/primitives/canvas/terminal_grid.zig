@@ -500,7 +500,7 @@ fn rowCommandCost(row: TerminalRow) usize {
         // Combining clusters deliberately paint alone. Plain cells merge while
         // foreground, decoration, and scratch capacity agree.
         if (multiCodepointCluster(cell)) {
-            total += 1 + @intFromBool(cell.underline);
+            total += 1 + @as(usize, @intFromBool(cell.underline));
             i += 1;
             continue;
         }
@@ -518,7 +518,7 @@ fn rowCommandCost(row: TerminalRow) usize {
             }
             text_bytes += next.cluster.len;
         }
-        total += 1 + @intFromBool(underline);
+        total += 1 + @as(usize, @intFromBool(underline));
         i += span;
     }
     return total;

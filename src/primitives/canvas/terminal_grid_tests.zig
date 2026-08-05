@@ -534,6 +534,23 @@ test "an underlined merged double run stays within the command budget" {
     try testing.expect(builder.displayList().commands.len <= 1000);
 }
 
+test "ordinary underlined text is costed without integer overflow" {
+    var cells: [320]grid_model.TerminalCell = undefined;
+    for (&cells, 0..) |*c, i| {
+        c.* = cell('x', "x", if (i % 2 == 0) white else red);
+        c.underline = true;
+    }
+    const rows = [_]grid_model.TerminalRow{.{ .cells = &cells }};
+
+    var commands: [1024]canvas.CanvasCommand = undefined;
+    var builder = try paintInto(baseGrid(&rows), &commands, .{
+        .frame = geometry.RectF.init(0, 0, 2600, 40),
+        .tokens = .{},
+        .command_budget = 700,
+    });
+    try testing.expect(builder.displayList().commands.len <= 700);
+}
+
 test "an anonymous grid keeps the unkeyed convention: every command id 0" {
     const cells = [_]grid_model.TerminalCell{
         cell('x', "x", white),
