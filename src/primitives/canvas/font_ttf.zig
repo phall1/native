@@ -52,11 +52,12 @@ pub const Error = error{
 ///   Noto Sans KR                479         61           0        0        0          0
 ///   Noto Serif JP               465         40           0        0        0          0
 ///   Yuji Mai (brush kanji)      738         22         198        5        1          3
+///   JetBrainsMono Nerd         4050        132          79        4        1          3
 ///
-/// 1024 points / 128 contours cover the densest measured glyph (Yuji
-/// Mai's 738-point brush kanji; Noto Sans TC's 685) with ~1.4x headroom;
-/// the depth/element budgets carry 1.3-2x over the deepest measured
-/// use (the bundled Geist's own accent stacking).
+/// 4096 points / 256 contours cover the complete patched terminal face as
+/// well as the measured CJK/brush faces. The high point count comes from a
+/// handful of dense icon outlines, not ordinary text; registration remains
+/// bounded and rejects anything beyond this measured production ceiling.
 ///
 /// The composite budgets bound a composite glyph's FLATTENED outline
 /// (`maxp.maxCompositePoints`/`maxCompositeContours`: totals across the
@@ -75,8 +76,8 @@ pub const Error = error{
 /// ONE frame at a time — simple glyphs are leaves, so composite
 /// recursion stacks only the small component-walk frames (depth <= 4),
 /// never these arrays.
-pub const max_glyph_points: usize = 1024;
-pub const max_glyph_contours: usize = 128;
+pub const max_glyph_points: usize = 4096;
+pub const max_glyph_contours: usize = 256;
 pub const max_composite_points: usize = max_glyph_points;
 pub const max_composite_contours: usize = max_glyph_contours;
 pub const max_composite_depth: usize = 4;
