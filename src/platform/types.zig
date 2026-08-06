@@ -669,6 +669,16 @@ pub const WindowInfo = struct {
     focused: bool = false,
     /// Alive but policy-hidden — see `WindowState.hidden`.
     hidden: bool = false,
+    /// The window occupies its own fullscreen Space (macOS) or the
+    /// platform equivalent.
+    ///
+    /// The READ half of the fullscreen capability, and it reports
+    /// transitions the USER started from the green button exactly like
+    /// ones the app asked for via `set_window_fullscreen_fn`. Before
+    /// this the flag existed only on `WindowState` and nothing ever
+    /// filled it, so even the window-state store persisted a constant
+    /// false.
+    fullscreen: bool = false,
 
     pub fn state(self: WindowInfo) WindowState {
         return .{
@@ -680,6 +690,7 @@ pub const WindowInfo = struct {
             .open = self.open,
             .focused = self.focused,
             .hidden = self.hidden,
+            .fullscreen = self.fullscreen,
         };
     }
 };
@@ -2471,6 +2482,21 @@ pub const PlatformServices = struct {
     /// controls — chromeless windows have no system button to click.
     /// Platforms without the concept leave this null.
     minimize_window_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId) anyerror!void = null,
+    /// The real OS fullscreen verb (macOS `toggleFullScreen:` into its
+    /// own Space, Windows/GTK their equivalents).
+    ///
+    /// SET, not toggle, so the call is idempotent and an app can drive
+    /// fullscreen from state it already owns — restoring a remembered
+    /// layout at launch, or binding its own shortcut — instead of having
+    /// to track parity against `WindowInfo.fullscreen`. A host whose
+    /// native verb is a toggle compares the window's current state and
+    /// only flips when it differs.
+    ///
+    /// The counterpart to the `WindowInfo.fullscreen` the platform
+    /// already REPORTS: without it an app could be told it was
+    /// fullscreen and never ask to be, which is the asymmetry this
+    /// closes. Platforms without the concept leave it null.
+    set_window_fullscreen_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId, fullscreen: bool) anyerror!void = null,
     /// The real OS show verb: unhide + order front. It activates by
     /// default; windows created with `activate_on_show = false` use the
     /// platform's passive variant. This is the counterpart to a
@@ -2898,6 +2924,11 @@ pub const PlatformServices = struct {
     pub fn minimizeWindow(self: PlatformServices, window_id: WindowId) anyerror!void {
         const minimize_fn = self.minimize_window_fn orelse return error.UnsupportedService;
         return minimize_fn(self.context, window_id);
+    }
+
+    pub fn setWindowFullscreen(self: PlatformServices, window_id: WindowId, fullscreen: bool) anyerror!void {
+        const fullscreen_fn = self.set_window_fullscreen_fn orelse return error.UnsupportedService;
+        return fullscreen_fn(self.context, window_id, fullscreen);
     }
 
     pub fn showWindow(self: PlatformServices, window_id: WindowId) anyerror!void {
