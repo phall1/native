@@ -55,6 +55,10 @@ const AppKitEvent = extern struct {
     y: f64,
     open: c_int,
     focused: c_int,
+    /// WINDOW_FRAME: nonzero while the window occupies its own
+    /// fullscreen Space (read from the style mask, so user-started and
+    /// app-started transitions report identically).
+    fullscreen: c_int,
     /// WINDOW_FRAME: nonzero while the window is alive but hidden by
     /// its close_policy (`open` stays 1 for the whole hidden stretch).
     hidden: c_int,
@@ -181,6 +185,7 @@ extern fn native_sdk_appkit_focus_window(host: *AppKitHost, window_id: u64) c_in
 extern fn native_sdk_appkit_close_window(host: *AppKitHost, window_id: u64) c_int;
 extern fn native_sdk_appkit_minimize_window(host: *AppKitHost, window_id: u64) c_int;
 extern fn native_sdk_appkit_hide_window(host: *AppKitHost, window_id: u64) c_int;
+extern fn native_sdk_appkit_set_window_fullscreen(host: *AppKitHost, window_id: u64, fullscreen: c_int) c_int;
 extern fn native_sdk_appkit_show_window(host: *AppKitHost, window_id: u64) c_int;
 extern fn native_sdk_appkit_set_dock_presence(host: *AppKitHost, visible: c_int) c_int;
 extern fn native_sdk_appkit_launch_at_login_status(host: *AppKitHost) c_int;
@@ -715,6 +720,7 @@ pub const MacPlatform = struct {
                 .close_window_fn = closeWindow,
                 .minimize_window_fn = minimizeWindow,
                 .hide_window_fn = hideWindow,
+                .set_window_fullscreen_fn = setWindowFullscreen,
                 .show_window_fn = showWindow,
                 .set_dock_presence_fn = setDockPresence,
                 .launch_at_login_status_fn = launchAtLoginStatus,
@@ -946,6 +952,7 @@ fn appkitCallback(context: ?*anyopaque, event: *const AppKitEvent) callconv(.c) 
                 .open = event.open != 0,
                 .focused = event.focused != 0,
                 .hidden = event.hidden != 0,
+                .fullscreen = event.fullscreen != 0,
             } });
         },
         .view_focused => state.emit(.{ .view_focused = .{
@@ -1341,6 +1348,11 @@ fn minimizeWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerr
 fn hideWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!void {
     const self: *MacPlatform = @ptrCast(@alignCast(context.?));
     if (native_sdk_appkit_hide_window(self.host, window_id) == 0) return error.WindowNotFound;
+}
+
+fn setWindowFullscreen(context: ?*anyopaque, window_id: platform_mod.WindowId, fullscreen: bool) anyerror!void {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    if (native_sdk_appkit_set_window_fullscreen(self.host, window_id, if (fullscreen) 1 else 0) == 0) return error.WindowNotFound;
 }
 
 fn showWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!void {
