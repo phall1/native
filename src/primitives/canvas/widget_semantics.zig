@@ -45,7 +45,11 @@ pub fn collectWidgetSemantics(layout: anytype, output: []WidgetSemanticsNode, sc
         }
 
         const role = semanticRole(node.widget);
-        if (node.widget.semantics.hidden) {
+        // `hidden` (not painted at all) and `decorative` (painted, but
+        // deliberately outside the accessibility tree) both drop the node
+        // AND everything under it, the way `aria-hidden` does — a
+        // decorative wrapper cannot leak its children back into the tree.
+        if (node.widget.semantics.concealedFromAccessibility()) {
             hidden_depth = node.depth;
             continue;
         }
