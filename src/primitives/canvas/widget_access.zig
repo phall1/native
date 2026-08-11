@@ -43,13 +43,17 @@ pub fn cursorForWidgetTarget(kind: WidgetKind, state: WidgetState) WidgetCursor 
     };
 }
 
+/// Focus follows the ACCESSIBILITY tree, not the paint: a widget the
+/// collector never emits cannot be a ring-focus stop, or Tab would land
+/// on a node assistive tech has no way to announce. So `decorative`
+/// (painted, unannounced) stands down here exactly like `hidden` does.
 pub fn semanticFocusable(widget: Widget, actions: WidgetActions) bool {
-    if (widget.id == 0 or widget.state.disabled or widget.semantics.hidden) return false;
+    if (widget.id == 0 or widget.state.disabled or widget.semantics.concealedFromAccessibility()) return false;
     return widget.semantics.focusable or widget.semantics.actions.focus or actions.focus or defaultFocusable(widget);
 }
 
 pub fn isFocusable(widget: Widget) bool {
-    if (widget.id == 0 or widget.state.disabled or widget.semantics.hidden) return false;
+    if (widget.id == 0 or widget.state.disabled or widget.semantics.concealedFromAccessibility()) return false;
     return widget.semantics.focusable or widget.semantics.actions.focus or defaultFocusable(widget);
 }
 
