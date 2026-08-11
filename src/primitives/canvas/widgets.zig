@@ -814,11 +814,46 @@ pub const WidgetSemantics = struct {
     list_item_index: ?u32 = null,
     list_item_count: ?u32 = null,
     actions: WidgetActions = .{},
+    /// VISIBILITY, not an accessibility annotation: the widget and its
+    /// subtree keep their layout box — the space stays reserved and
+    /// siblings do not reflow — but drop out of painting, hit-testing,
+    /// focus traversal, drag/drop, and the accessibility tree. This is
+    /// the flag for "lay out an empty slot here": a fixed-width spacer
+    /// that reserves room for an affordance that is not currently shown,
+    /// or `Ui.nav`'s retained-but-inactive pages.
+    ///
+    /// It is NOT the way to keep a decoration off a screen reader —
+    /// `hidden` paints nothing, which is why a `hidden` magnifier glyph
+    /// or caret renders as blank space. Use `decorative` for that.
     hidden: bool = false,
+    /// ACCESSIBILITY only: the widget and its subtree are omitted from
+    /// the accessibility tree and can never be focusable, while painting,
+    /// layout, hit-testing, and event routing stay exactly as they are.
+    /// The `aria-hidden` / `role="presentation"` counterpart, and the
+    /// right flag for chrome that is meaningful to the eye but noise to
+    /// assistive tech: a search field's magnifier glyph, a rendered
+    /// caret, a decorative rule beside a labeled control.
+    ///
+    /// Deliberately separate from `hidden`, which suppresses paint too.
+    /// Marking an interactive control decorative hides a working control
+    /// from assistive tech — reach for it on decoration only.
+    ///
+    /// Retained metadata that fits existing struct padding, so it costs
+    /// no bytes on the `Widget` hot path.
+    decorative: bool = false,
     focusable: bool = false,
     /// Context-menu selection policy. This is retained action metadata and
     /// occupies existing struct padding, keeping every `Widget` compact.
     context_menu_policy: WidgetContextMenuPolicy = .automatic,
+
+    /// True when this widget (and its subtree) stays out of the
+    /// accessibility tree — either because nothing paints (`hidden`) or
+    /// because the paint is decoration (`decorative`). The single
+    /// predicate every accessibility-facing walk asks, so the two flags
+    /// can never drift apart on the announcement side.
+    pub fn concealedFromAccessibility(self: WidgetSemantics) bool {
+        return self.hidden or self.decorative;
+    }
 };
 
 /// One declared context-menu entry carried on a widget (label/enabled/
