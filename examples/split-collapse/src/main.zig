@@ -212,8 +212,11 @@ pub const web_pane_anchor = "content-web-pane";
 /// pane, reflowing through the whole tween (the heavy field shape).
 var web_pane_enabled = false;
 
-fn webPanes(model: *const Model, out: []SplitCollapseApp.WebViewPane) usize {
+fn webPanes(model: *const Model, context: SplitCollapseApp.ChromeContext, out: []SplitCollapseApp.WebViewPane) usize {
     _ = model;
+    // One window, one pane — the discriminator is still honoured so the
+    // example teaches the per-window shape.
+    if (!context.is_main) return 0;
     out[0] = .{
         .label = web_pane_label,
         .anchor = web_pane_anchor,

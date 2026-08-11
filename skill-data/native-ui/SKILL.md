@@ -102,12 +102,15 @@ const shell_views = [_]native_sdk.ShellView{
     .{ .label = "preview", .kind = .webview, .parent = "app-canvas", .url = "https://example.com/", .x = 240, .y = 76, .width = 704, .height = 548 },
 };
 // view: ui.panel(.{ .grow = 1, .semantics = .{ .label = "preview-pane" } }, .{})
-fn panes(model: *const Model, out: []App.WebViewPane) usize {
+fn panes(model: *const Model, context: App.ChromeContext, out: []App.WebViewPane) usize {
+    if (!context.is_main) return 0; // this webview lives in the main window
     out[0] = .{ .label = "preview", .anchor = "preview-pane", .url = model.url(), .reload_token = model.reload_token };
     return 1;
 }
 // options: .web_panes = panes,
 ```
+
+The hook takes the same `ChromeContext` as `build_window`, because panes reconcile PER WINDOW: switch on `context.canvas_label` (or `context.is_main`) and return only the panes that window owns. Returning the whole app's pane set for every window makes each other window resolve an anchor that is not in its tree, which logs `webview pane "<name>": no canvas widget carries semantics label ...` on every rebuild.
 
 URL changes navigate; bumping `reload_token` reloads the same URL (the CenterPane/Preview-tab shape). Pane URLs must pass `security.navigation.allowed_origins`. Panes reconcile against the runtime's live webview state on every rebuild and presented frame, so shell relayouts cannot detach them. `examples/canvas-preview` is the live reference; `zig build test-canvas-preview-smoke` verifies it.
 

@@ -74,6 +74,19 @@ fn fakeEffects() app.Effects {
     return fx;
 }
 
+/// The main window's chrome context, as the runtime hands it to
+/// `webPanes` on every rebuild — the pane hook is per-WINDOW, so the
+/// unit tests must ask it the same question the runtime does.
+fn mainPaneContext() WorkbenchApp.ChromeContext {
+    return .{
+        .canvas_label = app.canvas_label,
+        .window_id = 1,
+        .size = geometry.SizeF.init(1280, 800),
+        .tokens = .{},
+        .is_main = true,
+    };
+}
+
 fn expectTerminalCursorPaint(harness: *native_sdk.TestHarness(), terminal_id: canvas.ObjectId, expected: CursorPaintKind) !void {
     const cursor_id = canvas.terminal_grid.paintIdBase(terminal_id) + 0x61_0002;
     const command = (try harness.runtime.canvasDisplayList(1, app.canvas_label)).findCommandById(cursor_id) orelse return error.TestExpectedCursor;
@@ -186,7 +199,7 @@ test "the address bar commits a navigation the web pane picks up" {
     var panes: [1]WorkbenchApp.WebViewPane = undefined;
 
     // Boot: the home page is the pane's URL, and back/forward are dead.
-    try testing.expectEqual(@as(usize, 1), app.webPanes(&model, &panes));
+    try testing.expectEqual(@as(usize, 1), app.webPanes(&model, mainPaneContext(), &panes));
     try testing.expectEqualStrings(app.web_view_label, panes[0].label);
     try testing.expectEqualStrings(app.web_pane_anchor, panes[0].anchor orelse "");
     try testing.expectEqualStrings(app.home_url, panes[0].url);
@@ -196,12 +209,12 @@ test "the address bar commits a navigation the web pane picks up" {
     // Typing alone navigates NOTHING: the pane follows committed
     // history, never the in-progress edit.
     app.update(&model, .{ .address_edit = .{ .insert_text = "!" } }, &fx);
-    _ = app.webPanes(&model, &panes);
+    _ = app.webPanes(&model, mainPaneContext(), &panes);
     try testing.expectEqualStrings(app.home_url, panes[0].url);
 
     // Submitting commits it.
     app.update(&model, .navigate, &fx);
-    _ = app.webPanes(&model, &panes);
+    _ = app.webPanes(&model, mainPaneContext(), &panes);
     try testing.expectEqualStrings("https://ziglang.org!", panes[0].url);
     try testing.expect(!model.back_disabled());
     try testing.expect(model.forward_disabled());
@@ -297,10 +310,10 @@ test "reload bumps the pane token without changing the URL" {
     var model = bootedModel(&fx);
     var panes: [1]WorkbenchApp.WebViewPane = undefined;
 
-    _ = app.webPanes(&model, &panes);
+    _ = app.webPanes(&model, mainPaneContext(), &panes);
     const before = panes[0].reload_token;
     app.update(&model, .reload, &fx);
-    _ = app.webPanes(&model, &panes);
+    _ = app.webPanes(&model, mainPaneContext(), &panes);
     try testing.expect(panes[0].reload_token != before);
     try testing.expectEqualStrings(app.home_url, panes[0].url);
 }
