@@ -971,7 +971,12 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
             return @intFromFloat(number);
         }
 
-        fn webPanesAdapter(model: *const Model, out: []App.WebViewPane) usize {
+        fn webPanesAdapter(model: *const Model, context: App.ChromeContext, out: []App.WebViewPane) usize {
+            // The TypeScript `webPanes(model)` contract names no window:
+            // its panes live in the main window, so secondary windows
+            // reconcile an empty set instead of resolving anchors their
+            // widget trees do not contain.
+            if (!context.is_main) return 0;
             const params = @typeInfo(@TypeOf(Model.webPanes)).@"fn".params;
             const raw = if (comptime params.len == 1) model.webPanes() else model.webPanes(core.rt.frameAllocator());
             const count = @min(raw.len, @min(out.len, pane_strings.len));
@@ -2577,7 +2582,13 @@ test "TypeScript pane adapter copies result bytes and preserves bounded fraction
     comptime Adapter.validateWebPanesHelper();
     const model = WebPanesAdapterTestCore.Model{};
     var panes: [4]Adapter.App.WebViewPane = undefined;
-    try std.testing.expectEqual(@as(usize, 4), Adapter.webPanesAdapter(&model, &panes));
+    const main_window: Adapter.App.ChromeContext = .{ .canvas_label = "main", .window_id = 1, .size = .{ .width = 400, .height = 300 }, .tokens = .{}, .is_main = true };
+    var secondary_window = main_window;
+    secondary_window.is_main = false;
+    // The TypeScript contract names no window: its panes are the main
+    // window's, and a secondary window reconciles none.
+    try std.testing.expectEqual(@as(usize, 0), Adapter.webPanesAdapter(&model, secondary_window, &panes));
+    try std.testing.expectEqual(@as(usize, 4), Adapter.webPanesAdapter(&model, main_window, &panes));
     const saved = panes[0];
     WebPanesAdapterTestCore.label[0] = 'x';
     WebPanesAdapterTestCore.anchor[0] = 'x';
@@ -2592,10 +2603,10 @@ test "TypeScript pane adapter copies result bytes and preserves bounded fraction
     try std.testing.expectEqualStrings("zero://app", saved.url);
     try std.testing.expectEqual(@import("geometry").RectF.init(-2.125, 4.5, 100.25, 48.5), saved.frame);
     try std.testing.expectEqual(@as(u64, 9007199254740991), saved.reload_token);
-    try std.testing.expectEqual(@as(usize, 1), Adapter.webPanesAdapter(&model, panes[0..1]));
+    try std.testing.expectEqual(@as(usize, 1), Adapter.webPanesAdapter(&model, main_window, panes[0..1]));
     WebPanesAdapterTestCore.panes[0].anchor = null;
     defer WebPanesAdapterTestCore.panes[0].anchor = &WebPanesAdapterTestCore.anchor;
-    _ = Adapter.webPanesAdapter(&model, &panes);
+    _ = Adapter.webPanesAdapter(&model, main_window, &panes);
     try std.testing.expect(panes[0].anchor == null);
 }
 

@@ -227,7 +227,10 @@ pub const CompiledWorkbenchView = canvas.CompiledMarkupView(Model, Msg, workbenc
 /// The web pane: snapped to the markup's anchor column every presented
 /// frame — the split divider reflows live web content. Setting `url`
 /// navigates; bumping `reload_token` reloads the same URL.
-pub fn webPanes(model: *const Model, out: []WorkbenchApp.WebViewPane) usize {
+pub fn webPanes(model: *const Model, context: WorkbenchApp.ChromeContext, out: []WorkbenchApp.WebViewPane) usize {
+    // The browser pane belongs to the main window's scene; any other
+    // window owns no pane.
+    if (!context.is_main) return 0;
     out[0] = .{
         .label = web_view_label,
         .anchor = web_pane_anchor,
