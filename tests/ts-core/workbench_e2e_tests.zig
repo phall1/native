@@ -40,8 +40,9 @@ fn compare(native: *const reference.Model, model: *const core.Model) !void {
     inline for (.{ "address", "currentUrl" }) |name| try testing.expectEqualStrings(@field(reference.Model, name)(native), @field(core.Model, name)(model, arena.allocator()));
     inline for (.{ "back_disabled", "forward_disabled" }) |name| try testing.expectEqual(@field(reference.Model, name)(native), @field(core.Model, name)(model));
     try testing.expectEqual(@as(f64, native.titlebar_band()), model.titlebar_band());
-    var panes: [1]sdk.UiApp(reference.Model, reference.Msg).WebViewPane = undefined;
-    _ = reference.webPanes(native, &panes);
+    const ReferenceApp = sdk.UiApp(reference.Model, reference.Msg);
+    var panes: [1]ReferenceApp.WebViewPane = undefined;
+    _ = reference.webPanes(native, .{ .canvas_label = reference.canvas_label, .window_id = 1, .size = sdk.geometry.SizeF.init(0, 0), .tokens = .{}, .is_main = true }, &panes);
     const port = model.webPanes(arena.allocator())[0];
     try testing.expectEqualStrings(panes[0].label, port.label);
     try testing.expectEqualStrings(panes[0].anchor.?, port.anchor.?);

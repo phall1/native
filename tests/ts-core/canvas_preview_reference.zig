@@ -131,7 +131,10 @@ pub fn view(ui: *PreviewUi, model: *const Model) PreviewUi.Node {
 
 // ------------------------------------------------------ webview pane seam
 
-pub fn panes(model: *const Model, out: []PreviewApp.WebViewPane) usize {
+pub fn panes(model: *const Model, context: PreviewApp.ChromeContext, out: []PreviewApp.WebViewPane) usize {
+    // The preview webview is declared in the main window's scene, so
+    // only the main window's rebuild has an anchor widget for it.
+    if (!context.is_main) return 0;
     out[0] = .{
         .label = webview_label,
         .anchor = pane_anchor,

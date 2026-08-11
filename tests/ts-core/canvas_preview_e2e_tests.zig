@@ -141,7 +141,8 @@ test "compiled model pane bytes and tray records survive result reset and unrela
     const app_state = try createApp();
     defer app_state.destroy();
     var panes: [4]PreviewApp.WebViewPane = undefined;
-    try testing.expectEqual(@as(usize, 1), app_state.options.web_panes.?(&app_state.model, &panes));
+    const main_window: PreviewApp.ChromeContext = .{ .canvas_label = "preview-canvas", .window_id = 1, .size = geometry.SizeF.init(960, 640), .tokens = .{}, .is_main = true };
+    try testing.expectEqual(@as(usize, 1), app_state.options.web_panes.?(&app_state.model, main_window, &panes));
     core.rt.frameReset();
     const saved = panes[0];
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -156,7 +157,7 @@ test "compiled model pane bytes and tray records survive result reset and unrela
         try testing.expectEqualStrings(main.example_url, saved.url);
         try testing.expectEqual(@as(u64, 0), saved.reload_token);
     }
-    try testing.expectEqual(@as(usize, 0), app_state.options.web_panes.?(&app_state.model, panes[0..0]));
+    try testing.expectEqual(@as(usize, 0), app_state.options.web_panes.?(&app_state.model, main_window, panes[0..0]));
 }
 test "compiled pane and tray reconciliation retains native navigation counts, resizing and frame ownership" {
     const app_state = try createApp();
