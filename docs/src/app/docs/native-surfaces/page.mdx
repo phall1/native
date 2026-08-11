@@ -104,7 +104,9 @@ fn view(ui: *Ui, model: *const Model) Ui.Node {
     });
 }
 
-fn panes(model: *const Model, out: []PreviewApp.WebViewPane) usize {
+fn panes(model: *const Model, context: PreviewApp.ChromeContext, out: []PreviewApp.WebViewPane) usize {
+    // Panes reconcile per window; this webview lives in the main one.
+    if (!context.is_main) return 0;
     out[0] = .{
         .label = "preview",
         .anchor = "preview-pane",
@@ -114,6 +116,8 @@ fn panes(model: *const Model, out: []PreviewApp.WebViewPane) usize {
     return 1;
 }
 ```
+
+The hook takes the same `ChromeContext` as `chrome.build_window`, naming the window being reconciled: switch on `context.canvas_label` (or `context.is_main`) and return only that window's panes. A webview belongs to one window, so answering with the whole app's pane set makes every other window resolve an anchor its widget tree does not contain — correct behaviour, but a `no canvas widget carries semantics label ...` warning on every rebuild of every other window.
 
 Panes re-apply after every rebuild and presented frame, reconciling against the runtime's actual webview state, so shell relayouts (window restores, resizes) cannot leave the webview detached from its anchor. Pane URLs are subject to `security.navigation.allowed_origins`. A scene whose only webviews are children like this never grows an implicit `main` webview — the window stays canvas-first. The seam is engine-agnostic (it rides the same `PlatformServices` webview surface both the system and Chromium hosts implement), though `gpu_surface` canvases currently require the system engine on macOS. `examples/canvas-preview` is the live proof, with a smoke test at `zig build test-canvas-preview-smoke`.
 
