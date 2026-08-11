@@ -96,7 +96,7 @@ pub fn auditWidgetA11y(layout: WidgetLayoutTree, storage: []A11yAuditFinding) A1
 
     var index: usize = 0;
     while (index < node_count) : (index += 1) {
-        if (!nodePainted(layout, index)) continue;
+        if (!nodeAnnounced(layout, index)) continue;
         auditMissingLabel(layout, index, &sink);
         auditFocusReachable(layout, index, &sink);
         auditDuplicateSiblingLabel(layout, index, node_count, &sink);
@@ -118,14 +118,16 @@ const FindingSink = struct {
     }
 };
 
-/// Announced at all: hidden subtrees and fully transparent subtrees are
-/// removed from both the frame and the semantic tree, so the audit stays
+/// Announced at all: hidden subtrees, DECORATIVE subtrees, and fully
+/// transparent subtrees never reach the semantic tree, so the audit stays
 /// quiet about them (the semantics collector skips them the same way).
-fn nodePainted(layout: WidgetLayoutTree, node_index: usize) bool {
+/// `decorative` is the deliberate opt-out — a magnifier glyph the author
+/// declared as decoration must not then be reported as an unnamed image.
+fn nodeAnnounced(layout: WidgetLayoutTree, node_index: usize) bool {
     var current: ?usize = node_index;
     while (current) |index| {
         const widget = layout.nodes[index].widget;
-        if (widget.semantics.hidden) return false;
+        if (widget.semantics.concealedFromAccessibility()) return false;
         if (widget.opacity <= 0) return false;
         current = layout.nodes[index].parent_index;
     }
@@ -177,7 +179,9 @@ fn roleAnnouncesContent(role: WidgetRole) bool {
 
 fn subtreeHasText(widget: Widget) bool {
     for (widget.children) |child| {
-        if (child.semantics.hidden) continue;
+        // Unannounced children (hidden or decorative) contribute nothing
+        // to the row's spoken name — the collector never emits them.
+        if (child.semantics.concealedFromAccessibility()) continue;
         if (!allBlank(child.semantics.label) or !allBlank(child.text)) return true;
         if (subtreeHasText(child)) return true;
     }
@@ -292,7 +296,7 @@ fn auditDuplicateSiblingLabel(layout: WidgetLayoutTree, node_index: usize, node_
         const other = layout.nodes[earlier];
         if (other.parent_index != parent_index) continue;
         if (other.widget.id == 0) continue;
-        if (!nodePainted(layout, earlier)) continue;
+        if (!nodeAnnounced(layout, earlier)) continue;
         if (!frameHasArea(other.frame)) continue;
         if (widget_semantics.semanticRole(other.widget) != role) continue;
         if (!std.mem.eql(u8, announcedName(other.widget), name)) continue;
