@@ -821,7 +821,22 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             /// Engine-agnostic: the webview backend is whatever the build
             /// selected (`-Dweb-engine=system|cef`); platforms without
             /// child webviews log a warning and continue.
-            web_panes: ?*const fn (model: *const ModelT, out: []WebViewPane) usize = null,
+            ///
+            /// Takes the same `ChromeContext` as `build_window`, and for
+            /// the same reason: panes are reconciled PER WINDOW, so a
+            /// signature that could not say which window it was being
+            /// asked about had to answer with the whole app's pane set
+            /// every time. A webview belongs to exactly one window, so
+            /// every OTHER window's rebuild then resolved that pane's
+            /// anchor against a widget tree that does not contain it and
+            /// logged "no canvas widget carries semantics label ..." —
+            /// correct behaviour (the pane is found and snapped in the
+            /// window that owns it) buried under a warning on every
+            /// rebuild of every other window. Switch on
+            /// `context.canvas_label` (or `context.is_main`) and return
+            /// only the panes belonging to that window; returning 0 is
+            /// the right answer for a window that hosts none.
+            web_panes: ?*const fn (model: *const ModelT, context: ChromeContext, out: []WebViewPane) usize = null,
             /// Menu-bar extra installed once, on the installing frame.
             /// macOS-proven (`NSStatusItem`); platforms without a
             /// status-bar service log a warning and continue.
@@ -2201,7 +2216,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             }
             try self.scheduleAnimations(runtime, window_id);
             try self.scheduleLayoutTweens(runtime, window_id);
-            self.applyWebPanes(runtime, window_id, layout);
+            self.applyWebPanes(runtime, window_id, self.options.canvas_label, self.canvas_size, tokens, layout);
             try self.applyTerminalLayout(runtime, window_id, layout, tokens);
             self.applyStatusItem(runtime);
             self.applyVideoDeclaration(runtime);
@@ -3134,7 +3149,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             // would have kept whatever grid they were born with even
             // once its cells painted.
             try self.applyTerminalLayout(runtime, slot.window_id, layout, tokens);
-            self.applyWebPanes(runtime, slot.window_id, layout);
+            self.applyWebPanes(runtime, slot.window_id, slot.canvasLabel(), slot.canvas_size, tokens, layout);
             slot.tree = tree;
             slot.arena_index = next_index;
             live_tree_reset = false;
@@ -3281,10 +3296,28 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// frame, URL, or reload token changed. Failures degrade to a
         /// logged warning so a missing webview or a denied origin never
         /// takes the render loop down.
-        fn applyWebPanes(self: *Self, runtime: *Runtime, window_id: platform.WindowId, layout: canvas.WidgetLayoutTree) void {
+        fn applyWebPanes(
+            self: *Self,
+            runtime: *Runtime,
+            window_id: platform.WindowId,
+            canvas_label: []const u8,
+            canvas_size: geometry.SizeF,
+            tokens: canvas.DesignTokens,
+            layout: canvas.WidgetLayoutTree,
+        ) void {
             const panes_fn = self.options.web_panes orelse return;
             var panes: [max_web_panes]WebViewPane = undefined;
-            const count = @min(panes_fn(&self.model, &panes), max_web_panes);
+            // The window discriminator, built exactly like
+            // `installChromeDisplayList`'s so an app switches on ONE
+            // context shape whichever per-window hook it implements.
+            const declared = panes_fn(&self.model, .{
+                .canvas_label = canvas_label,
+                .window_id = window_id,
+                .size = canvas_size,
+                .tokens = tokens,
+                .is_main = std.mem.eql(u8, canvas_label, self.options.canvas_label),
+            }, &panes);
+            const count = @min(declared, max_web_panes);
             for (panes[0..count]) |pane| self.applyWebPane(runtime, window_id, layout, pane);
         }
 
@@ -4724,7 +4757,14 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 // canvas, so the reconciliation ride-along here converges
                 // without a dedicated event.
                 if (runtime.canvasWidgetLayout(frame_event.window_id, self.options.canvas_label)) |layout| {
-                    self.applyWebPanes(runtime, frame_event.window_id, layout);
+                    self.applyWebPanes(
+                        runtime,
+                        frame_event.window_id,
+                        self.options.canvas_label,
+                        self.canvas_size,
+                        runtime.tokensWithTextMeasure(self.effectiveTokens()),
+                        layout,
+                    );
                 } else |_| {}
             }
             // Terminal outbound pacing: a child that read without
