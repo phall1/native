@@ -3671,7 +3671,10 @@ fn previewView(ui: *PreviewApp.Ui, model: *const PreviewModel) PreviewApp.Ui.Nod
     });
 }
 
-fn previewPanes(model: *const PreviewModel, out: []PreviewApp.WebViewPane) usize {
+fn previewPanes(model: *const PreviewModel, context: PreviewApp.ChromeContext, out: []PreviewApp.WebViewPane) usize {
+    // The preview webview lives in the main window; other windows own
+    // no pane and say so.
+    if (!context.is_main) return 0;
     out[0] = .{
         .label = "preview",
         .anchor = preview_pane_anchor,
