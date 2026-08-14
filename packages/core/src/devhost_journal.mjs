@@ -6,7 +6,7 @@ import fs from "node:fs";
 // Headers identify absent logic-host chrome versus captured native queries;
 // sealed record totals include complete window chrome results.
 export const journalFormatFingerprint = 0xbd971022a49712f1n;
-export const automationProtocolFingerprint = 0x51f7889bbe3305e7n;
+export const automationProtocolFingerprint = 0x7a2ae641330e8334n;
 
 const requestKeyBase = 0x5453525100000000n;
 const textEncoder = new TextEncoder();
