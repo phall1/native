@@ -4,7 +4,7 @@ import fs from "node:fs";
 // both values so a runtime wire change cannot silently strand dev-host
 // recordings.
 export const journalFormatFingerprint = 0x7f56860e36c25e39n;
-export const automationProtocolFingerprint = 0x096c8aa4730c11ecn;
+export const automationProtocolFingerprint = 0x59d66f39803fd602n;
 
 const requestKeyBase = 0x5453525100000000n;
 const textEncoder = new TextEncoder();
