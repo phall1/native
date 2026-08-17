@@ -5616,18 +5616,22 @@ test "PTY name bindings own bytes and retain ended identities without restrictin
     try std.testing.expectEqual(@as(usize, 1), fx.pendingPtyCount());
     // Bound ended grids occupy the documented budget. Exhaustion still
     // delivers the normal one rejected terminal instead of aliasing a screen.
-    for ([_][]const u8{ "second", "third", "fourth" }) |name_key| {
+    // Every remaining slot of the native table (`max_effect_ptys`) takes
+    // one bound ended grid.
+    for (1..runtime_effects.max_effect_ptys) |i| {
+        var name_buffer: [24]u8 = undefined;
+        const name_key = try std.fmt.bufPrint(&name_buffer, "bound-{d}", .{i});
         Host.issuePtySpawn(&fx, name_key, 0, 80, 24, "", &.{"/bin/sh"});
         const key = Host.resolvePtyKey(name_key);
         try std.testing.expect(key != 0 and key != original);
         try fx.feedPtyExit(key, 0, 0, .exited, 0);
         _ = fx.takeMsg();
     }
-    Host.issuePtySpawn(&fx, "fifth", 0, 80, 24, "", &.{"/bin/sh"});
+    Host.issuePtySpawn(&fx, "overflow", 0, 80, 24, "", &.{"/bin/sh"});
     const full = fx.takeMsg().?.event;
     try std.testing.expectEqual(Core.Reason.rejected, full.reason);
-    try std.testing.expectEqualStrings("fifth", full.key);
-    try std.testing.expectEqual(@as(u64, 0), Host.resolvePtyKey("fifth"));
+    try std.testing.expectEqualStrings("overflow", full.key);
+    try std.testing.expectEqual(@as(u64, 0), Host.resolvePtyKey("overflow"));
     Host.boot();
     try std.testing.expectEqual(@as(u64, 0), Host.resolvePtyKey("sh\xff\x00"));
 }

@@ -863,14 +863,16 @@ function playbackHttpUri(url: Uint8Array): boolean {
 
 /** PTY operation 9 plans spawn, lookup, resize, named binding and event routing
  * (actions 0..4). Header: action/count/blocked/kind/tag/key length/reserved,
- * opaque event u64, f64 cols/rows, then key and [used,bound,tag,key length,key]
- * slots. Ended bound identities remain reserved. Native owns key storage,
+ * opaque event u64, f64 cols/rows, then key and one [used,bound,tag,key length,key]
+ * record per native slot (count in byte 2). Ended bound identities remain reserved. Native owns key storage,
  * staged refusal lifetimes and the OS transport; all result bytes are owned.
  */
 function ptyCoordinationPolicy(request: Uint8Array): Uint8Array {
-  if (request.length < 32 || request[1]! > 4 || request[2] !== 4 || request[3]! > 1 || request[7] !== 0 ||
+  if (request.length < 32 || request[1]! > 4 || request[2] === 0 || request[2]! > 64 || request[3]! > 1 || request[7] !== 0 ||
       (request[1] === 4 && request[4]! > 1)) throw new Error("invalid PTY coordination request");
-  const action = request[1]!, length = request[6]!;
+  // The slot count is the native table's (`max_effect_ptys`); slot indices
+  // stay below 255, the result's "no slot" sentinel.
+  const action = request[1]!, length = request[6]!, slots = request[2]!;
   const wire = new DataView(request.buffer, request.byteOffset, request.byteLength);
   const result = new Uint8Array(16), out = new DataView(result.buffer); result[0] = 255; result[1] = request[5]!;
   const cols = wire.getFloat64(16, true), rows = wire.getFloat64(24, true);
@@ -879,7 +881,7 @@ function ptyCoordinationPolicy(request: Uint8Array): Uint8Array {
   let at = 32 + length, live = -1, bound = -1, free = -1, binding = -1;
   if (at > request.length) throw new Error("truncated PTY key");
   const positions: number[] = [];
-  for (let slot = 0; slot < 4; slot++) {
+  for (let slot = 0; slot < slots; slot++) {
     if (at + 4 > request.length || request[at]! > 1 || request[at + 1]! > 1) throw new Error("invalid PTY slot");
     const size = request[at + 3]!; positions.push(at);
     if (at + 4 + size > request.length) throw new Error("truncated PTY slot key");
@@ -901,7 +903,7 @@ function ptyCoordinationPolicy(request: Uint8Array): Uint8Array {
   else if (action === 3) { selected = binding; if (selected >= 0) result[3] = 1; }
   else {
     const slot = wire.getUint32(8, true);
-    if (wire.getUint32(12, true) !== 0x54535054 || slot >= 4 || request[positions[slot]!] !== 1)
+    if (wire.getUint32(12, true) !== 0x54535054 || slot >= slots || request[positions[slot]!] !== 1)
       throw new Error("PTY event has no tracked owner");
     selected = slot; result[2] = request[4] === 1 ? 1 : 0;
   }
