@@ -54,6 +54,17 @@ const ui_app_log = std.log.scoped(.zero_ui_app);
 /// Maximum number of webview panes a `UiApp` can drive (`Options.web_panes`).
 pub const max_web_panes: usize = 4;
 
+/// Per-thread scratch for composing chrome around a widget display list.
+/// Packed-cell builders own a frame-sized cell store, so keeping both
+/// builders on the stack can overflow deeper app/test call paths.
+const ChromeDisplayScratch = struct {
+    chrome_commands: [canvas_limits.max_canvas_commands_per_view]canvas.CanvasCommand = undefined,
+    commands: [canvas_limits.max_canvas_commands_per_view]canvas.CanvasCommand = undefined,
+    chrome_builder: canvas.Builder = undefined,
+    builder: canvas.Builder = undefined,
+};
+const chrome_display_scratch = canvas.lazy_tls.LazyTls(ChromeDisplayScratch);
+
 /// One queued `on-terminal` dispatch: the terminal widget's id and the
 /// post-change view state the reconcile produced (see
 /// `applyTerminalLayout`). `id == 0` marks an empty slot.
@@ -3430,10 +3441,11 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             tokens: canvas.DesignTokens,
             tree_current: *bool,
         ) anyerror!void {
-            var chrome_commands: [canvas_limits.max_canvas_commands_per_view]canvas.CanvasCommand = undefined;
-            var chrome_builder = canvas.Builder.init(&chrome_commands);
+            const scratch = chrome_display_scratch.get();
+            scratch.chrome_builder.initAt(&scratch.chrome_commands);
+            const chrome_builder = &scratch.chrome_builder;
             if (chrome.build_window) |build_window| {
-                try build_window(&self.model, &chrome_builder, .{
+                try build_window(&self.model, chrome_builder, .{
                     .canvas_label = canvas_label,
                     .window_id = window_id,
                     .size = canvas_size,
@@ -3441,7 +3453,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     .is_main = std.mem.eql(u8, canvas_label, self.options.canvas_label),
                 });
             } else {
-                try chrome.build(&self.model, &chrome_builder, canvas_size, tokens);
+                try chrome.build(&self.model, chrome_builder, canvas_size, tokens);
             }
             const chrome_list = chrome_builder.displayList();
             if (chrome.variable_prefix) {
@@ -3455,10 +3467,10 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             }
             const prefix_len = chrome_list.commands.len - chrome.suffix_commands;
 
-            var commands: [canvas_limits.max_canvas_commands_per_view]canvas.CanvasCommand = undefined;
-            var builder = canvas.Builder.init(&commands);
+            scratch.builder.initAt(&scratch.commands);
+            const builder = &scratch.builder;
             for (chrome_list.commands[0..prefix_len]) |command| try builder.append(command);
-            try layout.emitDisplayList(&builder, tokens);
+            try layout.emitDisplayList(builder, tokens);
             for (chrome_list.commands[prefix_len..]) |command| try builder.append(command);
 
             _ = try runtime.setCanvasDisplayList(window_id, canvas_label, builder.displayList());
