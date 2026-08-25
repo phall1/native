@@ -2116,7 +2116,9 @@ test "the quiet-surface knob silences the hover wash and nothing else" {
 
 test "actionable layout containers paint the row hover and pressed ladder in both emit paths" {
     const tokens = DesignTokens{};
-    inline for (.{ WidgetKind.row, WidgetKind.column, WidgetKind.stack }) |kind| {
+    // Builder owns a frame-sized packed-cell store; keep one iteration's
+    // builders live instead of materializing all three inline on the stack.
+    for ([_]WidgetKind{ .row, .column, .stack }) |kind| {
         const base = Widget{
             .id = 75,
             .kind = kind,
