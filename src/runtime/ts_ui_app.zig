@@ -167,22 +167,28 @@ pub fn TsUiApp(comptime core: type) type {
             outcome_handle: ?*runtime_effects.ChannelHandle = null,
         };
 
-        /// One effects host binding must carry both app services and the
-        /// framework-owned persistence verbs when an app enables both. The
-        /// reserved persistence names route to that binding; every other
-        /// command and the worker completion lifecycle stay with the app
-        /// service carrier.
-        const HostCallMux = struct {
-            primary: runtime_effects.HostCallBinding,
-            persist: runtime_effects.HostCallBinding,
+        /// Compose two named-command hosts without hiding either host's
+        /// completion or lifecycle seams. Names accepted by `route_fn` go to
+        /// `routed`; every other name goes to `default`. Cancellation fans out
+        /// because it carries only a key, while polling alternates so one busy
+        /// host cannot starve the other.
+        ///
+        /// Generated runners use this for persistence plus services. Native
+        /// extensions can use the same type to reserve an app namespace while
+        /// leaving generated service bindings intact.
+        pub const HostCallMux = struct {
+            default: runtime_effects.HostCallBinding,
+            routed: runtime_effects.HostCallBinding,
+            route_fn: *const fn (name: []const u8) bool,
+            poll_routed_first: bool = false,
 
-            fn binding(self: *HostCallMux) runtime_effects.HostCallBinding {
+            pub fn binding(self: *HostCallMux) runtime_effects.HostCallBinding {
                 return .{
                     .context = self,
                     .send_fn = send,
                     .request_fn = request,
                     .cancel_fn = cancel,
-                    .reject_duplicate_keys = self.primary.reject_duplicate_keys,
+                    .reject_duplicate_keys = self.default.reject_duplicate_keys or self.routed.reject_duplicate_keys,
                     .poll_fn = poll,
                     .pending_fn = pending,
                     .bind_services_fn = bindServices,
@@ -191,57 +197,70 @@ pub fn TsUiApp(comptime core: type) type {
                 };
             }
 
-            fn persistenceName(name: []const u8) bool {
-                return std.mem.eql(u8, name, "core.persist") or std.mem.eql(u8, name, "core.persist.flush");
-            }
-
             fn send(context: *anyopaque, name: []const u8, payload: []const u8) void {
                 const self: *HostCallMux = @ptrCast(@alignCast(context));
-                const target = if (persistenceName(name)) self.persist else self.primary;
+                const target = if (self.route_fn(name)) self.routed else self.default;
                 target.send_fn(target.context, name, payload);
             }
 
             fn request(context: *anyopaque, name: []const u8, key: u64, payload: []const u8) void {
                 const self: *HostCallMux = @ptrCast(@alignCast(context));
-                const target = if (persistenceName(name)) self.persist else self.primary;
+                const target = if (self.route_fn(name)) self.routed else self.default;
                 target.request_fn(target.context, name, key, payload);
             }
 
             fn cancel(context: *anyopaque, key: u64) void {
                 const self: *HostCallMux = @ptrCast(@alignCast(context));
-                if (self.primary.cancel_fn) |cancel_fn| cancel_fn(self.primary.context, key);
+                if (self.default.cancel_fn) |cancel_fn| cancel_fn(self.default.context, key);
+                if (self.routed.cancel_fn) |cancel_fn| cancel_fn(self.routed.context, key);
             }
 
             fn poll(context: *anyopaque) ?runtime_effects.HostCallCompletion {
                 const self: *HostCallMux = @ptrCast(@alignCast(context));
-                const poll_fn = self.primary.poll_fn orelse return null;
-                return poll_fn(self.primary.context);
+                const first = if (self.poll_routed_first) self.routed else self.default;
+                const second = if (self.poll_routed_first) self.default else self.routed;
+                self.poll_routed_first = !self.poll_routed_first;
+                if (pollOne(first)) |completion| return completion;
+                return pollOne(second);
+            }
+
+            fn pollOne(binding_value: runtime_effects.HostCallBinding) ?runtime_effects.HostCallCompletion {
+                const poll_fn = binding_value.poll_fn orelse return null;
+                return poll_fn(binding_value.context);
             }
 
             fn pending(context: *anyopaque) bool {
                 const self: *HostCallMux = @ptrCast(@alignCast(context));
-                const pending_fn = self.primary.pending_fn orelse return false;
-                return pending_fn(self.primary.context);
+                return isPending(self.default) or isPending(self.routed);
+            }
+
+            fn isPending(binding_value: runtime_effects.HostCallBinding) bool {
+                const pending_fn = binding_value.pending_fn orelse return false;
+                return pending_fn(binding_value.context);
             }
 
             fn bindServices(context: *anyopaque, services: *const platform.PlatformServices) void {
                 const self: *HostCallMux = @ptrCast(@alignCast(context));
-                if (self.primary.bind_services_fn) |bind_fn| bind_fn(self.primary.context, services);
-                if (self.persist.bind_services_fn) |bind_fn| bind_fn(self.persist.context, services);
+                if (self.default.bind_services_fn) |bind_fn| bind_fn(self.default.context, services);
+                if (self.routed.bind_services_fn) |bind_fn| bind_fn(self.routed.context, services);
             }
 
             fn bindChannels(context: *anyopaque, channels: runtime_effects.HostChannelBinding) void {
                 const self: *HostCallMux = @ptrCast(@alignCast(context));
-                if (self.primary.bind_channels_fn) |bind_fn| bind_fn(self.primary.context, channels);
-                if (self.persist.bind_channels_fn) |bind_fn| bind_fn(self.persist.context, channels);
+                if (self.default.bind_channels_fn) |bind_fn| bind_fn(self.default.context, channels);
+                if (self.routed.bind_channels_fn) |bind_fn| bind_fn(self.routed.context, channels);
             }
 
             fn shutdown(context: *anyopaque) void {
                 const self: *HostCallMux = @ptrCast(@alignCast(context));
-                if (self.primary.shutdown_fn) |shutdown_fn| shutdown_fn(self.primary.context);
-                if (self.persist.shutdown_fn) |shutdown_fn| shutdown_fn(self.persist.context);
+                if (self.default.shutdown_fn) |shutdown_fn| shutdown_fn(self.default.context);
+                if (self.routed.shutdown_fn) |shutdown_fn| shutdown_fn(self.routed.context);
             }
         };
+
+        fn persistenceHostCall(name: []const u8) bool {
+            return std.mem.eql(u8, name, "core.persist") or std.mem.eql(u8, name, "core.persist.flush");
+        }
 
         /// Build-time manifest/wire fence for the three persistence routes.
         /// The generated runner calls this with app.zon's comptime strings so
@@ -371,8 +390,9 @@ pub fn TsUiApp(comptime core: type) type {
             host_calls_store = core_options.host_calls;
             persist_options_store = core_options.persist;
             host_call_mux_store = if (core_options.host_calls != null and core_options.persist != null) .{
-                .primary = core_options.host_calls.?,
-                .persist = core_options.persist.?.binding,
+                .default = core_options.host_calls.?,
+                .routed = core_options.persist.?.binding,
+                .route_fn = persistenceHostCall,
             } else null;
             if (core_options.env_values.len > 0 and comptime !@hasDecl(core, "envMsgs")) {
                 @panic("TsUiApp received env_values but the core exports no envMsgs channel - declare `export const envMsgs = [{ env: \"NAME\", msg: \"<arm>\" }] as const` in core.ts");
@@ -1887,4 +1907,103 @@ test "TypeScript window close commands refuse missing and unmapped command callb
     Adapter.command_store = mappedWindowCloseCommand;
     try std.testing.expectError(error.UnmappedCommand, Adapter.windowCloseMsg("settings.missing"));
     try std.testing.expectEqual(WindowCloseCommandTestCore.Msg.closed, (try Adapter.windowCloseMsg("settings.closed")).?);
+}
+
+const HostCallMuxTestCore = struct {
+    pub const Msg = union(enum) { noop, other };
+    pub const Model = struct {};
+};
+
+const HostCallMuxTestHost = struct {
+    name_buffer: [64]u8 = undefined,
+    name_len: usize = 0,
+    request_key: u64 = 0,
+    cancel_count: usize = 0,
+    completion: ?runtime_effects.HostCallCompletion = null,
+
+    fn binding(self: *HostCallMuxTestHost, reject_duplicates: bool) runtime_effects.HostCallBinding {
+        return .{
+            .context = self,
+            .send_fn = send,
+            .request_fn = request,
+            .cancel_fn = cancel,
+            .reject_duplicate_keys = reject_duplicates,
+            .poll_fn = poll,
+            .pending_fn = pending,
+        };
+    }
+
+    fn remember(self: *HostCallMuxTestHost, value: []const u8) void {
+        self.name_len = @min(value.len, self.name_buffer.len);
+        @memcpy(self.name_buffer[0..self.name_len], value[0..self.name_len]);
+    }
+
+    fn name(self: *const HostCallMuxTestHost) []const u8 {
+        return self.name_buffer[0..self.name_len];
+    }
+
+    fn send(context: *anyopaque, name_value: []const u8, _: []const u8) void {
+        const self: *HostCallMuxTestHost = @ptrCast(@alignCast(context));
+        self.remember(name_value);
+    }
+
+    fn request(context: *anyopaque, name_value: []const u8, key: u64, _: []const u8) void {
+        const self: *HostCallMuxTestHost = @ptrCast(@alignCast(context));
+        self.remember(name_value);
+        self.request_key = key;
+    }
+
+    fn cancel(context: *anyopaque, _: u64) void {
+        const self: *HostCallMuxTestHost = @ptrCast(@alignCast(context));
+        self.cancel_count += 1;
+    }
+
+    fn poll(context: *anyopaque) ?runtime_effects.HostCallCompletion {
+        const self: *HostCallMuxTestHost = @ptrCast(@alignCast(context));
+        const completion = self.completion;
+        self.completion = null;
+        return completion;
+    }
+
+    fn pending(context: *anyopaque) bool {
+        const self: *HostCallMuxTestHost = @ptrCast(@alignCast(context));
+        return self.completion != null;
+    }
+};
+
+fn cockpitHostCall(name: []const u8) bool {
+    return std.mem.startsWith(u8, name, "cockpit.");
+}
+
+// GUARD: ts-host-call-mux
+test "TypeScript host call mux routes names and preserves both completion lifecycles" {
+    const Adapter = TsUiApp(HostCallMuxTestCore);
+    var generated = HostCallMuxTestHost{ .completion = .{ .key = 11, .ok = true, .bytes = "service" } };
+    var extension = HostCallMuxTestHost{ .completion = .{ .key = 22, .ok = true, .bytes = "cockpit" } };
+    var mux = Adapter.HostCallMux{
+        .default = generated.binding(true),
+        .routed = extension.binding(false),
+        .route_fn = cockpitHostCall,
+    };
+    const binding = mux.binding();
+
+    binding.send_fn(binding.context, "generated.save", "");
+    binding.request_fn(binding.context, "cockpit.snapshot", 22, "");
+    try std.testing.expectEqualStrings("generated.save", generated.name());
+    try std.testing.expectEqualStrings("cockpit.snapshot", extension.name());
+    try std.testing.expectEqual(@as(u64, 22), extension.request_key);
+    try std.testing.expect(binding.reject_duplicate_keys);
+    try std.testing.expect(binding.pending_fn.?(binding.context));
+
+    const first = binding.poll_fn.?(binding.context).?;
+    const second = binding.poll_fn.?(binding.context).?;
+    try std.testing.expectEqual(@as(u64, 11), first.key);
+    try std.testing.expectEqualStrings("service", first.bytes);
+    try std.testing.expectEqual(@as(u64, 22), second.key);
+    try std.testing.expectEqualStrings("cockpit", second.bytes);
+    try std.testing.expect(!binding.pending_fn.?(binding.context));
+
+    binding.cancel_fn.?(binding.context, 22);
+    try std.testing.expectEqual(@as(usize, 1), generated.cancel_count);
+    try std.testing.expectEqual(@as(usize, 1), extension.cancel_count);
 }
