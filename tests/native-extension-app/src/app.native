@@ -1,0 +1,5 @@
+<column padding="16" gap="8">
+  <text>Extension runner</text>
+  <text>{extensionResult}</text>
+  <text>{generatedResult}</text>
+</column>
