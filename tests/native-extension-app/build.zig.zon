@@ -1,0 +1,10 @@
+.{
+    .name = .native_extension_contract,
+    .fingerprint = 0xf29f0571b71e48b9,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .native_sdk = .{ .path = "../.." },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "src", "app.zon" },
+}

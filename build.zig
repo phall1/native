@@ -2717,6 +2717,7 @@ pub fn build(b: *std.Build) void {
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-resizable-policy", "Run portable resizable policy example tests", "examples/resizable-policy", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-text-policy", "Run portable text policy example tests", "examples/text-policy", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-code-workbench", "Run TypeScript code workbench example tests", "examples/code-workbench", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-native-extension-app", "Run the TypeScript native runner extension contract fixture", "tests/native-extension-app", .owned),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-canvas-preview", "Run canvas preview example tests", "examples/canvas-preview", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-capabilities", "Run capabilities example tests", "examples/capabilities", .owned),
     };

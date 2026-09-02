@@ -174,6 +174,7 @@ pub const max_effect_host_payload_bytes = runtime.max_effect_host_payload_bytes;
 pub const max_effect_host_result_bytes = runtime.max_effect_host_result_bytes;
 pub const TsCoreHost = runtime.TsCoreHost;
 pub const TsUiApp = runtime.TsUiApp;
+pub const TsRunnerApp = runtime.TsRunnerApp;
 pub const TsUiAppWithFeatures = runtime.TsUiAppWithFeatures;
 pub const Clock = runtime.Clock;
 pub const TestClock = runtime.TestClock;

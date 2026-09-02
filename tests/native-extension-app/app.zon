@@ -1,0 +1,26 @@
+.{
+    .id = "dev.native_sdk.native_extension_contract",
+    .name = "native-extension-contract",
+    .display_name = "Native Extension Contract",
+    .description = "Build and runtime fixture for the TypeScript native runner extension.",
+    .version = "0.1.0",
+    .platforms = .{ "macos", "linux", "windows" },
+    .permissions = .{ "view" },
+    .capabilities = .{ "native_views", "gpu_surfaces" },
+    .shell = .{
+        .windows = .{.{
+            .label = "main",
+            .title = "Native Extension Contract",
+            .width = 400,
+            .height = 240,
+            .views = .{.{
+                .label = "extension-canvas",
+                .kind = "gpu_surface",
+                .fill = true,
+                .role = "Extension contract",
+                .accessibility_label = "Extension contract",
+                .gpu_backend = "metal",
+            }},
+        }},
+    },
+}
