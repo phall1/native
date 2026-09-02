@@ -1770,6 +1770,7 @@ pub fn build(b: *std.Build) void {
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-menu-bar", "Run menu-bar lifecycle example tests", "examples/menu-bar", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-feed", "Run feed example tests", "examples/feed", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-service-feed-reader", "Run TypeScript service feed-reader example tests", "examples/service-feed-reader", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-native-extension-app", "Run the TypeScript native runner extension contract fixture", "tests/native-extension-app", .owned),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-canvas-preview", "Run canvas preview example tests", "examples/canvas-preview", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-capabilities", "Run capabilities example tests", "examples/capabilities", .owned),
     };

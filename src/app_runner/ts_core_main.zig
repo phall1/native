@@ -21,6 +21,9 @@
 //!                    path with no `cachePath` in the core.
 //!   update loop      the transpiled core through `TsUiApp(core)` — the
 //!                    committed TS model IS the app model.
+//!   extension        an optional app-owned Zig module configures the final
+//!                    Adapter.CoreOptions and Adapter.Options, then may wrap
+//!                    the native_sdk.App without copying this runner.
 //!   view             app.native over the model's own field names (the
 //!                    emitted Zig keeps the TS spellings), hot-reloaded
 //!                    from src/app.native in Debug.
@@ -62,11 +65,12 @@ const std = @import("std");
 const runner = @import("runner");
 const native_sdk = @import("native_sdk");
 const manifest = @import("app_manifest_zon");
-pub const core = @import("core.zig");
+pub const core = @import("core");
 const services = @import("services.zig");
 const service_carrier = @import("service_carrier.zig");
 const relational_migrations = @import("migrations.zig");
 const window_views = @import("window_views.zig");
+const native_extension = @import("native_extension");
 
 pub const panic = std.debug.FullPanic(native_sdk.debug.capturePanic);
 
@@ -287,7 +291,7 @@ pub fn main(init: std.process.Init) !void {
 
     // The app struct (and any real model) is multi-MB: `create`
     // heap-allocates and constructs in place, so neither rides the stack.
-    const app_state = try Adapter.create(std.heap.page_allocator, .{
+    var core_options: Adapter.CoreOptions = .{
         .audio_cache_dir = audio_cache_dir,
         // Image loads share the same launch-resolved caches directory:
         // the bridge keys the two caches into their own segments
@@ -307,10 +311,13 @@ pub fn main(init: std.process.Init) !void {
             .decode_fn = services.resultDecoder(core),
         } else null,
         .persist = persist_options,
-    }, options);
+    };
+    native_extension.configureCoreOptions(&core_options, init);
+    native_extension.configureOptions(&options, init);
+    const app_state = try Adapter.create(std.heap.page_allocator, core_options, options);
     defer app_state.destroy();
 
-    try runner.runWithOptions(app_state.app(), .{
+    try runner.runWithOptions(native_extension.app(app_state), .{
         .app_name = manifest.name,
         .window_title = comptime windowTitle(),
         .bundle_id = manifest.id,
@@ -514,3 +521,4 @@ fn manifestAllowedOrigins() []const []const u8 {
         return manifestStringList(manifest.security.navigation, "allowed_origins");
     }
 }
+
