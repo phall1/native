@@ -718,14 +718,17 @@ fn spliceInlineSeparatorsComptime(comptime source: []const u8, comptime children
 }
 
 /// Surface the parser's diagnostic (already positioned by the shared
-/// helpers) as a compile error. The error value parameter exists so call
-/// sites read like the runtime parser's `try`/`return self.fail(...)`.
+/// helpers) as a compile error. The error value names the parser's own
+/// classification beside the positioned message, and is read rather than
+/// discarded: Zig 0.16 refuses `_ = err` on an error value, and that refusal
+/// used to replace every comptime markup diagnostic with "error set is
+/// discarded" pointing here instead of at the author's markup.
 fn failComptime(comptime parser: *const Parser, comptime err: ParseError) noreturn {
-    _ = err;
-    @compileError(std.fmt.comptimePrint("markup error at line {d}, column {d}: {s}", .{
+    @compileError(std.fmt.comptimePrint("markup error at line {d}, column {d}: {s} ({s})", .{
         parser.diagnostic.line,
         parser.diagnostic.column,
         parser.diagnostic.message,
+        @errorName(err),
     }));
 }
 
