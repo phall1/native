@@ -22,7 +22,7 @@ const snapTextRange = text_model.snapTextRange;
 pub fn cursorForWidgetHit(hit: ?WidgetHit) WidgetCursor {
     const target = hit orelse return .arrow;
     if (target.role == .link and !target.state.disabled) return .pointing_hand;
-    return cursorForWidgetTarget(target.kind, target.state);
+    return cursorForWidgetTargetOnAxis(target.kind, target.state, target.split_axis);
 }
 
 /// The kind-level half of the register: I-beam over editable text (a
@@ -31,14 +31,24 @@ pub fn cursorForWidgetHit(hit: ?WidgetHit) WidgetCursor {
 /// arrow over everything else — including sliders, which keep the arrow
 /// at rest AND during a drag on every native platform. The pointing hand
 /// never comes from a kind; it is role-driven (`cursorForWidgetHit`).
+///
+/// This original entry point preserves horizontal divider behavior.
 pub fn cursorForWidgetTarget(kind: WidgetKind, state: WidgetState) WidgetCursor {
+    return cursorForWidgetTargetOnAxis(kind, state, .horizontal);
+}
+
+pub fn cursorForWidgetTargetOnAxis(kind: WidgetKind, state: WidgetState, split_axis: widget_model.SplitAxis) WidgetCursor {
     if (state.disabled) return .arrow;
     return switch (kind) {
         // The terminal joins the editable-text register: a click
         // focuses the session's input, and the I-beam advertises it —
         // the platform terminals' own convention.
         .input, .text_field, .search_field, .combobox, .textarea, .terminal => .text,
-        .resizable, .split_divider => .resize_horizontal,
+        .resizable => .resize_horizontal,
+        .split_divider => switch (split_axis) {
+            .horizontal => .resize_horizontal,
+            .vertical => .resize_vertical,
+        },
         else => .arrow,
     };
 }

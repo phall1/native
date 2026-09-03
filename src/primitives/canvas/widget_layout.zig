@@ -14,6 +14,7 @@ const widget_render = @import("widget_render.zig");
 
 const Error = canvas.Error;
 const Widget = widget_model.Widget;
+const SplitAxis = widget_model.SplitAxis;
 const WidgetMainAlignment = widget_model.WidgetMainAlignment;
 const WidgetCrossAlignment = widget_model.WidgetCrossAlignment;
 const WidgetLayoutStyle = widget_model.WidgetLayoutStyle;
@@ -1699,13 +1700,62 @@ pub fn splitEffectiveFraction(value: f32, available: f32, first_min: f32, second
     const bounds = splitFractionBounds(available, first_min, second_min);
     return std.math.clamp(base, bounds.low, bounds.high);
 }
+fn splitMainExtent(rect: geometry.RectF, axis: SplitAxis) f32 {
+    return switch (axis) {
+        .horizontal => rect.width,
+        .vertical => rect.height,
+    };
+}
 
-/// Split layout: [pane 1][divider][pane 2] along the horizontal axis.
+fn splitMainMax(rect: geometry.RectF, axis: SplitAxis) f32 {
+    return switch (axis) {
+        .horizontal => rect.maxX(),
+        .vertical => rect.maxY(),
+    };
+}
+
+fn splitPaneMin(widget: Widget, axis: SplitAxis) f32 {
+    return nonNegative(switch (axis) {
+        .horizontal => widget.layout.min_size.width,
+        .vertical => widget.layout.min_size.height,
+    });
+}
+
+fn splitChildFrame(content: geometry.RectF, axis: SplitAxis, origin: f32, extent: f32) geometry.RectF {
+    return switch (axis) {
+        .horizontal => geometry.RectF.init(origin, content.y, extent, content.height),
+        .vertical => geometry.RectF.init(content.x, origin, content.width, extent),
+    };
+}
+
+fn setSplitFrameOrigin(frame: *geometry.RectF, axis: SplitAxis, origin: f32) void {
+    switch (axis) {
+        .horizontal => frame.x = origin,
+        .vertical => frame.y = origin,
+    }
+}
+
+fn setSplitFrameExtent(frame: *geometry.RectF, axis: SplitAxis, extent: f32) void {
+    switch (axis) {
+        .horizontal => frame.width = extent,
+        .vertical => frame.height = extent,
+    }
+}
+
+fn translateSplitFrame(frame: *geometry.RectF, axis: SplitAxis, delta: f32) void {
+    switch (axis) {
+        .horizontal => frame.x += delta,
+        .vertical => frame.y += delta,
+    }
+}
+
+
+/// Split layout: pane 1, divider, pane 2 along `widget.split_axis`.
 /// The divider is the builder-synthesized `.split_divider` child; panes
-/// are the remaining flow children (exactly two by the validator's
-/// rule — extras degrade to zero-width frames rather than failing). The
-/// first pane takes `splitEffectiveFraction` of the width left after
-/// the divider band; both panes stretch the full height.
+/// are the remaining flow children (exactly two by the validator's rule —
+/// extras degrade to zero-extent frames rather than failing). The first
+/// pane takes `splitEffectiveFraction` of the main-axis extent left after
+/// the divider band; both panes stretch across the other axis.
 fn layoutSplitChildren(
     widget: Widget,
     content: geometry.RectF,
@@ -1733,29 +1783,34 @@ fn layoutSplitChildren(
         }
     }
 
+    const axis = widget.runtime_flags.split_axis;
     const divider_extent = if (divider != null) splitDividerExtent(widget) else 0;
-    const available = @max(0, content.width - divider_extent);
-    const first_min = if (panes[0]) |pane| nonNegative(pane.layout.min_size.width) else 0;
-    const second_min = if (panes[1]) |pane| nonNegative(pane.layout.min_size.width) else 0;
+    const available = @max(0, splitMainExtent(content, axis) - divider_extent);
+    const first_min = if (panes[0]) |pane| splitPaneMin(pane, axis) else 0;
+    const second_min = if (panes[1]) |pane| splitPaneMin(pane, axis) else 0;
     const fraction = splitEffectiveFraction(widget.value, available, first_min, second_min);
-    const first_width = if (panes[1] == null) available else available * fraction;
+    const first_extent = if (panes[1] == null) available else available * fraction;
 
-    var cursor = content.x;
+    var cursor = switch (axis) {
+        .horizontal => content.x,
+        .vertical => content.y,
+    };
     if (panes[0]) |pane| {
-        _ = try layoutWidgetDepth(pane, geometry.RectF.init(cursor, content.y, first_width, content.height), parent_index, depth + 1, output, len, tokens);
-        cursor += first_width;
+        _ = try layoutWidgetDepth(pane, splitChildFrame(content, axis, cursor, first_extent), parent_index, depth + 1, output, len, tokens);
+        cursor += first_extent;
     }
     if (divider) |handle| {
-        // The handle mirrors the EFFECTIVE fraction so keyboard steps and
-        // separator semantics read the position layout actually used.
+        // The handle mirrors the EFFECTIVE fraction and axis so keyboard,
+        // cursor, and separator semantics describe the geometry in use.
         var handle_copy = handle;
         handle_copy.value = fraction;
-        _ = try layoutWidgetDepth(handle_copy, geometry.RectF.init(cursor, content.y, divider_extent, content.height), parent_index, depth + 1, output, len, tokens);
+        handle_copy.runtime_flags.split_axis = axis;
+        _ = try layoutWidgetDepth(handle_copy, splitChildFrame(content, axis, cursor, divider_extent), parent_index, depth + 1, output, len, tokens);
         cursor += divider_extent;
     }
     if (panes[1]) |pane| {
-        const second_width = @max(0, content.maxX() - cursor);
-        _ = try layoutWidgetDepth(pane, geometry.RectF.init(cursor, content.y, second_width, content.height), parent_index, depth + 1, output, len, tokens);
+        const second_extent = @max(0, splitMainMax(content, axis) - cursor);
+        _ = try layoutWidgetDepth(pane, splitChildFrame(content, axis, cursor, second_extent), parent_index, depth + 1, output, len, tokens);
     }
     // Panes past the first two never happen through the builder/markup
     // (the validator enforces exactly two); raw trees degrade to empty
@@ -1763,7 +1818,7 @@ fn layoutSplitChildren(
     if (extra_start) |start| {
         for (widget.children[start..]) |child| {
             if (!widgetTakesFlowSlot(child) or child.kind == .split_divider) continue;
-            _ = try layoutWidgetDepth(child, geometry.RectF.init(content.maxX(), content.y, 0, 0), parent_index, depth + 1, output, len, tokens);
+            _ = try layoutWidgetDepth(child, splitChildFrame(content, axis, splitMainMax(content, axis), 0), parent_index, depth + 1, output, len, tokens);
         }
     }
 }
@@ -1832,37 +1887,47 @@ pub fn slideSplitChildren(
     const second_index = pane_indices[1] orelse return;
     const handle_index = divider_index orelse return;
 
-    const content = frame.inset(nodes[node_index].widget.layout.padding).normalized();
-    const divider_extent = nodes[handle_index].frame.width;
-    const available = @max(0, content.width - divider_extent);
-    const first_min = @max(0, nodes[first_index].widget.layout.min_size.width);
-    const second_min = @max(0, nodes[second_index].widget.layout.min_size.width);
+    const split = nodes[node_index].widget;
+    const axis = split.runtime_flags.split_axis;
+    const content = frame.inset(split.layout.padding).normalized();
+    const divider_extent = splitMainExtent(nodes[handle_index].frame, axis);
+    const available = @max(0, splitMainExtent(content, axis) - divider_extent);
+    const first_min = splitPaneMin(nodes[first_index].widget, axis);
+    const second_min = splitPaneMin(nodes[second_index].widget, axis);
     // The same clamp family the runtime's drag echo applies: a
     // sub-epsilon fraction stays a sliver instead of falling into the
-    // `<= 0` unset sentinel, and pane min widths bound the boundary.
+    // `<= 0` unset sentinel, and pane minimums bound the boundary.
     const effective = splitEffectiveFraction(@max(fraction, 0.0001), available, first_min, second_min);
 
-    const first_width = available * effective;
-    const divider_x = content.x + first_width;
-    const dx = divider_x - nodes[handle_index].frame.x;
+    const first_extent = available * effective;
+    const content_origin = switch (axis) {
+        .horizontal => content.x,
+        .vertical => content.y,
+    };
+    const divider_origin = content_origin + first_extent;
+    const previous_divider_origin = switch (axis) {
+        .horizontal => nodes[handle_index].frame.x,
+        .vertical => nodes[handle_index].frame.y,
+    };
+    const delta = divider_origin - previous_divider_origin;
 
     nodes[node_index].widget.value = effective;
     nodes[handle_index].widget.value = effective;
-    nodes[first_index].frame.width = first_width;
+    setSplitFrameExtent(&nodes[first_index].frame, axis, first_extent);
     nodes[first_index].widget.frame = nodes[first_index].frame;
-    nodes[handle_index].frame.x = divider_x;
+    setSplitFrameOrigin(&nodes[handle_index].frame, axis, divider_origin);
     nodes[handle_index].widget.frame = nodes[handle_index].frame;
-    const second_x = divider_x + divider_extent;
-    nodes[second_index].frame.x = second_x;
-    nodes[second_index].frame.width = @max(0, content.maxX() - second_x);
+    const second_origin = divider_origin + divider_extent;
+    setSplitFrameOrigin(&nodes[second_index].frame, axis, second_origin);
+    setSplitFrameExtent(&nodes[second_index].frame, axis, @max(0, splitMainMax(content, axis) - second_origin));
     nodes[second_index].widget.frame = nodes[second_index].frame;
-    if (dx == 0) return;
+    if (delta == 0) return;
     // The second pane's content rides its leading edge: translate the
     // whole subtree (frames only — wraps and sizes stand).
     const second_depth = nodes[second_index].depth;
     var index = second_index + 1;
     while (index < nodes.len and nodes[index].depth > second_depth) : (index += 1) {
-        nodes[index].frame.x += dx;
+        translateSplitFrame(&nodes[index].frame, axis, delta);
         nodes[index].widget.frame = nodes[index].frame;
     }
 }
@@ -2076,9 +2141,12 @@ fn intrinsicWidgetSizeDepth(widget: Widget, tokens: DesignTokens, depth: usize) 
             intrinsicGridChildrenSize(widget, tokens, depth),
         .stack, .bubble, .resizable, .panel, .popover => intrinsicOverlayChildrenSize(widget, tokens, depth),
         .tree => intrinsicAxisChildrenSize(widget, tokens, .vertical, depth),
-        // The divider band is thin along the row and cross-sized by the
-        // panes it divides (like a bare separator in a row).
-        .split_divider => geometry.SizeF.init(splitDividerExtent(widget), 0),
+        // The divider band is thin on the split axis and cross-sized by
+        // the panes it divides (like a bare separator in a row/column).
+        .split_divider => switch (widget.runtime_flags.split_axis) {
+            .horizontal => geometry.SizeF.init(splitDividerExtent(widget), 0),
+            .vertical => geometry.SizeF.init(0, splitDividerExtent(widget)),
+        },
         // A split fills the space it is given (panes partition it);
         // like scroll viewports it reports no intrinsic size of its own.
         // Media surfaces measure like images: the texture is external
