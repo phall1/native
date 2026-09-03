@@ -1025,6 +1025,7 @@ pub const Cursor = enum {
     pointing_hand,
     text,
     resize_horizontal,
+    resize_vertical,
 };
 
 pub const ViewInfo = struct {

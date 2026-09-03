@@ -102,21 +102,22 @@ pub const WidgetKind = enum {
     /// hash `widgetKindCode`, not declaration order, so placement here
     /// carries no meaning.)
     chart,
-    /// Two-pane horizontal splitter: exactly two flow children (the
-    /// panes) separated by a builder-synthesized `.split_divider` handle.
-    /// `value` is the MODEL-OWNED fraction of the content width the
-    /// first pane takes (0 means "unset" and lays out at 0.5); dragging
-    /// the divider dispatches a `canvas_widget_resize` event so the
-    /// model can own the fraction (`on_resize`), and the runtime keeps
-    /// an uncontrolled divider position across rebuilds with the same
-    /// source-wins reconcile rule as scroll offsets.
+    /// Two-pane splitter: exactly two flow children (the panes) separated
+    /// by a builder-synthesized `.split_divider` handle. `split_axis`
+    /// chooses left/right or top/bottom while preserving horizontal as the
+    /// default. `value` is the MODEL-OWNED fraction of the split axis the
+    /// first pane takes (0 means "unset" and lays out at 0.5); dragging the
+    /// divider dispatches a `canvas_widget_resize` event so the model can
+    /// own the fraction (`on_resize`), and the runtime keeps an uncontrolled
+    /// divider position across rebuilds with the same source-wins reconcile
+    /// rule as scroll offsets.
     split,
     /// The draggable divider handle between a `.split`'s panes. Never
     /// authored directly: `Ui.finalizeNode` synthesizes it between the
     /// two panes (both markup engines build through the same builder).
-    /// Focusable, `resize_horizontal` cursor, ARIA separator semantics;
-    /// arrow keys adjust the parent split's fraction when it holds
-    /// focus. `value` mirrors the parent split's fraction.
+    /// Focusable, axis-appropriate resize cursor, ARIA separator semantics;
+    /// matching arrow keys adjust the parent split's fraction when it holds
+    /// focus. `value` and `split_axis` mirror the parent split.
     split_divider,
     /// Disclosure-tree container (vertical flow like `list`): descendant
     /// widgets carrying `role = .treeitem` form ONE roving keyboard
@@ -245,11 +246,17 @@ pub fn widgetKindCode(kind: WidgetKind) u16 {
     };
 }
 
+pub const SplitAxis = enum(u1) {
+    horizontal,
+    vertical,
+};
+
 pub const WidgetCursor = enum {
     arrow,
     pointing_hand,
     text,
     resize_horizontal,
+    resize_vertical,
 };
 
 pub const WidgetState = struct {
@@ -264,16 +271,17 @@ pub const WidgetState = struct {
     invalid: bool = false,
 };
 
-/// Engine-owned widget markers share one byte so adding runtime policy does
-/// not expand every retained `Widget`. Builder-facing behavior remains on
-/// ordinary named fields; these bits are stamped only by engine code.
+/// Compact widget policy shares one byte so adding runtime or builder-facing
+/// behavior does not expand every retained `Widget`.
 pub const WidgetRuntimeFlags = packed struct(u8) {
     /// `Ui.code` stamped this textarea as the editor surface.
     code_editor: bool = false,
     /// The runtime installed an OS-native scroll driver; engine-drawn
     /// scrollbar and kinetic physics stand down for this scroll view.
     native_scroll: bool = false,
-    _reserved: u6 = 0,
+    /// The axis declared by a split and mirrored onto its divider.
+    split_axis: SplitAxis = .horizontal,
+    _reserved: u5 = 0,
 };
 
 /// Two 128-line masks for code-only diff presentation. `Widget` packs them
