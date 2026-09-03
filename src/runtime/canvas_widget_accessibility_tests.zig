@@ -1299,6 +1299,7 @@ test "public display refresh batch defers accessibility until frame completion" 
                     .load_webview_fn = loadWebView,
                     .create_view_fn = createView,
                     .update_widget_accessibility_fn = updateWidgetAccessibility,
+                    .request_gpu_surface_frame_fn = requestGpuSurfaceFrame,
                 },
             };
         }
@@ -1306,6 +1307,7 @@ test "public display refresh batch defers accessibility until frame completion" 
         fn run(_: *anyopaque, _: platform.EventHandler, _: *anyopaque) anyerror!void {}
         fn loadWebView(_: ?*anyopaque, _: platform.WebViewSource) anyerror!void {}
         fn createView(_: ?*anyopaque, _: platform.ViewOptions) anyerror!void {}
+        fn requestGpuSurfaceFrame(_: ?*anyopaque, _: platform.WindowId, _: []const u8) anyerror!void {}
 
         fn updateWidgetAccessibility(context: ?*anyopaque, _: platform.WidgetAccessibilitySnapshot) anyerror!void {
             const self: *@This() = @ptrCast(@alignCast(context.?));
