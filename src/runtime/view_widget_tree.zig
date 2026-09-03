@@ -380,7 +380,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             if (node.widget.semantics.role == .link and !node.widget.state.disabled) {
                 return platformCursorFromCanvas(.pointing_hand);
             }
-            return platformCursorFromCanvas(canvas.cursorForWidgetTarget(node.widget.kind, node.widget.state));
+            return platformCursorFromCanvas(canvas.cursorForWidgetTargetOnAxis(node.widget.kind, node.widget.state, node.widget.runtime_flags.split_axis));
         }
 
         pub fn canvasWidgetRenderState(self: *const RuntimeView) canvas.WidgetRenderState {
@@ -1171,6 +1171,16 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
                 .decrement => "arrowleft",
             };
             return switch (self.widget_layout_nodes[index].widget.kind) {
+                .split_divider => switch (self.widget_layout_nodes[index].widget.runtime_flags.split_axis) {
+                    .horizontal => switch (direction) {
+                        .increment => "arrowright",
+                        .decrement => "arrowleft",
+                    },
+                    .vertical => switch (direction) {
+                        .increment => "arrowdown",
+                        .decrement => "arrowup",
+                    },
+                },
                 .grid, .scroll_view, .list, .data_grid, .table => switch (direction) {
                     // Page keys step the vertical axis on every keymap
                     // except the horizontal-only one (which mirrors the

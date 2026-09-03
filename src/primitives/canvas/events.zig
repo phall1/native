@@ -28,6 +28,8 @@ pub const WidgetHit = struct {
     depth: usize,
     index: usize,
     state: WidgetState,
+    /// Relevant for divider cursor/input semantics; horizontal elsewhere.
+    split_axis: canvas.SplitAxis = .horizontal,
     /// Semantic role of the hit widget (kind alone cannot distinguish a
     /// link hotspot from plain text, and links want a pointer cursor).
     role: WidgetRole = .none,
@@ -671,11 +673,10 @@ pub fn widgetKeyboardControlIntent(widget: Widget, keyboard: WidgetKeyboardEvent
             }
         else
             null,
-        // The split divider is the ARIA separator: horizontal arrows
-        // adjust the parent split's fraction, Home/End jump to the
-        // clamp edges (the runtime clamps against the panes' min
-        // widths when it applies the value).
-        .split_divider => if (widgetSplitDividerKeyboardValue(widget.value, keyboard)) |next_value|
+        // The split divider is the ARIA separator: arrows along its axis
+        // adjust the parent split's fraction, Home/End jump to the clamp
+        // edges (the runtime clamps against the panes' main-axis minimums).
+        .split_divider => if (widgetSplitDividerKeyboardValueForAxis(widget.value, widget.runtime_flags.split_axis, keyboard)) |next_value|
             .{
                 .kind = .set_value,
                 .actions = .{
@@ -825,17 +826,29 @@ pub fn widgetSliderKeyboardValue(current: f32, keyboard: WidgetKeyboardEvent) ?f
     return null;
 }
 
-/// Fraction steps for the split divider: the slider's step sizes, on the
-/// horizontal axis only (the vertical arrows stay free for tree/list
-/// focus travel around the divider).
-pub fn widgetSplitDividerKeyboardValue(current: f32, keyboard: WidgetKeyboardEvent) ?f32 {
+/// Fraction steps for a split divider: the slider's step sizes along the
+/// split's axis. Cross-axis arrows stay free for surrounding focus travel.
+pub fn widgetSplitDividerKeyboardValueForAxis(current: f32, axis: canvas.SplitAxis, keyboard: WidgetKeyboardEvent) ?f32 {
     if (keyboard.phase != .key_down or keyboard.modifiers.hasNavigationModifier()) return null;
     const step: f32 = if (keyboard.modifiers.shift) 0.1 else 0.05;
-    if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowleft")) return current - step;
-    if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowright")) return current + step;
+    switch (axis) {
+        .horizontal => {
+            if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowleft")) return current - step;
+            if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowright")) return current + step;
+        },
+        .vertical => {
+            if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowup")) return current - step;
+            if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowdown")) return current + step;
+        },
+    }
     if (std.ascii.eqlIgnoreCase(keyboard.key, "home")) return 0;
     if (std.ascii.eqlIgnoreCase(keyboard.key, "end")) return 1;
     return null;
+}
+
+/// Original horizontal helper retained for source compatibility.
+pub fn widgetSplitDividerKeyboardValue(current: f32, keyboard: WidgetKeyboardEvent) ?f32 {
+    return widgetSplitDividerKeyboardValueForAxis(current, .horizontal, keyboard);
 }
 
 /// The ARIA tree-row keymap, resolved on the routed keyboard target:

@@ -925,6 +925,7 @@ pub const RuntimeView = struct {
     pub const applyCanvasWidgetSplitFractionMoved = CanvasWidgetControlMethods.applyCanvasWidgetSplitFractionMoved;
     pub const noteCanvasWidgetResizeEvent = CanvasWidgetControlMethods.noteCanvasWidgetResizeEvent;
     pub const noteCanvasWidgetChangeEvent = CanvasWidgetControlMethods.noteCanvasWidgetChangeEvent;
+    pub const translateCanvasWidgetDescendants = CanvasWidgetControlMethods.translateCanvasWidgetDescendants;
     pub const translateCanvasWidgetDescendantsX = CanvasWidgetControlMethods.translateCanvasWidgetDescendantsX;
     pub const toggleCanvasWidgetTreeItemExpanded = CanvasWidgetControlMethods.toggleCanvasWidgetTreeItemExpanded;
     pub const applyCanvasWidgetControlKeyboard = CanvasWidgetControlMethods.applyCanvasWidgetControlKeyboard;
