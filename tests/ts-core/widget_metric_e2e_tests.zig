@@ -308,9 +308,29 @@ test "compiled widget metric split plans preserve ordering extras and effective 
         .{ .id = 7, .kind = .text, .text = "Extra pane" },
         .{ .id = 8, .kind = .sheet, .children = &nested },
     };
-    for ([_]f32{ -1, 0, 0.00001, 0.25, 0.9, 2, std.math.inf(f32), std.math.nan(f32) }) |fraction| for ([_]f32{ 0, 11.25, 250 }) |gap| for ([_]usize{ 0, 1, 2, 3, 4, 5, 6, 7 }) |count| {
-        const widget: c.Widget = .{ .id = 1, .kind = .split, .value = fraction, .children = children[0..count], .layout = .{ .gap = gap, .padding = .all(3.25) } };
+    for ([_]c.SplitAxis{ .horizontal, .vertical }) |axis| for ([_]f32{ -1, 0, 0.00001, 0.25, 0.9, 2, std.math.inf(f32), std.math.nan(f32) }) |fraction| for ([_]f32{ 0, 11.25, 250 }) |gap| for ([_]usize{ 0, 1, 2, 3, 4, 5, 6, 7 }) |count| {
+        const widget: c.Widget = .{ .id = 1, .kind = .split, .value = fraction, .children = children[0..count], .layout = .{ .gap = gap, .padding = .all(3.25) }, .runtime_flags = .{ .split_axis = axis } };
         try layoutTree(widget, .{ .text_measure = &provider }, &trace);
+    };
+}
+test "compiled split slides move both axes like the native reference" {
+    _ = core.initialModel();
+    const nested = [_]c.Widget{.{ .id = 30, .kind = .button, .text = "Pane action" }};
+    const children = [_]c.Widget{
+        .{ .id = 3, .kind = .column, .children = &nested, .layout = .{ .min_size = .init(41.25, 23.5) } },
+        .{ .id = 2, .kind = .split_divider },
+        .{ .id = 6, .kind = .column, .children = &nested, .layout = .{ .min_size = .init(33.5, 19.25) } },
+    };
+    const bounds: sdk.geometry.RectF = .init(0.125, -0.0, 220.25, 137.5);
+    for ([_]c.SplitAxis{ .horizontal, .vertical }) |axis| for ([_]f32{ -1, 0, 0.00001, 0.25, 0.5, 0.9, 2, std.math.nan(f32) }) |fraction| {
+        const widget: c.Widget = .{ .id = 1, .kind = .split, .value = 0.5, .children = &children, .layout = .{ .gap = 7.5, .padding = .all(3.25) }, .runtime_flags = .{ .split_axis = axis } };
+        var reference_nodes: [32]c.WidgetLayoutNode = undefined;
+        const laid = try c.layoutWidgetTreeWithTokens(widget, bounds, flowOwned(.{}), &reference_nodes);
+        var compiled_nodes: [32]c.WidgetLayoutNode = undefined;
+        @memcpy(compiled_nodes[0..laid.nodes.len], laid.nodes);
+        c.slideSplitChildrenWithTokens(laid.nodes[0].frame, fraction, 0, reference_nodes[0..laid.nodes.len], flowOwned(.{}));
+        c.slideSplitChildrenWithTokens(laid.nodes[0].frame, fraction, 0, compiled_nodes[0..laid.nodes.len], layoutOwned(.{}));
+        try exact(reference_nodes[0..laid.nodes.len], compiled_nodes[0..laid.nodes.len]);
     };
 }
 test "compiled widget metric span hotspots consume excluded children and preserve complete paragraph output" {

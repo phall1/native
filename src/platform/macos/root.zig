@@ -2266,6 +2266,7 @@ fn appKitCursor(cursor: platform_mod.Cursor) c_int {
         .pointing_hand => 1,
         .text => 2,
         .resize_horizontal => 3,
+        .resize_vertical => 4,
     };
 }
 

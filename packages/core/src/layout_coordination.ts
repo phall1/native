@@ -45,7 +45,11 @@ function nscvLayoutChildren(request: Uint8Array): Uint8Array {
   const mode = request[2]!, count = w.getUint32(4, true), spans = w.getUint32(8, true), ready = w.getUint32(12, true);
   if (request.length !== 64 + count * 64 + spans * 24 || ready > 1 || mode !== 4 && spans !== 0 || mode !== 3 && mode !== 5 && ready !== 0)
     throw new Error("invalid layout child shape");
-  for (let i = 48; i < 64; i++) if (request[i] !== 0) throw new Error("invalid layout child reserved bytes");
+  // Word 48 is the split axis (0 horizontal, 1 vertical) for split and slide
+  // plans; every other header byte through 63 stays reserved.
+  const vertical = w.getUint32(48, true);
+  if (vertical > 1 || vertical !== 0 && mode !== 3 && mode !== 5) throw new Error("invalid layout child axis");
+  for (let i = 52; i < 64; i++) if (request[i] !== 0) throw new Error("invalid layout child reserved bytes");
   if (mode !== 5 && w.getUint32(44, true) !== 0) throw new Error("invalid layout child root");
   for (let i = 0; i < count; i++) {
     const at = 64 + i * 64;
@@ -124,15 +128,29 @@ function nscvLayoutChildren(request: Uint8Array): Uint8Array {
   }
   if (mode === 5 && (first < 0 || second < 0 || divider < 0)) return done();
   const authoredGap = max(0, w.getFloat32(32, true));
-  const extent = divider < 0 ? 0 : mode === 5 ? w.getFloat32(at(divider) + 16, true) : authoredGap > 0 ? authoredGap : 9;
-  const available = max(0, f(content.width - extent));
-  const firstMin = first < 0 ? 0 : max(0, w.getFloat32(at(first) + 24, true));
-  const secondMin = second < 0 ? 0 : max(0, w.getFloat32(at(second) + 24, true));
+  // Main-axis offsets: frame extent +16/+20 and minimum +24/+28 for
+  // horizontal/vertical splits.
+  const extentOffset = vertical === 1 ? 20 : 16, minOffset = vertical === 1 ? 28 : 24;
+  const extent = divider < 0 ? 0 : mode === 5 ? w.getFloat32(at(divider) + extentOffset, true) : authoredGap > 0 ? authoredGap : 9;
+  const available = max(0, f((vertical === 1 ? content.height : content.width) - extent));
+  const firstMin = first < 0 ? 0 : max(0, w.getFloat32(at(first) + minOffset, true));
+  const secondMin = second < 0 ? 0 : max(0, w.getFloat32(at(second) + minOffset, true));
   if (ready === 0) {
     out.setUint32(4, 2, true); out.setFloat32(16, available, true); out.setFloat32(20, firstMin, true); out.setFloat32(24, secondMin, true);
     return result.slice(0, 32);
   }
   const fraction = w.getFloat32(40, true), width = second < 0 ? available : f(available * fraction);
+  if (mode === 3 && vertical === 1) {
+    const height = width;
+    let cursor = content.y;
+    if (first >= 0) { emit(first, 2, { x: content.x, y: cursor, width: content.width, height }); copied(16, 0, 12); cursor = f(cursor + height); }
+    if (divider >= 0) { emit(divider, 3, { x: content.x, y: cursor, width: content.width, height: extent }, fraction); copied(16, 0, 4); copied(24, 8, 4); cursor = f(cursor + extent); }
+    if (second >= 0) { emit(second, 2, { x: content.x, y: cursor, width: content.width, height: max(0, f(f(content.y + content.height) - cursor)) }); copied(16, 0, 4); copied(24, 8, 4); }
+    for (let i = second < 0 ? count : second + 1; i < count; i++) if (flow(i) && w.getUint32(at(i), true) !== 58) {
+      emit(i, 2, { x: content.x, y: f(content.y + content.height), width: 0, height: 0 }); copied(16, 0, 4);
+    }
+    return done();
+  }
   if (mode === 3) {
     let cursor = content.x;
     if (first >= 0) { emit(first, 2, { x: cursor, y: content.y, width, height: content.height }); copied(16, 0, 8); copied(28, 12, 4); cursor = f(cursor + width); }
@@ -144,6 +162,23 @@ function nscvLayoutChildren(request: Uint8Array): Uint8Array {
     return done();
   }
   const firstFrame = nscvRenderRect(w, at(first) + 8), dividerFrame = nscvRenderRect(w, at(divider) + 8), secondFrame = nscvRenderRect(w, at(second) + 8);
+  if (vertical === 1) {
+    const height = width, dividerY = f(content.y + height), dy = f(dividerY - dividerFrame.y), secondY = f(dividerY + extent);
+    emit(root, 1, nscvRenderRect(w, at(root) + 8), fraction);
+    copied(at(root) + 8, 0, 16);
+    emit(first, 2, { x: firstFrame.x, y: firstFrame.y, width: firstFrame.width, height });
+    copied(at(first) + 8, 0, 12);
+    emit(divider, 3, { x: dividerFrame.x, y: dividerY, width: dividerFrame.width, height: dividerFrame.height }, fraction);
+    copied(at(divider) + 8, 0, 4); copied(at(divider) + 16, 8, 8);
+    emit(second, 2, { x: secondFrame.x, y: secondY, width: secondFrame.width, height: max(0, f(f(content.y + content.height) - secondY)) });
+    copied(at(second) + 8, 0, 4); copied(at(second) + 16, 8, 4);
+    if (dy !== 0) for (let i = second + 1; i < count; i++) {
+      if (nscvLayoutU64Compare(w, at(i) + 40, at(second) + 40) <= 0) break;
+      const frame = nscvRenderRect(w, at(i) + 8); emit(i, 2, { x: frame.x, y: f(frame.y + dy), width: frame.width, height: frame.height });
+      copied(at(i) + 8, 0, 4); copied(at(i) + 16, 8, 8);
+    }
+    return done();
+  }
   const dividerX = f(content.x + width), dx = f(dividerX - dividerFrame.x), secondX = f(dividerX + extent);
   emit(root, 1, nscvRenderRect(w, at(root) + 8), fraction);
   copied(at(root) + 8, 0, 16);

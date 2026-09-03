@@ -128,6 +128,10 @@ pub const ChildPlan = struct {
         integer(self.request, at + 40, node.depth);
         std.mem.writeInt(u64, self.request[at + 48 ..][0..8], if (node.parent_index) |parent| parent else std.math.maxInt(u64), .little);
     }
+    /// Split and slide plans run along the split's axis (header word 48).
+    pub fn setSplitAxis(self: ChildPlan, axis: widgets.SplitAxis) void {
+        word(self.request, 48, @intFromEnum(axis));
+    }
     pub fn setRoot(self: ChildPlan, index: usize) void {
         word(self.request, 44, std.math.cast(u32, index) orelse @panic("layout slide root exceeds wire range"));
     }
