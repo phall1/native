@@ -292,6 +292,7 @@ fn widgetChange(
     const next_diff_lines = next.widget.codeDiffLines();
     const layout_dirty =
         previous.widget.kind != next.widget.kind or
+        previous.widget.runtime_flags.split_axis != next.widget.runtime_flags.split_axis or
         previous.depth != next.depth or
         previous.parent_index != next.parent_index or
         root_bounds_dirty or
