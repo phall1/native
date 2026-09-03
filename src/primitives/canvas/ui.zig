@@ -550,6 +550,10 @@ pub fn Ui(comptime Msg: type) type {
             /// Command dispatched by the runtime on eligible activation.
             command: []const u8 = "",
             value: f32 = 0,
+            /// Axis for a `split`: `.horizontal` preserves the original
+            /// left/right behavior; `.vertical` stacks top/bottom. The
+            /// synthesized divider inherits it for input and semantics.
+            split_axis: canvas.SplitAxis = .horizontal,
             /// HORIZONTAL scroll offset for a horizontal-capable
             /// `scroll` container (markup `value-x`) — the sideways
             /// counterpart of `value`. Follows the same source-wins
@@ -644,10 +648,14 @@ pub fn Ui(comptime Msg: type) type {
             width: f32 = 0,
             /// Definite height; same contract as `width`.
             height: f32 = 0,
+            /// Height floor WITHOUT the definite-max side of `height`.
+            /// Vertical split panes use it to constrain divider travel.
+            min_height: f32 = 0,
+            /// Height ceiling WITHOUT the definite-min side of `height`.
+            max_height: f32 = 0,
             /// Width floor WITHOUT the definite-max side of `width`:
             /// the widget may grow past it but never shrink below.
-            /// Split panes use it to constrain the divider drag (the
-            /// clamp band derives from both panes' floors).
+            /// Horizontal split panes use it to constrain divider travel.
             min_width: f32 = 0,
             /// Width ceiling WITHOUT the definite-min side of `width`:
             /// the widget fills or hugs normally until this bound, then
@@ -3934,6 +3942,7 @@ pub fn Ui(comptime Msg: type) type {
                 .image_id = options.image,
                 .image_src = options.image_src,
                 .value = options.value,
+                .runtime_flags = .{ .split_axis = options.split_axis },
                 .value_x = options.value_x,
                 .tree_level = options.tree_level,
                 .terminal = .{ .pty = options.pty, .scrollback = options.scrollback },
@@ -3965,6 +3974,18 @@ pub fn Ui(comptime Msg: type) type {
                     .virtual_anchor_index = options.virtual_anchor_index,
                     .virtual_anchor_extent = options.virtual_anchor_extent,
                     .virtual_total_extent = options.virtual_total_extent,
+                    .min_size = .{
+                        .width = @max(options.width, options.min_width),
+                        .height = @max(options.height, options.min_height),
+                    },
+                    // Explicit sizes are definite (min AND max). Resizable
+                    // is the exception: width documents the initial width
+                    // and the engine's drag handle keeps writing larger
+                    // frames past it.
+                    .max_size = if (kind == .resizable) .{} else .{
+                        .width = if (options.width > 0) options.width else options.max_width,
+                        .height = if (options.height > 0) options.height else options.max_height,
+                    },
                 },
                 .style = options.style,
                 .semantics = semantics: {
@@ -4017,6 +4038,7 @@ pub fn Ui(comptime Msg: type) type {
                 .value = split_widget.value,
                 .interaction_policy = split_widget.interaction_policy,
                 .appearance_policy = split_widget.appearance_policy,
+                .runtime_flags = .{ .split_axis = split_widget.runtime_flags.split_axis },
                 .state = .{ .disabled = split_widget.state.disabled },
                 .semantics = .{ .label = "Split divider" },
             };

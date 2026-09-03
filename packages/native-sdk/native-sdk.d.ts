@@ -187,7 +187,7 @@ export type NativeSdkGpuSurfacePresentMode = "none" | "timer";
 export type NativeSdkGpuSurfaceAlphaMode = "none" | "opaque" | "premultiplied";
 export type NativeSdkGpuSurfaceColorSpace = "none" | "srgb" | "display_p3";
 export type NativeSdkGpuSurfaceStatus = "unavailable" | "initializing" | "ready" | "lost";
-export type NativeSdkCursor = "arrow" | "pointing_hand" | "text" | "resize_horizontal";
+export type NativeSdkCursor = "arrow" | "pointing_hand" | "text" | "resize_horizontal" | "resize_vertical";
 export type NativeSdkCanvasFrameProfileRisk = "idle" | "low" | "moderate" | "high";
 
 export interface NativeSdkViewInfo {
