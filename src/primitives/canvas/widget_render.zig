@@ -3120,10 +3120,10 @@ fn emitSeparatorWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) 
     });
 }
 
-/// The split's drag handle: a centered vertical hairline in the divider
-/// band. Hover/press tint the line with the accent color (the band is
-/// the hit target, so the affordance appears as the pointer reaches
-/// it); keyboard focus draws the standard focus ring around the band.
+/// The split's drag handle: a centered hairline across the divider band.
+/// Hover/press tint the line with the accent color (the band is the hit
+/// target, so the affordance appears as the pointer reaches it); keyboard
+/// focus draws the standard focus ring around the band.
 fn emitSplitDividerWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
     const visual = componentControlVisualTokens(widget, tokens);
     const normalized = widget.frame.normalized();
@@ -3133,12 +3133,20 @@ fn emitSplitDividerWidget(builder: *Builder, widget: Widget, tokens: DesignToken
         @max(2, controlStrokeWidth(widget, visual, tokens.stroke.hairline))
     else
         controlStrokeWidth(widget, visual, tokens.stroke.hairline);
-    const line_rect = geometry.RectF.init(
-        normalized.x + (normalized.width - thickness) * 0.5,
-        normalized.y,
-        thickness,
-        normalized.height,
-    );
+    const line_rect = switch (widget.runtime_flags.split_axis) {
+        .horizontal => geometry.RectF.init(
+            normalized.x + (normalized.width - thickness) * 0.5,
+            normalized.y,
+            thickness,
+            normalized.height,
+        ),
+        .vertical => geometry.RectF.init(
+            normalized.x,
+            normalized.y + (normalized.height - thickness) * 0.5,
+            normalized.width,
+            thickness,
+        ),
+    };
     const line_color = if (active)
         widgetAccentColor(widget, tokens.colors.accent)
     else

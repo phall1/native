@@ -123,6 +123,7 @@ fn widgetHitFromNode(node: WidgetLayoutNode, index: usize) WidgetHit {
         .depth = node.depth,
         .index = index,
         .state = node.widget.state,
+        .split_axis = node.widget.runtime_flags.split_axis,
         .role = node.widget.semantics.role,
     };
 }

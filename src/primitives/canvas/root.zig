@@ -440,6 +440,7 @@ pub const DesignTokens = token_model.DesignTokens;
 
 // Canvas widget model and built-in factories live in `widgets.zig`; root keeps the public API stable.
 pub const WidgetKind = widget_model.WidgetKind;
+pub const SplitAxis = widget_model.SplitAxis;
 pub const WidgetCursor = widget_model.WidgetCursor;
 pub const WidgetState = widget_model.WidgetState;
 pub const WidgetRuntimeFlags = widget_model.WidgetRuntimeFlags;
@@ -754,6 +755,7 @@ pub const textInputCaretVisibleScrollOffsetForWidget = widget_runtime.textInputC
 pub const intrinsicWidgetSize = widget_runtime.intrinsicWidgetSize;
 pub const cursorForWidgetHit = widget_runtime.cursorForWidgetHit;
 pub const cursorForWidgetTarget = widget_runtime.cursorForWidgetTarget;
+pub const cursorForWidgetTargetOnAxis = widget_runtime.cursorForWidgetTargetOnAxis;
 /// Whether the engine hit-tests widgets of this kind (widget_access.zig —
 /// the single source of truth the runtime, both markup engines, and the
 /// markup validator's element list all derive from). Kind-level only: the

@@ -360,6 +360,10 @@ pub fn cursorForWidgetHit(hit: ?WidgetHit) WidgetCursor {
 pub fn cursorForWidgetTarget(kind: WidgetKind, state: WidgetState) WidgetCursor {
     return widget_access.cursorForWidgetTarget(kind, state);
 }
+pub fn cursorForWidgetTargetOnAxis(kind: WidgetKind, state: WidgetState, split_axis: widget_model.SplitAxis) WidgetCursor {
+    return widget_access.cursorForWidgetTargetOnAxis(kind, state, split_axis);
+}
+
 
 fn collectWidgetSemantics(layout: WidgetLayoutTree, output: []WidgetSemanticsNode) Error![]const WidgetSemanticsNode {
     return widget_semantics.collectWidgetSemantics(layout, output, widgetScrollSemantics);
