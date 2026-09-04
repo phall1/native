@@ -13,6 +13,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "../ios/apple_image_fit.h"
+
 #include "include/cef_app.h"
 #include "include/cef_browser.h"
 #include "include/cef_client.h"
@@ -32,6 +34,7 @@
 #endif
 
 @class NativeSdkChromiumHost;
+@class NativeSdkChromiumWindowDelegate;
 
 @interface NativeSdkChromiumApplication : NSApplication <CefAppProtocol>
 @property(nonatomic, assign) BOOL handlingSendEvent;
@@ -93,7 +96,12 @@ static int NativeSdkSetLaunchAtLogin(BOOL enabled) {
     return succeeded ? NativeSdkLaunchAtLoginStatus() : -2;
 }
 static const char *NativeSdkCefBridgeScript();
+static NSScreen *NativeSdkPrimaryScreen(void);
+static NSScreen *NativeSdkScreenForFrame(NSRect frame);
+static NSRect NativeSdkConstrainFrameToScreen(NSRect frame, NSScreen *screen);
 static NSRect NativeSdkConstrainFrame(NSRect frame);
+static NSRect NativeSdkCenterFrameOnScreen(NSRect frame, NSScreen *screen);
+static void NativeSdkApplyHiddenInsetTitlebar(NSWindow *window, int titlebar_style, NativeSdkChromiumWindowDelegate *delegate);
 static NSString *NativeSdkResolvedAssetRoot(NSString *rootPath);
 static NSURL *NativeSdkAssetEntryFileURL(NSString *rootPath, NSString *entryPath);
 static NSString *NativeSdkSafeAssetPath(NSURL *url, NSString *entryPath);
@@ -378,8 +386,42 @@ static NSString *NativeSdkCefFrameworkPath(void) {
     return [devRoot stringByAppendingPathComponent:@"Release/Chromium Embedded Framework.framework"];
 }
 
-static NSRect NativeSdkConstrainFrame(NSRect frame) {
-    NSScreen *screen = [NSScreen mainScreen];
+static NSScreen *NativeSdkPrimaryScreen(void) {
+    return [NSScreen screens].firstObject ?: [NSScreen mainScreen];
+}
+
+static NSScreen *NativeSdkScreenForFrame(NSRect frame) {
+    NSArray<NSScreen *> *screens = [NSScreen screens];
+    NSScreen *bestScreen = nil;
+    CGFloat bestArea = 0;
+    for (NSScreen *screen in screens) {
+        NSRect intersection = NSIntersectionRect(frame, screen.visibleFrame);
+        CGFloat area = NSWidth(intersection) * NSHeight(intersection);
+        if (area > bestArea) {
+            bestArea = area;
+            bestScreen = screen;
+        }
+    }
+    if (bestScreen) return bestScreen;
+
+    NSPoint center = NSMakePoint(NSMidX(frame), NSMidY(frame));
+    CGFloat bestDistance = CGFLOAT_MAX;
+    for (NSScreen *screen in screens) {
+        NSRect visible = screen.visibleFrame;
+        CGFloat nearestX = MIN(MAX(center.x, NSMinX(visible)), NSMaxX(visible));
+        CGFloat nearestY = MIN(MAX(center.y, NSMinY(visible)), NSMaxY(visible));
+        CGFloat dx = center.x - nearestX;
+        CGFloat dy = center.y - nearestY;
+        CGFloat distance = dx * dx + dy * dy;
+        if (distance < bestDistance) {
+            bestDistance = distance;
+            bestScreen = screen;
+        }
+    }
+    return bestScreen ?: [NSScreen mainScreen];
+}
+
+static NSRect NativeSdkConstrainFrameToScreen(NSRect frame, NSScreen *screen) {
     if (!screen) return frame;
     NSRect visible = screen.visibleFrame;
     if (frame.size.width > visible.size.width) frame.size.width = visible.size.width;
@@ -389,6 +431,19 @@ static NSRect NativeSdkConstrainFrame(NSRect frame) {
     if (NSMaxX(frame) > NSMaxX(visible)) frame.origin.x = NSMaxX(visible) - frame.size.width;
     if (NSMaxY(frame) > NSMaxY(visible)) frame.origin.y = NSMaxY(visible) - frame.size.height;
     return frame;
+}
+
+static NSRect NativeSdkConstrainFrame(NSRect frame) {
+    return NativeSdkConstrainFrameToScreen(frame, NativeSdkScreenForFrame(frame));
+}
+
+static NSRect NativeSdkCenterFrameOnScreen(NSRect frame, NSScreen *screen) {
+    frame = NativeSdkConstrainFrameToScreen(frame, screen);
+    if (!screen) return frame;
+    NSRect visible = screen.visibleFrame;
+    frame.origin.x = NSMidX(visible) - NSWidth(frame) / 2.0;
+    frame.origin.y = NSMidY(visible) - NSHeight(frame) / 2.0;
+    return NativeSdkConstrainFrameToScreen(frame, screen);
 }
 
 static const char *NativeSdkCefBridgeScript() {
@@ -552,6 +607,10 @@ static const char *NativeSdkCefBridgeScript() {
 @property(nonatomic, assign) uint32_t modifiers;
 @end
 
+@interface NativeSdkCefTraySegmentedControl : NSSegmentedControl
+@property(nonatomic, assign) NSInteger sourceSelectedSegment;
+@end
+
 @interface NativeSdkChromiumStatusItemEntry : NSObject
 @property(nonatomic, assign) uint32_t identifier;
 @property(nonatomic, strong) NSStatusItem *item;
@@ -562,6 +621,8 @@ static const char *NativeSdkCefBridgeScript() {
 @property(nonatomic, assign) int presentationTone;
 @property(nonatomic, assign) double presentationIconOpacity;
 @property(nonatomic, assign) BOOL presentationMonospaced;
+@property(nonatomic, assign) double presentationFontSize;
+@property(nonatomic, assign) int presentationFontWeight;
 @property(nonatomic, strong) NSString *activationCommand;
 @property(nonatomic, strong) NSString *alternateActivationCommand;
 @property(nonatomic, strong) NSString *openCommand;
@@ -649,11 +710,11 @@ static const char *NativeSdkCefBridgeScript() {
 @property(nonatomic, strong) NSArray<NSString *> *allowedNavigationOrigins;
 @property(nonatomic, strong) NSArray<NSString *> *allowedExternalURLs;
 @property(nonatomic, assign) NSInteger externalLinkAction;
-- (instancetype)initWithAppName:(NSString *)appName displayName:(NSString *)displayName version:(NSString *)version aboutDescription:(NSString *)aboutDescription dockVisible:(BOOL)dockVisible title:(NSString *)title width:(double)width height:(double)height;
+- (instancetype)initWithAppName:(NSString *)appName displayName:(NSString *)displayName version:(NSString *)version aboutDescription:(NSString *)aboutDescription dockVisible:(BOOL)dockVisible title:(NSString *)title x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame initialPlacement:(int)initialPlacement restorePolicy:(int)restorePolicy titlebarStyle:(int)titlebarStyle;
 - (void)configureApplication;
 - (void)buildMenuBar;
 - (NSMenuItem *)menuItem:(NSString *)title action:(SEL)action key:(NSString *)key modifiers:(NSEventModifierFlags)modifiers;
-- (BOOL)createWindowWithId:(uint64_t)windowId title:(NSString *)title label:(NSString *)label x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame resizable:(BOOL)resizable windowFlags:(uint32_t)windowFlags makeMain:(BOOL)makeMain;
+- (BOOL)createWindowWithId:(uint64_t)windowId title:(NSString *)title label:(NSString *)label x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame initialPlacement:(int)initialPlacement restorePolicy:(int)restorePolicy resizable:(BOOL)resizable titlebarStyle:(int)titlebarStyle windowFlags:(uint32_t)windowFlags makeMain:(BOOL)makeMain;
 - (void)orderWindowForImplicitShow:(uint64_t)windowId;
 - (void)focusWindowWithId:(uint64_t)windowId;
 - (void)closeWindowWithId:(uint64_t)windowId;
@@ -714,6 +775,7 @@ static const char *NativeSdkCefBridgeScript() {
 - (BOOL)handleShortcutEvent:(NSEvent *)event;
 - (void)emitShortcutWithId:(NSString *)identifier key:(NSString *)key modifiers:(uint32_t)modifiers event:(NSEvent *)event;
 - (void)trayMenuItemClicked:(NSMenuItem *)menuItem;
+- (void)traySegmentChanged:(NSSegmentedControl *)control;
 - (void)menuWillOpen:(NSMenu *)menu;
 - (NativeSdkChromiumStatusItemEntry *)statusEntryForId:(uint32_t)identifier;
 - (NativeSdkChromiumStatusItemEntry *)statusEntryForMenu:(NSMenu *)menu;
@@ -722,6 +784,9 @@ static const char *NativeSdkCefBridgeScript() {
 @end
 
 @implementation NativeSdkChromiumShortcut
+@end
+
+@implementation NativeSdkCefTraySegmentedControl
 @end
 
 @implementation NativeSdkChromiumStatusItemEntry
@@ -852,7 +917,7 @@ static const char *NativeSdkCefBridgeScript() {
 
 @implementation NativeSdkChromiumHost
 
-- (instancetype)initWithAppName:(NSString *)appName displayName:(NSString *)displayName version:(NSString *)version aboutDescription:(NSString *)aboutDescription dockVisible:(BOOL)dockVisible title:(NSString *)title width:(double)width height:(double)height {
+- (instancetype)initWithAppName:(NSString *)appName displayName:(NSString *)displayName version:(NSString *)version aboutDescription:(NSString *)aboutDescription dockVisible:(BOOL)dockVisible title:(NSString *)title x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame initialPlacement:(int)initialPlacement restorePolicy:(int)restorePolicy titlebarStyle:(int)titlebarStyle {
     self = [super init];
     if (!self) return nil;
 
@@ -897,7 +962,7 @@ static const char *NativeSdkCefBridgeScript() {
     self.externalLinkAction = 0;
     self.shortcuts = @[];
 
-    [self createWindowWithId:1 title:(title.length > 0 ? title : self.appName) label:@"main" x:0 y:0 width:width height:height restoreFrame:NO resizable:YES windowFlags:0 makeMain:YES];
+    [self createWindowWithId:1 title:(title.length > 0 ? title : self.appName) label:@"main" x:x y:y width:width height:height restoreFrame:restoreFrame initialPlacement:initialPlacement restorePolicy:restorePolicy resizable:YES titlebarStyle:titlebarStyle windowFlags:0 makeMain:YES];
     self.didShutdown = NO;
     self.pendingPreRunStop = NO;
     self.observesApplicationActivation = NO;
@@ -1014,11 +1079,17 @@ static const char *NativeSdkCefBridgeScript() {
     delete self.browsers;
 }
 
-- (BOOL)createWindowWithId:(uint64_t)windowId title:(NSString *)title label:(NSString *)label x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame resizable:(BOOL)resizable windowFlags:(uint32_t)windowFlags makeMain:(BOOL)makeMain {
+- (BOOL)createWindowWithId:(uint64_t)windowId title:(NSString *)title label:(NSString *)label x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame initialPlacement:(int)initialPlacement restorePolicy:(int)restorePolicy resizable:(BOOL)resizable titlebarStyle:(int)titlebarStyle windowFlags:(uint32_t)windowFlags makeMain:(BOOL)makeMain {
     NSNumber *key = @(windowId);
     if (self.windows[key]) return NO;
 
-    NSRect rect = restoreFrame ? NativeSdkConstrainFrame(NSMakeRect(x, y, width, height)) : NSMakeRect(0, 0, width, height);
+    (void)restoreFrame; // Persistence opt-in; initialPlacement says whether a frame was found.
+    const BOOL restoredPlacement = initialPlacement == 0;
+    const BOOL centerOnPrimary = initialPlacement == 2 || (restoredPlacement && restorePolicy == 1);
+    NSScreen *primaryScreen = NativeSdkPrimaryScreen();
+    NSRect rect = centerOnPrimary
+        ? NativeSdkConstrainFrameToScreen(NSMakeRect(0, 0, width, height), primaryScreen)
+        : NativeSdkConstrainFrame(NSMakeRect(x, y, width, height));
     NSWindowStyleMask styleMask = NSWindowStyleMaskTitled |
                                   NSWindowStyleMaskClosable |
                                   NSWindowStyleMaskMiniaturizable;
@@ -1043,13 +1114,33 @@ static const char *NativeSdkCefBridgeScript() {
         [window standardWindowButton:NSWindowZoomButton].enabled = NO;
     }
     [window setTitle:title.length > 0 ? title : @"native-sdk"];
-    if (!restoreFrame) {
-        [window center];
+    NativeSdkChromiumWindowDelegate *delegate = [[NativeSdkChromiumWindowDelegate alloc] init];
+    delegate.host = self;
+    delegate.windowId = windowId;
+    window.delegate = delegate;
+    // Install the final titlebar before converting persisted content
+    // geometry back to an outer frame; the conversion must include the
+    // actual chrome the window will keep.
+    NativeSdkApplyHiddenInsetTitlebar(window, titlebarStyle, delegate);
+    if (restoredPlacement) {
+        NSRect restoredContentFrame = NSMakeRect(x, y, width, height);
+        NSRect restoredWindowFrame = [window frameRectForContentRect:restoredContentFrame];
+        restoredWindowFrame = restorePolicy == 1
+            ? NativeSdkCenterFrameOnScreen(restoredWindowFrame, primaryScreen)
+            : NativeSdkConstrainFrame(restoredWindowFrame);
+        [window setFrame:restoredWindowFrame display:NO];
+    } else if (initialPlacement == 1) {
+        // AppKit adds titlebar chrome to the authored content rectangle;
+        // constrain the completed OUTER frame so no chrome escapes the
+        // matching or nearest display's visible bounds.
+        [window setFrame:NativeSdkConstrainFrame(window.frame) display:NO];
+    } else if (centerOnPrimary) {
+        [window setFrame:NativeSdkCenterFrameOnScreen(window.frame, primaryScreen) display:NO];
         // Match the system-WebView host and Win32's default placement:
         // secondary windows should reveal the window that opened them,
         // not land directly on top of it.
         NSWindow *referenceWindow = NSApp.keyWindow ?: self.window;
-        if (!makeMain && referenceWindow) {
+        if (initialPlacement == 2 && restorePolicy == 0 && !makeMain && referenceWindow) {
             NSRect referenceFrame = referenceWindow.frame;
             NSRect cascadedFrame = window.frame;
             cascadedFrame.origin.x = NSMinX(referenceFrame) + 24.0;
@@ -1067,7 +1158,7 @@ static const char *NativeSdkCefBridgeScript() {
         }
     }
 
-    NSView *stackRoot = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, width, height)];
+    NSView *stackRoot = [[NSView alloc] initWithFrame:window.contentView.bounds];
     stackRoot.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     window.contentView = stackRoot;
 
@@ -1077,10 +1168,6 @@ static const char *NativeSdkCefBridgeScript() {
     browserContainer.layer.zPosition = 0;
     [stackRoot addSubview:browserContainer positioned:NSWindowAbove relativeTo:nil];
 
-    NativeSdkChromiumWindowDelegate *delegate = [[NativeSdkChromiumWindowDelegate alloc] init];
-    delegate.host = self;
-    delegate.windowId = windowId;
-    window.delegate = delegate;
     CefRefPtr<NativeSdkCefClient> client = new NativeSdkCefClient(self, windowId);
 
     self.windows[key] = window;
@@ -1429,7 +1516,12 @@ static const char *NativeSdkCefBridgeScript() {
 - (void)emitWindowFrameForWindowId:(uint64_t)windowId open:(BOOL)open {
     NSWindow *window = self.windows[@(windowId)] ?: self.window;
     NSString *label = self.windowLabels[@(windowId)] ?: @"";
-    NSRect frame = window.frame;
+    // The frame event's rect is the CONTENT rect in screen coordinates,
+    // never window.frame: consumers treat these numbers as content
+    // geometry (shell layout, the resize channel, window-state
+    // persistence, and the initWithContentRect: round-trip) — see the
+    // AppKit host's emitWindowFrameForWindowId:.
+    NSRect frame = [window contentRectForFrameRect:window.frame];
     [self emitEvent:(native_sdk_appkit_event_t){
         .kind = NATIVE_SDK_APPKIT_EVENT_WINDOW_FRAME,
         .window_id = windowId,
@@ -2050,6 +2142,20 @@ static const char *NativeSdkCefBridgeScript() {
     }
 }
 
+- (void)traySegmentChanged:(NSSegmentedControl *)control {
+    NSInteger selected = control.selectedSegment;
+    if (selected < 0 || !self.trayCallback) return;
+    NSInteger itemId = [control tagForSegment:selected];
+    if (itemId <= 0) return;
+    // Keep the native control on the model-declared selection until the
+    // dispatched command commits a new model and rebuilds this menu row.
+    NSInteger sourceSelected = [(NativeSdkCefTraySegmentedControl *)control sourceSelectedSegment];
+    for (NSInteger index = 0; index < control.segmentCount; index++) {
+        [control setSelected:index == sourceSelected forSegment:index];
+    }
+    self.trayCallback(self.trayContext, (uint32_t)control.tag, (uint32_t)itemId);
+}
+
 - (NativeSdkChromiumStatusItemEntry *)statusEntryForId:(uint32_t)identifier {
     return self.statusItems[@(identifier)];
 }
@@ -2329,7 +2435,7 @@ static void NativeSdkApplyOverlayWindowFlags(NativeSdkChromiumHost *host, uint64
     }
 }
 
-native_sdk_appkit_host_t *native_sdk_appkit_create(const char *app_name, size_t app_name_len, const char *display_name, size_t display_name_len, const char *version, size_t version_len, const char *about_description, size_t about_description_len, int has_web_content, int dock_visible, const char *window_title, size_t window_title_len, const char *bundle_id, size_t bundle_id_len, const char *icon_path, size_t icon_path_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, int show_policy, uint32_t window_flags) {
+native_sdk_appkit_host_t *native_sdk_appkit_create(const char *app_name, size_t app_name_len, const char *display_name, size_t display_name_len, const char *version, size_t version_len, const char *about_description, size_t about_description_len, int has_web_content, int dock_visible, const char *window_title, size_t window_title_len, const char *bundle_id, size_t bundle_id_len, const char *icon_path, size_t icon_path_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int initial_placement, int restore_policy, int resizable, int titlebar_style, int show_policy, uint32_t window_flags) {
     @autoreleasepool {
         // A windowed CEF child cannot paint transparent pixels into its
         // parent NSWindow. Refuse instead of accepting a flag that leaves
@@ -2356,14 +2462,10 @@ native_sdk_appkit_host_t *native_sdk_appkit_create(const char *app_name, size_t 
         NSString *versionString = [[NSString alloc] initWithBytes:version length:version_len encoding:NSUTF8StringEncoding] ?: @"";
         NSString *aboutDescriptionString = [[NSString alloc] initWithBytes:about_description length:about_description_len encoding:NSUTF8StringEncoding] ?: @"";
         NSString *titleString = [[NSString alloc] initWithBytes:window_title length:window_title_len encoding:NSUTF8StringEncoding] ?: appNameString;
-        NativeSdkChromiumHost *host = [[NativeSdkChromiumHost alloc] initWithAppName:appNameString displayName:displayNameString version:versionString aboutDescription:aboutDescriptionString dockVisible:(dock_visible != 0) title:titleString width:width height:height];
-        if (restore_frame) {
-            [host.window setFrame:NativeSdkConstrainFrame(NSMakeRect(x, y, width, height)) display:NO];
-        }
+        NativeSdkChromiumHost *host = [[NativeSdkChromiumHost alloc] initWithAppName:appNameString displayName:displayNameString version:versionString aboutDescription:aboutDescriptionString dockVisible:(dock_visible != 0) title:titleString x:x y:y width:width height:height restoreFrame:(restore_frame != 0) initialPlacement:initial_placement restorePolicy:restore_policy titlebarStyle:titlebar_style];
         if (!resizable) {
             host.window.styleMask &= ~NSWindowStyleMaskResizable;
         }
-        NativeSdkApplyHiddenInsetTitlebar(host.window, titlebar_style, host.delegates[@1]);
         NativeSdkApplyOverlayWindowFlags(host, 1, window_flags);
         if (show_policy == 2) [host.policyHiddenWindows addObject:@1];
         return (__bridge_retained native_sdk_appkit_host_t *)host;
@@ -2611,13 +2713,12 @@ void native_sdk_appkit_set_shortcuts(native_sdk_appkit_host_t *host, const char 
     [object setShortcutsWithIds:ids idLengths:id_lens keys:keys keyLengths:key_lens modifiers:modifiers count:count];
 }
 
-int native_sdk_appkit_create_window(native_sdk_appkit_host_t *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, int show_policy, uint32_t window_flags) {
+int native_sdk_appkit_create_window(native_sdk_appkit_host_t *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int initial_placement, int restore_policy, int resizable, int titlebar_style, int show_policy, uint32_t window_flags) {
     if ((window_flags & (1u << 0)) != 0) return 0;
     NativeSdkChromiumHost *object = (__bridge NativeSdkChromiumHost *)host;
     NSString *titleString = window_title ? [[NSString alloc] initWithBytes:window_title length:window_title_len encoding:NSUTF8StringEncoding] : @"native-sdk";
     NSString *labelString = window_label ? [[NSString alloc] initWithBytes:window_label length:window_label_len encoding:NSUTF8StringEncoding] : @"";
-    if (![object createWindowWithId:window_id title:titleString ?: @"native-sdk" label:labelString ?: @"" x:x y:y width:width height:height restoreFrame:(restore_frame != 0) resizable:(resizable != 0) windowFlags:window_flags makeMain:NO]) return 0;
-    NativeSdkApplyHiddenInsetTitlebar(object.windows[@(window_id)], titlebar_style, object.delegates[@(window_id)]);
+    if (![object createWindowWithId:window_id title:titleString ?: @"native-sdk" label:labelString ?: @"" x:x y:y width:width height:height restoreFrame:(restore_frame != 0) initialPlacement:initial_placement restorePolicy:restore_policy resizable:(resizable != 0) titlebarStyle:titlebar_style windowFlags:window_flags makeMain:NO]) return 0;
     // Apply chrome and overlay presentation while still hidden, then
     // reveal once so a secondary window cannot flash its default frame.
     if (show_policy == 2) {
@@ -3121,25 +3222,45 @@ int native_sdk_appkit_measure_text_advances(uint64_t font_id, double size, const
  * system SVG rasterizer, with no host state, so both engines decode
  * identically. See appkit_host.h for the pixel-format and return-value
  * contract. */
-int native_sdk_appkit_decode_image(const uint8_t *bytes, size_t bytes_len, uint8_t *pixels, size_t pixels_len, size_t *out_width, size_t *out_height) {
+int native_sdk_appkit_decode_image(const uint8_t *bytes, size_t bytes_len, uint8_t *pixels, size_t pixels_len, size_t max_pixels, size_t *out_width, size_t *out_height) {
     if (out_width) *out_width = 0;
     if (out_height) *out_height = 0;
-    if (!bytes || bytes_len == 0 || !pixels) return 0;
+    if (!bytes || bytes_len == 0 || !pixels || max_pixels == 0) return 0;
     @autoreleasepool {
         NSData *data = [NSData dataWithBytesNoCopy:(void *)bytes length:bytes_len freeWhenDone:NO];
         CGImageRef image = NULL;
         CGImageSourceRef source = CGImageSourceCreateWithData((__bridge CFDataRef)data, NULL);
         if (source) {
-            image = CGImageSourceCreateImageAtIndex(source, 0, NULL);
+            CFDictionaryRef properties = CGImageSourceCopyPropertiesAtIndex(source, 0, NULL);
+            int64_t source_width_value = 0;
+            int64_t source_height_value = 0;
+            if (properties) {
+                CFNumberRef width_value = CFDictionaryGetValue(properties, kCGImagePropertyPixelWidth);
+                CFNumberRef height_value = CFDictionaryGetValue(properties, kCGImagePropertyPixelHeight);
+                if (width_value) CFNumberGetValue(width_value, kCFNumberSInt64Type, &source_width_value);
+                if (height_value) CFNumberGetValue(height_value, kCFNumberSInt64Type, &source_height_value);
+                CFRelease(properties);
+            }
+            size_t source_width = source_width_value > 0 ? (size_t)source_width_value : 0;
+            size_t source_height = source_height_value > 0 ? (size_t)source_height_value : 0;
+            if (source_width > 0 && source_height > 0) {
+                const size_t max_dimension = native_sdk_apple_image_thumbnail_max_dimension(source_width, source_height, max_pixels);
+                NSDictionary *thumbnail_options = @{
+                    (NSString *)kCGImageSourceCreateThumbnailFromImageAlways: @YES,
+                    (NSString *)kCGImageSourceThumbnailMaxPixelSize: @(max_dimension),
+                    (NSString *)kCGImageSourceCreateThumbnailWithTransform: @YES,
+                };
+                image = CGImageSourceCreateThumbnailAtIndex(source, 0, (__bridge CFDictionaryRef)thumbnail_options);
+            }
             CFRelease(source);
         }
         if (!image) {
             NSImage *system_image = [[NSImage alloc] initWithData:data];
             NSSize size = system_image ? system_image.size : NSZeroSize;
-            if (size.width > 0 && size.height > 0 && size.width <= 8192 && size.height <= 8192) {
+            if (size.width > 0 && size.height > 0 && isfinite(size.width) && isfinite(size.height)) {
                 // Bound SVG rasterization before NSImage materializes the
                 // screen-scale representation; see the AppKit mirror.
-                const CGFloat max_raster_points = 256.0;
+                const CGFloat max_raster_points = sqrt((CGFloat)max_pixels) / 2.0;
                 const CGFloat raster_scale = MIN(1.0, MIN(max_raster_points / size.width, max_raster_points / size.height));
                 NSRect proposed = NSMakeRect(0, 0, size.width * raster_scale, size.height * raster_scale);
                 CGImageRef rendered = [system_image CGImageForProposedRect:&proposed context:nil hints:nil];
@@ -3150,14 +3271,14 @@ int native_sdk_appkit_decode_image(const uint8_t *bytes, size_t bytes_len, uint8
 
         size_t width = CGImageGetWidth(image);
         size_t height = CGImageGetHeight(image);
-        if (width == 0 || height == 0 || width > 8192 || height > 8192) {
+        if (width == 0 || height == 0 || width > NATIVE_SDK_MAX_DECODED_IMAGE_DIMENSION || height > NATIVE_SDK_MAX_DECODED_IMAGE_DIMENSION) {
             CGImageRelease(image);
             return 0;
         }
         if (out_width) *out_width = width;
         if (out_height) *out_height = height;
         size_t byte_len = width * height * 4;
-        if (byte_len / 4 / height != width || pixels_len < byte_len) {
+        if (width > max_pixels / height || byte_len / 4 / height != width || pixels_len < byte_len) {
             CGImageRelease(image);
             return -1;
         }
@@ -3507,16 +3628,29 @@ static NSImage *NativeSdkCefTrayImageWithOpacity(NSImage *source, double opacity
     return image;
 }
 
-static void NativeSdkCefApplyTrayPresentation(NativeSdkChromiumHost *object, NativeSdkChromiumStatusItemEntry *entry, NSString *requestedTitle, double width, int tone, double iconOpacity, BOOL monospaced) {
+static NSFontWeight NativeSdkCefTrayFontWeight(int weight) {
+    switch (weight) {
+        case 1: return NSFontWeightMedium;
+        case 2: return NSFontWeightSemibold;
+        case 3: return NSFontWeightBold;
+        default: return NSFontWeightRegular;
+    }
+}
+
+static void NativeSdkCefApplyTrayPresentation(NativeSdkChromiumHost *object, NativeSdkChromiumStatusItemEntry *entry, NSString *requestedTitle, double width, int tone, double iconOpacity, BOOL monospaced, double fontSize, int fontWeight) {
     if (!entry.item) return;
     entry.presentationTitle = requestedTitle ?: @"";
     entry.presentationWidth = width;
     entry.presentationTone = tone;
     entry.presentationIconOpacity = iconOpacity;
     entry.presentationMonospaced = monospaced;
+    entry.presentationFontSize = fontSize;
+    entry.presentationFontWeight = fontWeight;
     NSString *title = requestedTitle ?: @"";
     if (!entry.baseImage && title.length == 0) title = object.appName.length > 0 ? [object.appName substringToIndex:MIN(1, object.appName.length)] : @"Z";
-    NSFont *font = monospaced ? [NSFont monospacedDigitSystemFontOfSize:11 weight:NSFontWeightRegular] : [NSFont systemFontOfSize:11];
+    CGFloat resolvedSize = fontSize > 0 ? fontSize : 11;
+    NSFontWeight resolvedWeight = NativeSdkCefTrayFontWeight(fontWeight);
+    NSFont *font = monospaced ? [NSFont monospacedSystemFontOfSize:resolvedSize weight:resolvedWeight] : [NSFont systemFontOfSize:resolvedSize weight:resolvedWeight];
     if (tone == 0) {
         entry.item.button.title = title;
         entry.item.button.font = font;
@@ -3553,7 +3687,7 @@ static void NativeSdkCefApplyTrayShell(NativeSdkChromiumHost *object, NativeSdkC
     entry.item.visible = visible != 0;
 }
 
-void native_sdk_appkit_create_tray(native_sdk_appkit_host_t *host, uint32_t status_item_id, const char *icon_path, size_t icon_path_len, const char *title, size_t title_len, const char *tooltip, size_t tooltip_len, int visible, double width, int tone, double icon_opacity, int monospaced, const char *activation_command, size_t activation_command_len, const char *alternate_activation_command, size_t alternate_activation_command_len, const char *open_command, size_t open_command_len) {
+void native_sdk_appkit_create_tray(native_sdk_appkit_host_t *host, uint32_t status_item_id, const char *icon_path, size_t icon_path_len, const char *title, size_t title_len, const char *tooltip, size_t tooltip_len, int visible, double width, int tone, double icon_opacity, int monospaced, double font_size, int font_weight, const char *activation_command, size_t activation_command_len, const char *alternate_activation_command, size_t alternate_activation_command_len, const char *open_command, size_t open_command_len) {
     NativeSdkChromiumHost *object = (__bridge NativeSdkChromiumHost *)host;
     @autoreleasepool {
         NSNumber *key = @(status_item_id);
@@ -3572,7 +3706,7 @@ void native_sdk_appkit_create_tray(native_sdk_appkit_host_t *host, uint32_t stat
         entry.item = [[NSStatusBar systemStatusBar] statusItemWithLength:hasTitle ? NSVariableStatusItemLength : NSSquareStatusItemLength];
         NSString *titleString = hasTitle ? ([[NSString alloc] initWithBytes:title length:title_len encoding:NSUTF8StringEncoding] ?: @"") : @"";
         NativeSdkCefApplyTrayShell(object, entry, icon_path, icon_path_len, tooltip, tooltip_len, visible, activation_command, activation_command_len, alternate_activation_command, alternate_activation_command_len, open_command, open_command_len);
-        NativeSdkCefApplyTrayPresentation(object, entry, titleString, width, tone, icon_opacity, monospaced != 0);
+        NativeSdkCefApplyTrayPresentation(object, entry, titleString, width, tone, icon_opacity, monospaced != 0, font_size, font_weight);
     }
 }
 
@@ -3582,7 +3716,7 @@ void native_sdk_appkit_update_tray_shell(native_sdk_appkit_host_t *host, uint32_
         NativeSdkChromiumStatusItemEntry *entry = [object statusEntryForId:status_item_id];
         if (!entry) return;
         NativeSdkCefApplyTrayShell(object, entry, icon_path, icon_path_len, tooltip, tooltip_len, visible, activation_command, activation_command_len, alternate_activation_command, alternate_activation_command_len, open_command, open_command_len);
-        NativeSdkCefApplyTrayPresentation(object, entry, entry.presentationTitle, entry.presentationWidth, entry.presentationTone, entry.presentationIconOpacity, entry.presentationMonospaced);
+        NativeSdkCefApplyTrayPresentation(object, entry, entry.presentationTitle, entry.presentationWidth, entry.presentationTone, entry.presentationIconOpacity, entry.presentationMonospaced, entry.presentationFontSize, entry.presentationFontWeight);
         if (entry.activationCommand.length == 0 && entry.alternateActivationCommand.length == 0) entry.item.menu = entry.menu;
         else entry.item.menu = nil;
     }
@@ -3595,6 +3729,107 @@ static NSEventModifierFlags NativeSdkCefTrayModifiers(uint32_t modifiers) {
     if ((modifiers & (1u << 3)) != 0) flags |= NSEventModifierFlagOption;
     if ((modifiers & (1u << 4)) != 0) flags |= NSEventModifierFlagShift;
     return flags;
+}
+
+@interface NativeSdkCefTrayBarChartView : NSView
+@property(nonatomic, copy) NSArray<NSNumber *> *values;
+@property(nonatomic, assign) double minValue;
+@property(nonatomic, assign) double maxValue;
+@end
+
+@implementation NativeSdkCefTrayBarChartView
+- (BOOL)isFlipped { return YES; }
+- (void)drawRect:(NSRect)dirtyRect {
+    [super drawRect:dirtyRect];
+    if (self.values.count == 0 || !(self.maxValue > self.minValue)) return;
+    CGFloat gap = 2;
+    CGFloat barWidth = MAX(1, (NSWidth(self.bounds) - gap * (self.values.count - 1)) / self.values.count);
+    CGFloat x = 0;
+    [NSColor.controlAccentColor setFill];
+    for (NSNumber *number in self.values) {
+        double fraction = (number.doubleValue - self.minValue) / (self.maxValue - self.minValue);
+        fraction = MIN(MAX(fraction, 0), 1);
+        CGFloat height = MAX(fraction > 0 ? 1 : 0, floor(fraction * NSHeight(self.bounds)));
+        NSRectFill(NSMakeRect(x, NSHeight(self.bounds) - height, barWidth, height));
+        x += barWidth + gap;
+    }
+}
+@end
+
+static NSString *NativeSdkCefTrayString(const char *bytes, size_t len) {
+    return bytes && len > 0 ? ([[NSString alloc] initWithBytes:bytes length:len encoding:NSUTF8StringEncoding] ?: @"") : @"";
+}
+
+static NSView *NativeSdkCefTraySegmentedView(NativeSdkChromiumHost *object, uint32_t statusItemId, const native_sdk_appkit_tray_segment_option_t *options, size_t count) {
+    NSView *row = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 320, 38)];
+    NativeSdkCefTraySegmentedControl *control = [[NativeSdkCefTraySegmentedControl alloc] initWithFrame:NSMakeRect(14, 5, 292, 28)];
+    control.segmentCount = count;
+    control.trackingMode = NSSegmentSwitchTrackingSelectOne;
+    control.target = object;
+    control.action = @selector(traySegmentChanged:);
+    control.tag = (NSInteger)statusItemId;
+    control.sourceSelectedSegment = -1;
+    control.autoresizingMask = NSViewWidthSizable;
+    for (size_t i = 0; i < count; i++) {
+        [control setLabel:NativeSdkCefTrayString(options[i].label, options[i].label_len) forSegment:i];
+        [control setEnabled:options[i].enabled != 0 forSegment:i];
+        [control setTag:(NSInteger)options[i].item_id forSegment:i];
+        [control setSelected:options[i].selected != 0 forSegment:i];
+        if (options[i].selected != 0) control.sourceSelectedSegment = (NSInteger)i;
+    }
+    [row addSubview:control];
+    return row;
+}
+
+static NSView *NativeSdkCefTrayMetricView(const native_sdk_appkit_tray_metric_row_t *metric) {
+    NSView *row = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 320, 58)];
+    NSTextField *primary = [NSTextField labelWithString:NativeSdkCefTrayString(metric->primary_text, metric->primary_text_len)];
+    NSTextField *secondary = [NSTextField labelWithString:NativeSdkCefTrayString(metric->secondary_text, metric->secondary_text_len)];
+    primary.frame = NSMakeRect(14, 25, 292, 28);
+    secondary.frame = NSMakeRect(14, 6, 292, 16);
+    primary.font = [NSFont fontWithName:@"Geist Mono" size:20] ?: [NSFont monospacedDigitSystemFontOfSize:20 weight:NSFontWeightMedium];
+    secondary.font = [NSFont systemFontOfSize:11];
+    secondary.textColor = NSColor.secondaryLabelColor;
+    primary.autoresizingMask = NSViewWidthSizable;
+    secondary.autoresizingMask = NSViewWidthSizable;
+    primary.accessibilityElement = NO;
+    secondary.accessibilityElement = NO;
+    [row addSubview:primary];
+    [row addSubview:secondary];
+    row.accessibilityLabel = NativeSdkCefTrayString(metric->accessibility_label, metric->accessibility_label_len);
+    row.accessibilityRole = NSAccessibilityGroupRole;
+    return row;
+}
+
+static NSView *NativeSdkCefTrayChartView(const native_sdk_appkit_tray_chart_row_t *chart) {
+    NSView *row = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 320, 58)];
+    NSTextField *leading = [NSTextField labelWithString:NativeSdkCefTrayString(chart->leading_caption, chart->leading_caption_len)];
+    NSTextField *trailing = [NSTextField labelWithString:NativeSdkCefTrayString(chart->trailing_summary, chart->trailing_summary_len)];
+    leading.frame = NSMakeRect(14, 3, 142, 15);
+    trailing.frame = NSMakeRect(164, 3, 142, 15);
+    trailing.alignment = NSTextAlignmentRight;
+    leading.font = [NSFont systemFontOfSize:10];
+    trailing.font = [NSFont monospacedDigitSystemFontOfSize:10 weight:NSFontWeightRegular];
+    leading.textColor = NSColor.secondaryLabelColor;
+    trailing.textColor = NSColor.secondaryLabelColor;
+    leading.autoresizingMask = NSViewWidthSizable;
+    trailing.autoresizingMask = NSViewMinXMargin;
+    leading.accessibilityElement = NO;
+    trailing.accessibilityElement = NO;
+    NativeSdkCefTrayBarChartView *bars = [[NativeSdkCefTrayBarChartView alloc] initWithFrame:NSMakeRect(14, 21, 292, 32)];
+    NSMutableArray<NSNumber *> *values = [NSMutableArray arrayWithCapacity:chart->value_count];
+    for (size_t i = 0; i < chart->value_count; i++) [values addObject:@(chart->values[i])];
+    bars.values = values;
+    bars.minValue = chart->min_value;
+    bars.maxValue = chart->max_value;
+    bars.autoresizingMask = NSViewWidthSizable;
+    bars.accessibilityElement = NO;
+    [row addSubview:leading];
+    [row addSubview:trailing];
+    [row addSubview:bars];
+    row.accessibilityLabel = NativeSdkCefTrayString(chart->accessibility_label, chart->accessibility_label_len);
+    row.accessibilityRole = NSAccessibilityGroupRole;
+    return row;
 }
 
 void native_sdk_appkit_update_tray_menu(native_sdk_appkit_host_t *host, uint32_t status_item_id, const uint32_t *item_ids, const char *const *labels, const size_t *label_lens, const int *separators, const int *enabled_flags, const char *const *details, const size_t *detail_lens, const int *roles, const char *const *keys, const size_t *key_lens, const uint32_t *modifiers, size_t count) {
@@ -3619,9 +3854,10 @@ void native_sdk_appkit_update_tray_menu(native_sdk_appkit_host_t *host, uint32_t
             NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:label ?: @""
                                                           action:@selector(trayMenuItemClicked:)
                                                    keyEquivalent:@""];
+            item.representedObject = @(i);
             item.tag = (NSInteger)(((uint64_t)status_item_id << 32) | item_ids[i]);
             item.target = object;
-            item.enabled = enabled_flags[i] != 0 && (roles[i] == 0 || roles[i] == 4);
+            item.enabled = enabled_flags[i] != 0 && (roles[i] == 0 || roles[i] == 4 || roles[i] == 6);
             if (details[i] && detail_lens[i] > 0) {
                 NSString *detail = [[NSString alloc] initWithBytes:details[i] length:detail_lens[i] encoding:NSUTF8StringEncoding] ?: @"";
                 if (detail.length > 0 && roles[i] != 0) item.title = [NSString stringWithFormat:@"%@ — %@", label ?: @"", detail];
@@ -3635,6 +3871,47 @@ void native_sdk_appkit_update_tray_menu(native_sdk_appkit_host_t *host, uint32_t
         }
         menu.delegate = object;
         if (entry.activationCommand.length == 0 && entry.alternateActivationCommand.length == 0) entry.item.menu = menu;
+    }
+}
+
+void native_sdk_appkit_update_tray_rich_rows(native_sdk_appkit_host_t *host, uint32_t status_item_id, const native_sdk_appkit_tray_segmented_row_t *segmented_rows, size_t segmented_count, const native_sdk_appkit_tray_metric_row_t *metric_rows, size_t metric_count, const native_sdk_appkit_tray_chart_row_t *chart_rows, size_t chart_count) {
+    NativeSdkChromiumHost *object = (__bridge NativeSdkChromiumHost *)host;
+    @autoreleasepool {
+        NativeSdkChromiumStatusItemEntry *entry = [object statusEntryForId:status_item_id];
+        if (!entry || !entry.menu) return;
+        for (size_t i = 0; i < segmented_count; i++) {
+            NSMenuItem *item = nil;
+            for (NSMenuItem *candidate in entry.menu.itemArray) {
+                if ([candidate.representedObject isEqual:@(segmented_rows[i].row_index)]) { item = candidate; break; }
+            }
+            if (item) {
+                item.action = NULL;
+                item.target = nil;
+                item.view = NativeSdkCefTraySegmentedView(object, status_item_id, segmented_rows[i].options, segmented_rows[i].option_count);
+            }
+        }
+        for (size_t i = 0; i < metric_count; i++) {
+            NSMenuItem *item = nil;
+            for (NSMenuItem *candidate in entry.menu.itemArray) {
+                if ([candidate.representedObject isEqual:@(metric_rows[i].row_index)]) { item = candidate; break; }
+            }
+            if (item) {
+                item.action = NULL;
+                item.target = nil;
+                item.view = NativeSdkCefTrayMetricView(&metric_rows[i]);
+            }
+        }
+        for (size_t i = 0; i < chart_count; i++) {
+            NSMenuItem *item = nil;
+            for (NSMenuItem *candidate in entry.menu.itemArray) {
+                if ([candidate.representedObject isEqual:@(chart_rows[i].row_index)]) { item = candidate; break; }
+            }
+            if (item) {
+                item.action = NULL;
+                item.target = nil;
+                item.view = NativeSdkCefTrayChartView(&chart_rows[i]);
+            }
+        }
     }
 }
 
@@ -3664,18 +3941,20 @@ void native_sdk_appkit_update_tray_title(native_sdk_appkit_host_t *host, uint32_
             entry.presentationWidth,
             entry.presentationTone,
             entry.presentationIconOpacity,
-            entry.presentationMonospaced
+            entry.presentationMonospaced,
+            entry.presentationFontSize,
+            entry.presentationFontWeight
         );
     }
 }
 
-void native_sdk_appkit_update_tray_presentation(native_sdk_appkit_host_t *host, uint32_t status_item_id, const char *title, size_t title_len, double width, int tone, double icon_opacity, int monospaced) {
+void native_sdk_appkit_update_tray_presentation(native_sdk_appkit_host_t *host, uint32_t status_item_id, const char *title, size_t title_len, double width, int tone, double icon_opacity, int monospaced, double font_size, int font_weight) {
     NativeSdkChromiumHost *object = (__bridge NativeSdkChromiumHost *)host;
     @autoreleasepool {
         NativeSdkChromiumStatusItemEntry *entry = [object statusEntryForId:status_item_id];
         if (!entry) return;
         NSString *value = title ? ([[NSString alloc] initWithBytes:title length:title_len encoding:NSUTF8StringEncoding] ?: @"") : @"";
-        NativeSdkCefApplyTrayPresentation(object, entry, value, width, tone, icon_opacity, monospaced != 0);
+        NativeSdkCefApplyTrayPresentation(object, entry, value, width, tone, icon_opacity, monospaced != 0, font_size, font_weight);
     }
 }
 

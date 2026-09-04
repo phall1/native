@@ -23,6 +23,7 @@ const WidgetKind = widget_model.WidgetKind;
 const WidgetCursor = widget_model.WidgetCursor;
 const WidgetState = widget_model.WidgetState;
 const WidgetRenderState = widget_model.WidgetRenderState;
+const WidgetContextMenuPolicy = widget_model.WidgetContextMenuPolicy;
 const Widget = widget_model.Widget;
 const WidgetLayoutNode = event_model.WidgetLayoutNode;
 const WidgetHit = event_model.WidgetHit;
@@ -60,6 +61,10 @@ pub const textGeometryForWidget = widget_text_input.textGeometryForWidget;
 
 pub const WidgetLayoutTree = struct {
     nodes: []const WidgetLayoutNode = &.{},
+    /// Viewport bounds that produced the layout. Kept on the tree instead
+    /// of every node so root-authored modals retain their window-space
+    /// contract without widening the hot node array.
+    root_bounds: ?geometry.RectF = null,
 
     pub fn nodeCount(self: WidgetLayoutTree) usize {
         return self.nodes.len;
@@ -71,6 +76,30 @@ pub const WidgetLayoutTree = struct {
             if (node.widget.id == id) return node;
         }
         return null;
+    }
+
+    /// The nearest explicit context-menu policy from `node_index` toward
+    /// the root. `.automatic` inherits; an invalid node fails open to the
+    /// compatibility default.
+    pub fn contextMenuPolicyAt(self: WidgetLayoutTree, node_index: usize) WidgetContextMenuPolicy {
+        var current: ?usize = node_index;
+        while (current) |index| {
+            if (index >= self.nodes.len) return .automatic;
+            const node = self.nodes[index];
+            if (node.widget.semantics.context_menu_policy != .automatic) {
+                return node.widget.semantics.context_menu_policy;
+            }
+            current = node.parent_index;
+        }
+        return .automatic;
+    }
+
+    pub fn contextMenuPolicyById(self: WidgetLayoutTree, id: ObjectId) WidgetContextMenuPolicy {
+        if (id == 0) return .automatic;
+        for (self.nodes, 0..) |node, index| {
+            if (node.widget.id == id) return self.contextMenuPolicyAt(index);
+        }
+        return .automatic;
     }
 
     pub fn virtualRangeById(self: WidgetLayoutTree, id: ObjectId) ?VirtualListRange {
@@ -158,6 +187,10 @@ pub const WidgetLayoutTree = struct {
         return widget_routing.focusWidgetTargetById(self, id, widgetScrollSemantics);
     }
 
+    pub fn logicalFocusTargetAtIndex(self: WidgetLayoutTree, index: usize) ?WidgetFocusTarget {
+        return widget_routing.logicalFocusWidgetTargetAtIndex(self, index, widgetScrollSemantics);
+    }
+
     pub fn collectSemantics(self: WidgetLayoutTree, output: []WidgetSemanticsNode) Error![]const WidgetSemanticsNode {
         return collectWidgetSemantics(self, output);
     }
@@ -201,9 +234,10 @@ pub fn layoutWidgetTree(widget: Widget, bounds: geometry.RectF, output: []Widget
 }
 
 pub fn layoutWidgetTreeWithTokens(widget: Widget, bounds: geometry.RectF, tokens: DesignTokens, output: []WidgetLayoutNode) Error!WidgetLayoutTree {
+    const root_bounds = bounds.normalized();
     var len: usize = 0;
-    _ = try widget_layout.layoutWidgetDepth(widget, bounds.normalized(), null, 0, output, &len, tokens);
-    return .{ .nodes = output[0..len] };
+    _ = try widget_layout.layoutWidgetDepth(widget, root_bounds, null, 0, output, &len, tokens);
+    return .{ .nodes = output[0..len], .root_bounds = root_bounds };
 }
 
 pub fn intrinsicWidgetSize(widget: Widget, tokens: DesignTokens) geometry.SizeF {
@@ -326,6 +360,10 @@ pub fn cursorForWidgetHit(hit: ?WidgetHit) WidgetCursor {
 pub fn cursorForWidgetTarget(kind: WidgetKind, state: WidgetState) WidgetCursor {
     return widget_access.cursorForWidgetTarget(kind, state);
 }
+pub fn cursorForWidgetTargetOnAxis(kind: WidgetKind, state: WidgetState, split_axis: widget_model.SplitAxis) WidgetCursor {
+    return widget_access.cursorForWidgetTargetOnAxis(kind, state, split_axis);
+}
+
 
 fn collectWidgetSemantics(layout: WidgetLayoutTree, output: []WidgetSemanticsNode) Error![]const WidgetSemanticsNode {
     return widget_semantics.collectWidgetSemantics(layout, output, widgetScrollSemantics);

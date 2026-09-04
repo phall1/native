@@ -26,6 +26,9 @@ const DrawImage = drawing_model.DrawImage;
 const Shadow = drawing_model.Shadow;
 const Blur = drawing_model.Blur;
 const DrawText = text_model.DrawText;
+const cell_grid_model = @import("cell_grid.zig");
+const CellGrid = cell_grid_model.CellGrid;
+const CellDecoration = cell_grid_model.CellDecoration;
 const TextLayoutOptions = text_model.TextLayoutOptions;
 const TextLine = text_model.TextLine;
 const RenderCommand = render_model.RenderCommand;
@@ -51,30 +54,29 @@ const font_ttf = @import("font_ttf.zig");
 /// admits — a simple glyph's maxima and a composite's flattened maxima
 /// (`maxp.maxCompositePoints`/`maxCompositeContours`, which is what
 /// this builder actually receives when a composite renders). The
-/// budgets are currently equal, so the max is 1408 either way; the
-/// derivation keeps capacity honest if they ever diverge. Stack shape:
-/// at 28 B per element this is ~39 KiB in `drawGlyphOutline`; the edge
-/// accumulator below it is the per-thread heap-resident
-/// `vector.GlyphRasterizer` (see `reference_glyph_raster_scratch`), so
-/// the builder is the only glyph raster state on the stack.
+/// budgets are currently equal, so the max is 4864 either way; the
+/// derivation keeps capacity honest if they ever diverge. At 28 B per
+/// element the builder is ~133 KiB, so it lives beside the rasterizer in
+/// per-thread heap scratch rather than in `drawGlyphOutline`'s stack.
 const reference_glyph_path_capacity: usize = @max(
     font_ttf.max_glyph_points + 3 * font_ttf.max_glyph_contours,
     font_ttf.max_composite_points + 3 * font_ttf.max_composite_contours,
 );
 
-/// Per-thread rasterizer for glyph fills: `vector.GlyphRasterizer`'s
+const ReferenceGlyphPathBuilder = vector.PathBuilder(reference_glyph_path_capacity);
+
+/// Per-thread path and raster scratch for glyph fills: the path builder is
+/// ~133 KiB and `vector.GlyphRasterizer` is ~1.9 MiB. The latter's
 /// derived budgets guarantee every outline the font registration gate
-/// admits rasterizes (never a block fallback), which sizes it at
-/// ~508 KiB — a per-thread heap slot behind one TLS pointer (the
-/// lazy_tls pattern), not a stack temporary and not static TLS. Only
-/// threads that ink a glyph through the reference renderer allocate it.
-/// The array carries no default and stays uninitialized, exactly like
-/// the stack `Rasterizer` it replaces; `vector.fillGlyphPath` resets it
-/// per glyph.
-const ReferenceGlyphRasterScratch = struct {
+/// admits rasterizes (never a block fallback). Together they occupy ~2.0
+/// MiB behind one lazy TLS pointer, not the render-thread stack or static
+/// TLS, and only threads that ink a glyph allocate them. The arrays carry
+/// no defaults and stay uninitialized; each operation resets their lengths.
+const ReferenceGlyphScratch = struct {
+    path: ReferenceGlyphPathBuilder,
     raster: vector.GlyphRasterizer,
 };
-const reference_glyph_raster_scratch = @import("lazy_tls.zig").LazyTls(ReferenceGlyphRasterScratch);
+const reference_glyph_scratch = @import("lazy_tls.zig").LazyTls(ReferenceGlyphScratch);
 
 const referenceBlurKernel = reference_blur.referenceBlurKernel;
 const referenceBlurSampleWithKernel = reference_blur.referenceBlurSampleWithKernel;
@@ -307,6 +309,7 @@ pub const ReferenceRenderSurface = struct {
             .shadow => |value| try self.drawShadow(command, value, draw_bounds),
             .blur => |value| try self.drawBlur(command, value, draw_bounds),
             .draw_text => |value| try self.drawText(command, value, draw_bounds),
+            .cell_grid => |value| try self.drawCellGrid(command, value, draw_bounds),
             else => return error.ReferenceRenderUnsupportedCommand,
         }
     }
@@ -486,6 +489,7 @@ pub const ReferenceRenderSurface = struct {
         } else return error.ReferenceRenderUnsupportedCommand;
 
         const src_rect = referenceImageSourceRect(image, value.src) orelse return;
+        const sample_bounds = referenceImageSampleBounds(image, src_rect);
         const local_dst = referenceImageDestinationRect(value.dst, src_rect, value.fit) orelse return;
         const dst_rect = command.transform.transformRect(local_dst).normalized();
         // The rounded mask applies over the REQUESTED destination (the
@@ -510,7 +514,7 @@ pub const ReferenceRenderSurface = struct {
         // once per (image content, size, phase) and every later repaint
         // — the cover-loading cascade, a re-opened view, a whole-pixel
         // move — blends from the panel.
-        if (self.imageScalePanel(image, value, src_rect, dst_rect, pixel_rect)) |panel| {
+        if (self.imageScalePanel(image, value, src_rect, sample_bounds, dst_rect, pixel_rect)) |panel| {
             const dst_x0: i64 = @intFromFloat(@floor(dst_rect.x));
             const dst_y0: i64 = @intFromFloat(@floor(dst_rect.y));
             var y = pixel_rect.y;
@@ -549,7 +553,7 @@ pub const ReferenceRenderSurface = struct {
                 if (has_mask and !referencePointInRoundedRect(point, mask_rect, mask_radius)) continue;
                 const u = std.math.clamp((point.x - dst_rect.x) / dst_rect.width, 0, 1);
                 const v = std.math.clamp((point.y - dst_rect.y) / dst_rect.height, 0, 1);
-                const sample = referenceSampleImage(image, src_rect, u, v, value.sampling);
+                const sample = referenceSampleImage(image, src_rect, sample_bounds, u, v, value.sampling);
                 const index = (y * self.width + x) * 4;
                 const dst = [4]u8{
                     self.pixels[index + 0],
@@ -575,7 +579,7 @@ pub const ReferenceRenderSurface = struct {
         width: usize,
     };
 
-    fn imageScalePanel(self: ReferenceRenderSurface, image: ReferenceImage, value: DrawImage, src_rect: geometry.RectF, dst_rect: geometry.RectF, pixel_rect: ReferencePixelRect) ?ImageScalePanel {
+    fn imageScalePanel(self: ReferenceRenderSurface, image: ReferenceImage, value: DrawImage, src_rect: geometry.RectF, sample_bounds: ReferenceImageSampleBounds, dst_rect: geometry.RectF, pixel_rect: ReferencePixelRect) ?ImageScalePanel {
         const memo = self.render_memo orelse return null;
         // Exact-arithmetic bounds: pixel offsets and phases must stay in
         // f32's exact-integer range for the phase-relative identity
@@ -630,7 +634,7 @@ pub const ReferenceRenderSurface = struct {
             var column: usize = 0;
             while (column < panel_width) : (column += 1) {
                 const u = std.math.clamp(((@as(f32, @floatFromInt(column)) + 0.5) - phase_x) / dst_rect.width, 0, 1);
-                const sample = referenceSampleImage(image, src_rect, u, v, value.sampling);
+                const sample = referenceSampleImage(image, src_rect, sample_bounds, u, v, value.sampling);
                 const offset = (row * panel_width + column) * 4;
                 buffer[offset] = sample[0];
                 buffer[offset + 1] = sample[1];
@@ -754,6 +758,141 @@ pub const ReferenceRenderSurface = struct {
         }
     }
 
+    /// The packed cell grid (`cell_grid.zig`), the renderer that makes
+    /// this module the terminal's oracle.
+    ///
+    /// Two passes, and the order is the contract: EVERY background
+    /// first, then every glyph and decoration. A single pass would let
+    /// cell N+1's background erase the part of cell N's glyph that
+    /// overhangs into it — real mono faces overhang constantly (italics
+    /// and box-adjacent glyphs worst), and the seam would appear only
+    /// on styled screens, which is the worst kind of bug to find.
+    ///
+    /// Each cell's ink goes through `drawGlyphBox`, the exact path a
+    /// `draw_text` glyph takes: same outline rasterizer, same coverage
+    /// blend, same block fallback for unmapped codepoints. A grid cell
+    /// and a text run therefore paint the same glyph the same way, by
+    /// construction rather than by inspection.
+    fn drawCellGrid(self: ReferenceRenderSurface, command: RenderCommand, value: CellGrid, draw_bounds: geometry.RectF) Error!void {
+        if (value.cell_width <= 0 or value.cell_height <= 0) return;
+        if (value.cols == 0 or value.rows == 0) return;
+
+        // Pass 1: backgrounds.
+        for (value.cells, 0..) |cell, index| {
+            const flags = cell.style();
+            if (!flags.has_background) continue;
+            const x = index % value.cols;
+            const y = index / value.cols;
+            if (y >= value.rows) break;
+            const rect = command.transform.transformRect(value.cellRect(x, y)).normalized();
+            self.fillTextRect(rect, draw_bounds, cell.bg.toColor(), command.opacity);
+        }
+
+        // Pass 2: ink and decorations. The synthetic `DrawText` carries
+        // exactly what the glyph path reads — face, size, colour — so a
+        // cell is a one-glyph run in every way that reaches a pixel.
+        var run = DrawText{
+            .id = value.id,
+            .font_id = value.font_id,
+            .size = value.font_size,
+            .origin = value.origin,
+            .color = Color.rgba(0, 0, 0, 1),
+        };
+        for (value.cells, 0..) |cell, index| {
+            const flags = cell.style();
+            if (flags.width == .spacer) continue;
+            if (!cell.hasInk()) continue;
+            const x = index % value.cols;
+            const y = index / value.cols;
+            if (y >= value.rows) break;
+            const rect = value.cellRect(x, y);
+            run.color = cell.fg.toColor();
+
+            const cluster = cell.cluster(value.text);
+            if (cluster.len > 0) {
+                // The face this cell's SGR style asks for. Real
+                // companion faces when the app registered them,
+                // synthesis otherwise — and either way the pen and the
+                // advance below are the CELL's, so weight and slant
+                // never move the lattice.
+                const cell_face = value.face(flags);
+                run.font_id = cell_face.font_id;
+                const baseline = rect.y + value.baseline;
+                // A wide cell inks across two columns, so its fallback
+                // block and its outline centring both use the doubled
+                // advance.
+                const advance = if (flags.width == .wide) value.cell_width * 2 else value.cell_width;
+                // Every codepoint of the cluster paints at the SAME pen:
+                // the primary plus its combining marks are one glyph
+                // stack over one cell, and advancing between them would
+                // walk the marks into the next column.
+                var iterator = std.unicode.Utf8Iterator{ .bytes = cluster, .i = 0 };
+                while (iterator.nextCodepoint()) |codepoint| {
+                    const glyph_rect = geometry.RectF.init(rect.x, baseline - value.font_size, advance, value.font_size);
+                    if (!self.drawGlyphOutlineSynthesized(command, run, draw_bounds, codepoint, rect.x, baseline, advance, cell_face)) {
+                        // Unmapped codepoint: the documented block
+                        // fallback, at the cell's own rect.
+                        self.fillTextRect(command.transform.transformRect(glyph_rect).normalized(), draw_bounds, run.color, command.opacity);
+                    }
+                }
+            }
+
+            self.drawCellDecorations(command, value, cell, flags, rect, draw_bounds);
+        }
+    }
+
+    /// Underline (six styles), strikethrough, and overline for one
+    /// cell. Geometry comes from `CellDecoration` rather than from
+    /// numbers written here, so a host encoder that wants to match this
+    /// renderer reads the same source.
+    fn drawCellDecorations(
+        self: ReferenceRenderSurface,
+        command: RenderCommand,
+        value: CellGrid,
+        cell: cell_grid_model.Cell,
+        flags: cell_grid_model.CellFlags,
+        rect: geometry.RectF,
+        draw_bounds: geometry.RectF,
+    ) void {
+        const width = if (flags.width == .wide)
+            geometry.RectF.init(rect.x, rect.y, rect.width * 2, rect.height)
+        else
+            rect;
+        if (flags.overline) {
+            self.fillCellRect(command, CellDecoration.overlineRect(width, value.font_size), draw_bounds, cell.fg.toColor());
+        }
+        if (flags.strikethrough) {
+            self.fillCellRect(command, CellDecoration.strikethroughRect(width, value.font_size), draw_bounds, cell.fg.toColor());
+        }
+        if (flags.underline == .none) return;
+        const color = if (flags.has_underline_color) cell.underline_color.toColor() else cell.fg.toColor();
+        const line = CellDecoration.underlineRect(width, value.font_size);
+        switch (flags.underline) {
+            .none => {},
+            .single => self.fillCellRect(command, line, draw_bounds, color),
+            .double => {
+                self.fillCellRect(command, line, draw_bounds, color);
+                self.fillCellRect(command, CellDecoration.underlineSecondRect(width, value.font_size), draw_bounds, color);
+            },
+            .dotted, .dashed => {
+                var segment: usize = 0;
+                while (CellDecoration.dashSegment(line, flags.underline, segment)) |piece| : (segment += 1) {
+                    self.fillCellRect(command, piece, draw_bounds, color);
+                }
+            },
+            .curly => {
+                var segment: usize = 0;
+                while (CellDecoration.curlSegment(line, value.font_size, segment)) |piece| : (segment += 1) {
+                    self.fillCellRect(command, piece, draw_bounds, color);
+                }
+            },
+        }
+    }
+
+    fn fillCellRect(self: ReferenceRenderSurface, command: RenderCommand, rect: geometry.RectF, draw_bounds: geometry.RectF, color: Color) void {
+        self.fillTextRect(command.transform.transformRect(rect).normalized(), draw_bounds, color, command.opacity);
+    }
+
     fn drawTextLine(self: ReferenceRenderSurface, command: RenderCommand, value: DrawText, draw_bounds: geometry.RectF, line: TextLine) Error!void {
         if (line.glyph_len > 0 and line.glyph_start < value.glyphs.len) {
             // An elided line inks only its kept prefix, then the marker.
@@ -847,7 +986,26 @@ pub const ReferenceRenderSurface = struct {
         baseline: f32,
         cell_advance: f32,
     ) bool {
-        const face = referenceFaceForFontId(self.fonts, value.font_id);
+        return self.drawGlyphOutlineSynthesized(command, value, draw_bounds, codepoint, pen_x, baseline, cell_advance, .{ .font_id = value.font_id });
+    }
+
+    /// `drawGlyphOutline` with an explicit face and the terminal's
+    /// synthesis flags. Real companion faces make both flags false and
+    /// this is the plain path; a missing companion falls back to
+    /// arithmetic the AppKit decoder mirrors exactly
+    /// (`cell_grid.CellSynthesis`).
+    fn drawGlyphOutlineSynthesized(
+        self: ReferenceRenderSurface,
+        command: RenderCommand,
+        value: DrawText,
+        draw_bounds: geometry.RectF,
+        codepoint: u21,
+        pen_x: f32,
+        baseline: f32,
+        cell_advance: f32,
+        cell_face: cell_grid_model.CellFace,
+    ) bool {
+        const face = referenceFaceForFontId(self.fonts, cell_face.font_id);
         const glyph = face.glyphIndex(codepoint);
         if (glyph == 0) return false;
 
@@ -863,12 +1021,22 @@ pub const ReferenceRenderSurface = struct {
         const scale = value.size / face.units_per_em;
         // Font units are y-up; bake the flip and em scaling into the pen
         // placement, then apply the command transform on top.
-        const local = Affine{ .a = scale, .b = 0, .c = 0, .d = -scale, .tx = pen_x + cell_inset, .ty = baseline };
+        //
+        // Faux italic is a SHEAR about the baseline, which is exactly
+        // what `c` does here: x' = a*x + c*y + tx, and y is measured
+        // from the baseline. It moves ink, never the pen — so a synthetic
+        // italic cell still starts and advances where its index says.
+        const shear: f32 = if (cell_face.synthetic_italic)
+            scale * cell_grid_model.CellSynthesis.italic_tangent
+        else
+            0;
+        const local = Affine{ .a = scale, .b = 0, .c = shear, .d = -scale, .tx = pen_x + cell_inset, .ty = baseline };
         const total = command.transform.multiply(local);
 
-        var builder = vector.PathBuilder(reference_glyph_path_capacity){};
-        face.glyphOutline(glyph, total, &builder) catch return false;
-        if (builder.slice().len == 0) return true; // Space: nothing to ink.
+        const scratch = reference_glyph_scratch.get();
+        scratch.path.reset();
+        face.glyphOutline(glyph, total, &scratch.path) catch return false;
+        if (scratch.path.slice().len == 0) return true; // Space: nothing to ink.
 
         const pixel_rect = referencePixelRect(draw_bounds, self.width, self.height) orelse return true;
         // Glyph coverage blends in sRGB, not linear light (see
@@ -890,14 +1058,34 @@ pub const ReferenceRenderSurface = struct {
         // `max_raster_width` (surface-shaped, not font-shaped) and
         // nothing else.
         vector.fillGlyphPath(
-            &reference_glyph_raster_scratch.get().raster,
-            builder.slice(),
+            &scratch.raster,
+            scratch.path.slice(),
             Affine.identity(),
             .nonzero,
             vector.default_tolerance,
             referenceVectorClip(pixel_rect),
             &sink,
         ) catch return false;
+
+        // Faux bold: the same outline again, offset in x. Thickening ink
+        // inside the cell cannot change the advance, which is why this
+        // is safe in a lattice where position is the index.
+        if (cell_face.synthetic_bold) {
+            const offset = cell_grid_model.CellSynthesis.boldOffset(value.size);
+            const bold_local = Affine{ .a = scale, .b = 0, .c = shear, .d = -scale, .tx = pen_x + cell_inset + offset, .ty = baseline };
+            scratch.path.reset();
+            face.glyphOutline(glyph, command.transform.multiply(bold_local), &scratch.path) catch return true;
+            if (scratch.path.slice().len == 0) return true;
+            vector.fillGlyphPath(
+                &scratch.raster,
+                scratch.path.slice(),
+                Affine.identity(),
+                .nonzero,
+                vector.default_tolerance,
+                referenceVectorClip(pixel_rect),
+                &sink,
+            ) catch return true;
+        }
         return true;
     }
 
@@ -1123,7 +1311,6 @@ fn referenceScaleCommand(command: RenderCommand, scale: f32) RenderCommand {
 fn referenceScaleRect(rect: geometry.RectF, scale: f32) geometry.RectF {
     return geometry.RectF.init(rect.x * scale, rect.y * scale, rect.width * scale, rect.height * scale);
 }
-
 
 fn referencePixelCenter(x: usize, y: usize) geometry.PointF {
     return geometry.PointF.init(@as(f32, @floatFromInt(x)) + 0.5, @as(f32, @floatFromInt(y)) + 0.5);
@@ -1372,22 +1559,43 @@ const ReferencePremultipliedLinearColor = struct {
     a: f32 = 0,
 };
 
-fn referenceSampleImage(image: ReferenceImage, src: geometry.RectF, u: f32, v: f32, sampling: ImageSampling) [4]u8 {
+fn referenceSampleImage(image: ReferenceImage, src: geometry.RectF, bounds: ReferenceImageSampleBounds, u: f32, v: f32, sampling: ImageSampling) [4]u8 {
     return switch (sampling) {
-        .nearest => referenceSampleImageNearest(image, src, u, v),
-        .linear => referenceSampleImageLinear(image, src, u, v),
+        .nearest => referenceSampleImageNearest(image, src, bounds, u, v),
+        .linear => referenceSampleImageLinear(image, src, bounds, u, v),
     };
 }
 
-fn referenceSampleImageNearest(image: ReferenceImage, src: geometry.RectF, u: f32, v: f32) [4]u8 {
+const ReferenceImageSampleBounds = struct {
+    min_x: i32,
+    min_y: i32,
+    max_x: i32,
+    max_y: i32,
+};
+
+/// Inclusive texel bounds touched by a clipped source rectangle. Native
+/// image APIs constrain filtering to their source portion; mirror that
+/// here so scaling a texture-atlas tile never samples an adjacent tile.
+fn referenceImageSampleBounds(image: ReferenceImage, src: geometry.RectF) ReferenceImageSampleBounds {
+    const image_max_x: i32 = @intCast(image.width - 1);
+    const image_max_y: i32 = @intCast(image.height - 1);
+    return .{
+        .min_x = clampI32(referenceFloor(src.minX()), 0, image_max_x),
+        .min_y = clampI32(referenceFloor(src.minY()), 0, image_max_y),
+        .max_x = clampI32(referenceCeil(src.maxX()) - 1, 0, image_max_x),
+        .max_y = clampI32(referenceCeil(src.maxY()) - 1, 0, image_max_y),
+    };
+}
+
+fn referenceSampleImageNearest(image: ReferenceImage, src: geometry.RectF, bounds: ReferenceImageSampleBounds, u: f32, v: f32) [4]u8 {
     const sample_x_f = src.x + std.math.clamp(u, 0, 1) * src.width;
     const sample_y_f = src.y + std.math.clamp(v, 0, 1) * src.height;
-    const x = clampI32(referenceFloor(sample_x_f), 0, @intCast(image.width - 1));
-    const y = clampI32(referenceFloor(sample_y_f), 0, @intCast(image.height - 1));
+    const x = clampI32(referenceFloor(sample_x_f), bounds.min_x, bounds.max_x);
+    const y = clampI32(referenceFloor(sample_y_f), bounds.min_y, bounds.max_y);
     return referenceImagePixel(image, x, y);
 }
 
-fn referenceSampleImageLinear(image: ReferenceImage, src: geometry.RectF, u: f32, v: f32) [4]u8 {
+fn referenceSampleImageLinear(image: ReferenceImage, src: geometry.RectF, bounds: ReferenceImageSampleBounds, u: f32, v: f32) [4]u8 {
     // Belt over the renderPass-level fill: direct sampler callers (unit
     // tests, future paths) stay correct. One predictable branch per
     // output pixel — noise next to the twelve pows the table replaces.
@@ -1396,10 +1604,10 @@ fn referenceSampleImageLinear(image: ReferenceImage, src: geometry.RectF, u: f32
     const sample_y_f = src.y + std.math.clamp(v, 0, 1) * src.height - 0.5;
     const x_floor = referenceFloor(sample_x_f);
     const y_floor = referenceFloor(sample_y_f);
-    const x0 = clampI32(x_floor, 0, @intCast(image.width - 1));
-    const y0 = clampI32(y_floor, 0, @intCast(image.height - 1));
-    const x1 = clampI32(x_floor + 1, 0, @intCast(image.width - 1));
-    const y1 = clampI32(y_floor + 1, 0, @intCast(image.height - 1));
+    const x0 = clampI32(x_floor, bounds.min_x, bounds.max_x);
+    const y0 = clampI32(y_floor, bounds.min_y, bounds.max_y);
+    const x1 = clampI32(x_floor + 1, bounds.min_x, bounds.max_x);
+    const y1 = clampI32(y_floor + 1, bounds.min_y, bounds.max_y);
     const tx = std.math.clamp(sample_x_f - @as(f32, @floatFromInt(x_floor)), 0, 1);
     const ty = std.math.clamp(sample_y_f - @as(f32, @floatFromInt(y_floor)), 0, 1);
 

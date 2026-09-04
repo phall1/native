@@ -20,6 +20,8 @@ const settings_window_label = "settings";
 
 const PanelModel = struct {
     settings_open: bool = false,
+    position_settings: bool = true,
+    center_settings: bool = false,
     transparent_settings: bool = false,
     bumps: u32 = 0,
     user_closes: u32 = 0,
@@ -60,6 +62,9 @@ fn panelWindows(model: *const PanelModel, scratch: *PanelApp.WindowsScratch) []c
             .title = "Settings",
             .width = 320,
             .height = 240,
+            .x = if (model.position_settings) 84 else null,
+            .y = if (model.position_settings) 126 else null,
+            .restore_policy = if (model.center_settings) .center_on_primary else .clamp_to_visible_screen,
             .min_width = 280,
             .min_height = 200,
             .titlebar = if (model.transparent_settings) .chromeless else .standard,
@@ -191,6 +196,9 @@ test "a Msg declares the settings window, its canvas installs, and automation dr
             if (window.id != info.id) continue;
             try std.testing.expectEqual(@as(f32, 280), null_platform.window_min_width[index]);
             try std.testing.expectEqual(@as(f32, 200), null_platform.window_min_height[index]);
+            try std.testing.expectEqual(support.platform.WindowInitialPlacement.explicit, null_platform.window_placement[index]);
+            try std.testing.expectEqual(@as(f32, 84), window.frame.x);
+            try std.testing.expectEqual(@as(f32, 126), window.frame.y);
             found = true;
         }
         try std.testing.expect(found);
@@ -226,11 +234,38 @@ test "a Msg declares the settings window, its canvas installs, and automation dr
     const closed = fixture.settingsWindowInfo();
     try std.testing.expect(closed == null or !closed.?.open);
 
-    // Reopen under the SAME label: the closed slot released it.
+    // Reopen under the SAME label without an authored origin: the closed slot
+    // released it, and a descriptor with no x/y takes default host placement.
+    fixture.app_state.model.position_settings = false;
     try fixture.clickSettingsButton();
     try std.testing.expect(fixture.app_state.model.settings_open);
     const reopened = fixture.settingsWindowInfo() orelse return error.TestUnexpectedResult;
     try std.testing.expect(reopened.open);
+    for (fixture.harness.null_platform.windows[0..fixture.harness.null_platform.window_count], 0..) |window, index| {
+        if (window.id != reopened.id) continue;
+        try std.testing.expectEqual(support.platform.WindowInitialPlacement.default, fixture.harness.null_platform.window_placement[index]);
+    }
+}
+
+test "a windows_fn restore policy reaches fresh WindowOptions" {
+    const fixture = try Fixture.create();
+    defer fixture.destroy();
+
+    fixture.app_state.model.position_settings = false;
+    fixture.app_state.model.center_settings = true;
+    try fixture.clickSettingsButton();
+    const info = fixture.settingsWindowInfo() orelse return error.TestUnexpectedResult;
+
+    for (fixture.harness.null_platform.windows[0..fixture.harness.null_platform.window_count], 0..) |window, index| {
+        if (window.id != info.id) continue;
+        // Model-declared windows deliberately set restore_state=false. With
+        // no authored origin this remains a fresh/default placement while
+        // preserving the descriptor's policy at WindowOptions.
+        try std.testing.expectEqual(support.platform.WindowInitialPlacement.default, fixture.harness.null_platform.window_placement[index]);
+        try std.testing.expectEqual(support.platform.WindowRestorePolicy.center_on_primary, fixture.harness.null_platform.window_restore_policy[index]);
+        return;
+    }
+    return error.WindowNotFound;
 }
 
 test "a transparent descriptor selects premultiplied canvas alpha and an alpha-zero clear" {
@@ -1609,4 +1644,239 @@ test "closing the pin-owning window releases its snapshot and pin" {
         .item_id = 1,
     } });
     try std.testing.expectEqual(@as(u32, 0), fixture.app_state.model.sends);
+}
+
+// ------------------------------------------- per-window chrome
+//
+// The bug this pins: a secondary window published its widget layout and
+// emitted with a chrome prefix of ZERO, so an app whose real content is
+// chrome commands (a terminal's cells) opened a window that laid out
+// correctly — tab strip, splits, widget bounds — and painted nothing
+// inside it.
+
+const chrome_window_label = "chrome-panel";
+const chrome_canvas_label = "chrome-panel-canvas";
+
+const ChromeModel = struct { open: bool = true };
+const ChromeMsg = union(enum) { noop };
+const ChromeApp = ui_app_model.UiApp(ChromeModel, ChromeMsg);
+
+fn chromeUpdate(model: *ChromeModel, msg: ChromeMsg) void {
+    _ = model;
+    _ = msg;
+}
+
+fn chromeView(ui: *ChromeApp.Ui, model: *const ChromeModel) ChromeApp.Ui.Node {
+    _ = model;
+    return ui.stack(.{}, .{ui.text(.{}, "main")});
+}
+
+fn chromeWindowView(ui: *ChromeApp.Ui, model: *const ChromeModel, window_label: []const u8) ChromeApp.Ui.Node {
+    _ = model;
+    _ = window_label;
+    return ui.stack(.{}, .{ui.text(.{}, "panel")});
+}
+
+fn chromeWindows(model: *const ChromeModel, scratch: *ChromeApp.WindowsScratch) []const ChromeApp.WindowDescriptor {
+    if (!model.open) return &.{};
+    scratch.windows[0] = .{
+        .label = chrome_window_label,
+        .canvas_label = chrome_canvas_label,
+        .title = "Chrome Panel",
+        .width = 320,
+        .height = 240,
+    };
+    return scratch.windows[0..1];
+}
+
+/// One chrome command per window, tinted by WHICH window — the whole
+/// point of the context.
+fn chromeBuildWindow(model: *const ChromeModel, builder: *canvas.Builder, context: ChromeApp.ChromeContext) anyerror!void {
+    _ = model;
+    const red: f32 = if (context.is_main) 1 else 0;
+    try builder.fillRect(.{
+        .id = 4242,
+        .rect = geometry.RectF.fromSize(context.size),
+        .fill = .{ .color = canvas.Color.rgba(red, 0, 1 - red, 1) },
+    });
+}
+
+const chrome_canvas_label_main = "chrome-main-canvas";
+const chrome_views = [_]app_manifest.ShellView{
+    .{ .label = chrome_canvas_label_main, .kind = .gpu_surface, .fill = true, .gpu_backend = .metal },
+};
+const chrome_windows_scene = [_]app_manifest.ShellWindow{.{
+    .label = "main",
+    .title = "Chrome",
+    .width = 400,
+    .height = 300,
+    .views = &chrome_views,
+}};
+const chrome_scene: app_manifest.ShellConfig = .{ .windows = &chrome_windows_scene };
+
+fn createChromeFixture(with_window_builder: bool) !struct { harness: *core.TestHarness(), app_state: *ChromeApp, app: core.App } {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    errdefer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    const app_state = try ChromeApp.create(std.heap.page_allocator, .{
+        .name = "ui-app-chrome-window",
+        .scene = chrome_scene,
+        .canvas_label = chrome_canvas_label_main,
+        .update = chromeUpdate,
+        .view = chromeView,
+        .windows_fn = chromeWindows,
+        .window_view = chromeWindowView,
+        .chrome = .{
+            .prefix_commands = 4,
+            .variable_prefix = true,
+            .build = chromeBuildMain,
+            .build_window = if (with_window_builder) chromeBuildWindow else null,
+        },
+    });
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = chrome_canvas_label_main,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 1,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    return .{ .harness = harness, .app_state = app_state, .app = app };
+}
+
+fn chromeBuildMain(model: *const ChromeModel, builder: *canvas.Builder, size: geometry.SizeF, tokens: canvas.DesignTokens) anyerror!void {
+    _ = model;
+    _ = tokens;
+    try builder.fillRect(.{
+        .id = 4242,
+        .rect = geometry.RectF.fromSize(size),
+        .fill = .{ .color = canvas.Color.rgba(1, 0, 0, 1) },
+    });
+}
+
+fn chromeWindowIdFor(harness: anytype, label: []const u8) ?support.platform.WindowId {
+    var buffer: [support.platform.max_windows]support.platform.WindowInfo = undefined;
+    for (harness.runtime.listWindows(&buffer)) |info| {
+        if (std.mem.eql(u8, info.label, label)) return info.id;
+    }
+    return null;
+}
+
+test "a secondary window paints its chrome, tinted by the window it is painting" {
+    const fixture = try createChromeFixture(true);
+    defer {
+        fixture.app_state.destroy();
+        fixture.harness.destroy(std.testing.allocator);
+    }
+    const window_id = chromeWindowIdFor(fixture.harness, chrome_window_label) orelse return error.TestExpectedWindow;
+    try fixture.harness.runtime.dispatchPlatformEvent(fixture.app, .{ .gpu_surface_frame = .{
+        .window_id = window_id,
+        .label = chrome_canvas_label,
+        .size = geometry.SizeF.init(320, 240),
+        .scale_factor = 1,
+        .frame_index = 1,
+        .timestamp_ns = 2_000_000,
+        .nonblank = true,
+    } });
+
+    // The secondary window's list carries the chrome command — the
+    // thing that used to be missing entirely.
+    const list = try fixture.harness.runtime.canvasDisplayList(window_id, chrome_canvas_label);
+    var chrome_fill: ?canvas.Color = null;
+    for (list.commands) |command| {
+        if (command == .fill_rect and command.fill_rect.id == 4242) chrome_fill = command.fill_rect.fill.color;
+    }
+    const fill = chrome_fill orelse return error.TestExpectedChromeCommand;
+    // ...and the builder knew WHICH window: blue here, red on the main
+    // canvas. A builder that could not be told would have painted the
+    // main window's content into this one.
+    try std.testing.expectEqual(@as(f32, 0), fill.r);
+    try std.testing.expectEqual(@as(f32, 1), fill.b);
+    const main_list = try fixture.harness.runtime.canvasDisplayList(1, chrome_canvas_label_main);
+    var main_fill: ?canvas.Color = null;
+    for (main_list.commands) |command| {
+        if (command == .fill_rect and command.fill_rect.id == 4242) main_fill = command.fill_rect.fill.color;
+    }
+    try std.testing.expectEqual(@as(f32, 1), (main_fill orelse return error.TestExpectedChromeCommand).r);
+}
+
+test "without a per-window builder a secondary window keeps its old chrome-less list" {
+    // Additive by construction: an app that has not migrated sees no
+    // behaviour change, because a `build` that cannot name a window
+    // would paint the MAIN window's content into this one — a different
+    // wrong answer, not a fix.
+    const fixture = try createChromeFixture(false);
+    defer {
+        fixture.app_state.destroy();
+        fixture.harness.destroy(std.testing.allocator);
+    }
+    const window_id = chromeWindowIdFor(fixture.harness, chrome_window_label) orelse return error.TestExpectedWindow;
+    try fixture.harness.runtime.dispatchPlatformEvent(fixture.app, .{ .gpu_surface_frame = .{
+        .window_id = window_id,
+        .label = chrome_canvas_label,
+        .size = geometry.SizeF.init(320, 240),
+        .scale_factor = 1,
+        .frame_index = 1,
+        .timestamp_ns = 2_000_000,
+        .nonblank = true,
+    } });
+    const list = try fixture.harness.runtime.canvasDisplayList(window_id, chrome_canvas_label);
+    for (list.commands) |command| {
+        if (command == .fill_rect) try std.testing.expect(command.fill_rect.id != 4242);
+    }
+}
+
+// -------------------------------------------------------- fullscreen
+//
+// The platform could REPORT fullscreen and never enter or leave it, so
+// an app could be told it was fullscreen and never ask to be. These pin
+// the write half and the read half against the modeled host.
+
+test "the fullscreen verb is a SET, is idempotent, and reports back" {
+    const fixture = try Fixture.create();
+    defer fixture.destroy();
+    try fixture.clickSettingsButton();
+    const main = fixture.settingsWindowInfo() orelse return error.TestExpectedWindow;
+    try std.testing.expect(!main.fullscreen);
+    var buffer: [support.platform.max_windows]support.platform.WindowInfo = undefined;
+
+    try fixture.harness.runtime.setWindowFullscreen(main.id, true);
+    try std.testing.expectEqual(@as(u32, 1), fixture.harness.null_platform.fullscreenCountForWindow(main.id));
+
+    // The READ half: the runtime's tracked window info follows, so a
+    // transition the user started from the green button and one the app
+    // asked for report identically.
+    try fixture.harness.runtime.dispatchPlatformEvent(fixture.app, .{ .window_frame_changed = .{
+        .id = main.id,
+        .label = settings_window_label,
+        .frame = main.frame,
+        .scale_factor = main.scale_factor,
+        .open = true,
+        .focused = true,
+        .fullscreen = true,
+    } });
+    const after = blk: {
+        for (fixture.harness.runtime.listWindows(&buffer)) |info| {
+            if (info.id == main.id) break :blk info;
+        }
+        return error.TestExpectedWindow;
+    };
+    try std.testing.expect(after.fullscreen);
+
+    // SET, not toggle: asking for the state it already holds is a
+    // no-op at the host, which is what lets an app restore a remembered
+    // layout without first computing parity.
+    try fixture.harness.runtime.setWindowFullscreen(main.id, true);
+    try std.testing.expect(fixture.harness.null_platform.windowIsFullscreen(main.id));
+
+    try fixture.harness.runtime.setWindowFullscreen(main.id, false);
+    try std.testing.expect(!fixture.harness.null_platform.windowIsFullscreen(main.id));
+}
+
+test "a closed window refuses the fullscreen verb like every other window verb" {
+    const fixture = try Fixture.create();
+    defer fixture.destroy();
+    try std.testing.expectError(error.WindowNotFound, fixture.harness.runtime.setWindowFullscreen(9999, true));
 }

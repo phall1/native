@@ -13,6 +13,7 @@ const runtime_canvas_widget_display = @import("canvas_widget_display.zig");
 const runtime_view = @import("view.zig");
 const runtime_canvas_widget_events = @import("canvas_widget_events.zig");
 const runtime_automation_widget_dispatch = @import("automation_widget_dispatch.zig");
+const runtime_gpu_surface_events = @import("gpu_surface_events.zig");
 const widget_bridge = @import("widget_bridge.zig");
 
 const validateViewLabel = validation.validateViewLabel;
@@ -119,7 +120,7 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
             // the OS scroller's overscrolled offset instead of clamping it
             // and force-pushing the clamp into the live bounce (visible
             // jitter). Non-driver platforms clamp exactly as before.
-            canvas_widget_runtime.clampCanvasWidgetLayoutScrollOffsets(reconciled_nodes[0..reconciled_layout.nodes.len], null);
+            try canvas_widget_runtime.clampCanvasWidgetLayoutScrollOffsetsAfterReconcile(reconciled_nodes[0..reconciled_layout.nodes.len], null, reconciled_layout.root_bounds, tokens);
             // Runtime-owned tooltip visibility normalizes BEFORE the
             // diff: the retained tree carries the intent machine's
             // hidden stamps on anchored tooltips while the source
@@ -203,11 +204,20 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
             if (render_state_changed) CanvasWidgetEventMethods(Runtime).invalidateForCanvasWidgetRenderStateDirty(self, index, render_state_dirty);
             const layout_dirty = invalidations.len > 0 or render_state_changed;
             if (autofocus_target) |autofocus_id| {
-                // The same focus write every other focus source performs
-                // (view focus + focused/visible ids + invalidation);
-                // widgets that are not focusable ignore the request.
-                if (self.views[index].widgetLayoutTree().focusTargetById(autofocus_id) != null) {
-                    try AutomationWidgetMethods(Runtime).focusAutomationCanvasWidget(self, index, autofocus_id);
+                // Autofocus is programmatic, not pointer hit testing: admit a
+                // logically focusable target even while a scroll ancestor
+                // clips it, then let the shared automation/keyboard reveal
+                // seam scroll, reconcile, and re-verify before focus lands.
+                // A disabled/hidden/fixed-clipped target still consumes the
+                // source edge; holding autofocus true never retries or steals.
+                const retained_layout = self.views[index].widgetLayoutTree();
+                if (canvas_widget_runtime.canvasWidgetLayoutNodeIndexById(retained_layout, autofocus_id)) |autofocus_index| {
+                    if (canvas_widget_runtime.canvasWidgetLogicalFocusTarget(retained_layout, autofocus_index) != null) {
+                        AutomationWidgetMethods(Runtime).focusAutomationCanvasWidget(self, index, autofocus_id) catch |err| switch (err) {
+                            error.InvalidCommand => {},
+                            else => return err,
+                        };
+                    }
                 }
             }
             self.frame_profile.end(.reconcile, reconcile_begin);
@@ -330,11 +340,27 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
                 .set_composition => try AutomationWidgetMethods(Runtime).composeAutomationCanvasWidgetText(self, app, index, action.id, .ime_set_composition, action.text),
                 .commit_composition => try AutomationWidgetMethods(Runtime).composeAutomationCanvasWidgetText(self, app, index, action.id, .ime_commit_composition, ""),
                 .cancel_composition => try AutomationWidgetMethods(Runtime).composeAutomationCanvasWidgetText(self, app, index, action.id, .ime_cancel_composition, ""),
-                .select => try AutomationWidgetMethods(Runtime).selectAutomationCanvasWidget(self, index, action.id),
+                .select => {
+                    const node_index = self.views[index].canvasWidgetNodeIndexById(action.id) orelse return error.InvalidCommand;
+                    if (self.views[index].widget_layout_nodes[node_index].widget.kind == .radio) {
+                        // Radio selection is activation, not an echo-only
+                        // retained-state write: drive the same Space path
+                        // as keyboard and pointer input so a documented
+                        // `on_change` handler updates the app model too.
+                        try AutomationWidgetMethods(Runtime).dispatchAutomationWidgetKey(self, app, index, action.id, "space");
+                    } else {
+                        try AutomationWidgetMethods(Runtime).selectAutomationCanvasWidget(self, index, action.id);
+                    }
+                },
                 .drag => try AutomationWidgetMethods(Runtime).dispatchAutomationCanvasWidgetDrag(self, app, index, action.id, action.text),
                 .drop_files => try AutomationWidgetMethods(Runtime).dispatchAutomationCanvasWidgetFileDrop(self, app, index, action.id, action.text),
                 .dismiss => try AutomationWidgetMethods(Runtime).dismissAutomationCanvasWidget(self, app, index, action.id),
             }
+            // A direct focus action can reveal an offscreen target without
+            // passing through the GPU input dispatcher. Deliver the pending
+            // scroll observation in this semantic-action transaction too,
+            // rather than leaving it parked until unrelated future input.
+            try runtime_gpu_surface_events.RuntimeGpuSurfaceEvents(Runtime).dispatchPendingCanvasWidgetScrollEvents(self, app, index);
             // Key-driven action routes above dispatch real input events
             // whose refresh batches defer the platform publish; the AX
             // client reads the tree next, so force-flush here too.

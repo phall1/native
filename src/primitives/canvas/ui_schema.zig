@@ -50,7 +50,7 @@ const std = @import("std");
 /// documents, journals, serialized contracts) carry it; readers reach
 /// older artifacts through document→document migrations, never silent
 /// reinterpretation.
-pub const schema_version: u16 = 1;
+pub const schema_version: u16 = 2;
 
 /// Value type-class of an attribute: what shape of value the engines
 /// accept for it. `option` values name a Zig enum member (the enum itself
@@ -128,8 +128,8 @@ pub const EventInfo = struct {
     /// ever receive this event.
     dismissible_only: bool = false,
     /// This handler binds control/text behavior a non-hit-target element
-    /// does not have, so it is a dead handler there (press/toggle are
-    /// exempt: a bound press handler makes any element pressable).
+    /// does not have, so it is a dead handler there (press/toggle/drag
+    /// are exempt: their handlers make any element interactive).
     dead_on_non_hit_target: bool = false,
 };
 
@@ -145,12 +145,16 @@ pub const EventInfo = struct {
 /// - `image`: pictorial content. An unnamed image degrades (announced as
 ///   an unnamed image) but does not block, so a missing alt-equivalent
 ///   label is a WARNING; an explicit `label=""` marks it decorative.
+/// - `radiogroup`: a single-choice container whose label supplies the
+///   shared question for its individually named choices. Only a nonblank
+///   `label` names the group; a missing one is an ERROR.
 /// - `none`: layout, decoration, and content whose name IS its text.
 pub const A11yNameRule = enum {
     none,
     control,
     editable,
     image,
+    radiogroup,
 };
 
 pub const ElementInfo = struct {
@@ -221,7 +225,7 @@ pub const elements = [_]ElementInfo{
     .{ .code = 11, .name = "breadcrumb", .widget_kind = "breadcrumb", .hit_target = false },
     .{ .code = 12, .name = "button-group", .widget_kind = "button_group", .hit_target = false },
     .{ .code = 13, .name = "pagination", .widget_kind = "pagination", .hit_target = false },
-    .{ .code = 14, .name = "radio-group", .widget_kind = "radio_group", .hit_target = false },
+    .{ .code = 14, .name = "radio-group", .widget_kind = "radio_group", .hit_target = false, .a11y_name = .radiogroup },
     .{ .code = 15, .name = "tabs", .widget_kind = "tabs", .hit_target = false },
     .{ .code = 16, .name = "toggle-group", .widget_kind = "toggle_group", .hit_target = false },
     // Vertical containers.
@@ -257,8 +261,8 @@ pub const elements = [_]ElementInfo{
     // paints whenever the view renders it.
     .{ .code = 39, .name = "tooltip", .widget_kind = "tooltip", .takes_text = true, .hit_target = false, .anchorable = true },
     // Value controls and text entry.
-    .{ .code = 40, .name = "checkbox", .widget_kind = "checkbox", .a11y_name = .control },
-    .{ .code = 41, .name = "radio", .widget_kind = "radio", .a11y_name = .control },
+    .{ .code = 40, .name = "checkbox", .widget_kind = "checkbox", .takes_text = true, .a11y_name = .control },
+    .{ .code = 41, .name = "radio", .widget_kind = "radio", .takes_text = true, .a11y_name = .control },
     .{ .code = 42, .name = "slider", .widget_kind = "slider", .a11y_name = .control },
     .{ .code = 43, .name = "progress", .widget_kind = "progress" },
     .{ .code = 44, .name = "text-field", .widget_kind = "text_field", .a11y_name = .editable },
@@ -587,6 +591,15 @@ pub const attrs = [_]AttrInfo{
     // minimum unconstrained so a capped element still shrinks with a
     // narrow parent.
     .{ .code = 98, .name = "max-width", .class = .number, .group = .option, .field = "max_width" },
+    // Registered-image source rectangle, in decoded-image pixel
+    // coordinates. The four values are one atomic declaration: the
+    // validator scopes them to avatar/image and requires all four beside
+    // the image binding. They lower together into ElementOptions.image_src,
+    // so no individual attribute names a flat field.
+    .{ .code = 99, .name = "source-x", .class = .number, .group = .element },
+    .{ .code = 100, .name = "source-y", .class = .number, .group = .element },
+    .{ .code = 101, .name = "source-width", .class = .number, .group = .element },
+    .{ .code = 102, .name = "source-height", .class = .number, .group = .element },
 };
 
 // ----------------------------------------------------------------- events
@@ -683,12 +696,12 @@ pub const icon_names = [_][]const u8{
 /// std-only) with a lockstep test in ui_markup_view_tests.zig holding the
 /// mirror equal to the live enum.
 pub const role_names = [_][]const u8{
-    "none",      "group",       "text",     "link",   "image",
-    "button",    "textbox",     "tooltip",  "dialog", "menu",
-    "menuitem",  "list",        "listitem", "row",    "grid",
-    "gridcell",  "tab",         "checkbox", "radio",  "switch_control",
-    "slider",    "progressbar", "chart",    "tree",   "treeitem",
-    "separator",
+    "none",           "group",     "text",        "link",   "image",
+    "button",         "textbox",   "tooltip",     "dialog", "menu",
+    "menuitem",       "list",      "listitem",    "row",    "grid",
+    "gridcell",       "tab",       "checkbox",    "radio",  "radiogroup",
+    "switch_control", "slider",    "progressbar", "chart",  "tree",
+    "treeitem",       "separator",
 };
 
 /// Roles that promise CHILD STRUCTURE to assistive tech (rows, items,
@@ -696,7 +709,7 @@ pub const role_names = [_][]const u8{
 /// cannot hold element children (see `elementHoldsChildren`) is role
 /// misuse the registry can see: the promise can never be kept.
 pub const container_role_names = [_][]const u8{
-    "tree", "list", "menu", "grid", "row", "dialog",
+    "tree", "list", "menu", "grid", "row", "dialog", "radiogroup",
 };
 
 /// Whether markup can put element children inside this element: text

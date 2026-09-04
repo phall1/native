@@ -1,7 +1,8 @@
 //! The generated wiring for a TypeScript app core — staged (never written
 //! into the app) by the framework build when the tree carries src/core.ts:
-//! the build transpiles the core beside this file as core.zig, copies the
-//! app's src/app.native beside it too, and roots the app module here. The
+//! the build transpiles the core beside this file as core.zig, links the
+//! app's src/app.native as an isolated data object, and roots the app module
+//! here. The
 //! app tree stays three files of truth — core.ts (logic), app.native
 //! (view), app.zon (manifest) — and every value below derives from them at
 //! comptime:
@@ -20,6 +21,9 @@
 //!                    path with no `cachePath` in the core.
 //!   update loop      the transpiled core through `TsUiApp(core)` — the
 //!                    committed TS model IS the app model.
+//!   extension        an optional app-owned Zig module configures the final
+//!                    Adapter.CoreOptions and Adapter.Options, then may wrap
+//!                    the native_sdk.App without copying this runner.
 //!   view             app.native over the model's own field names (the
 //!                    emitted Zig keeps the TS spellings), hot-reloaded
 //!                    from src/app.native in Debug.
@@ -61,11 +65,12 @@ const std = @import("std");
 const runner = @import("runner");
 const native_sdk = @import("native_sdk");
 const manifest = @import("app_manifest_zon");
-pub const core = @import("core.zig");
+pub const core = @import("core");
 const services = @import("services.zig");
 const service_carrier = @import("service_carrier.zig");
 const relational_migrations = @import("migrations.zig");
 const window_views = @import("window_views.zig");
+const native_extension = @import("native_extension");
 
 pub const panic = std.debug.FullPanic(native_sdk.debug.capturePanic);
 
@@ -79,7 +84,14 @@ const App = Adapter.App;
 
 const shell_scene = native_sdk.app_manifest.shellConfigFrom(manifest);
 const canvas_label = native_sdk.app_manifest.firstGpuSurfaceLabel(shell_scene);
-pub const app_markup = @embedFile("app.native");
+extern const native_sdk_app_markup: u8;
+extern const native_sdk_app_markup_len: usize;
+
+/// Primary markup is linked as a data object so changing it does not dirty
+/// this Zig module's already-compiled SDK/app graph.
+pub fn appMarkup() []const u8 {
+    return @as([*]const u8, @ptrCast(&native_sdk_app_markup))[0..native_sdk_app_markup_len];
+}
 
 const app_permissions = manifestStringList(manifest, "permissions");
 const allowed_origins = manifestAllowedOrigins();
@@ -90,7 +102,7 @@ pub fn main(init: std.process.Init) !void {
         .name = manifest.name,
         .scene = shell_scene,
         .canvas_label = canvas_label,
-        .markup = .{ .source = app_markup, .watch_path = "src/app.native", .io = init.io },
+        .markup = .{ .source = appMarkup(), .watch_path = "src/app.native", .io = init.io },
         // app.zon's theme pack; unthemed manifests get the house register.
         // The stock tokens compose the pack with the LIVE system
         // appearance, so TS apps follow the OS light/dark flip with no
@@ -279,7 +291,7 @@ pub fn main(init: std.process.Init) !void {
 
     // The app struct (and any real model) is multi-MB: `create`
     // heap-allocates and constructs in place, so neither rides the stack.
-    const app_state = try Adapter.create(std.heap.page_allocator, .{
+    var core_options: Adapter.CoreOptions = .{
         .audio_cache_dir = audio_cache_dir,
         // Image loads share the same launch-resolved caches directory:
         // the bridge keys the two caches into their own segments
@@ -299,10 +311,13 @@ pub fn main(init: std.process.Init) !void {
             .decode_fn = services.resultDecoder(core),
         } else null,
         .persist = persist_options,
-    }, options);
+    };
+    native_extension.configureCoreOptions(&core_options, init);
+    native_extension.configureOptions(&options, init);
+    const app_state = try Adapter.create(std.heap.page_allocator, core_options, options);
     defer app_state.destroy();
 
-    try runner.runWithOptions(app_state.app(), .{
+    try runner.runWithOptions(native_extension.app(app_state), .{
         .app_name = manifest.name,
         .window_title = comptime windowTitle(),
         .bundle_id = manifest.id,
@@ -399,10 +414,10 @@ const ImageAsset = struct {
     path: []const u8,
 };
 
-/// Encoded-size bound for one boot image: over-bound files skip their
-/// entry (the views keep the initials fallback) instead of holding the
-/// launch path hostage to a mis-sized asset.
-const max_boot_image_bytes: usize = 4 * 1024 * 1024;
+/// Boot images and runtime image loads share one encoded-source contract:
+/// over-bound files skip their entry (the views keep the initials fallback)
+/// instead of holding the launch path hostage to a mis-sized asset.
+const max_boot_image_bytes: usize = native_sdk.max_effect_image_source_bytes;
 
 fn manifestImages() []const ImageAsset {
     comptime {
@@ -477,6 +492,7 @@ fn manifestPersistDebounce(comptime config: anytype) u32 {
 }
 
 fn validatePersistRoutes(comptime routes: anytype) void {
+    @setEvalBranchQuota(Adapter.persist_route_scan_quota);
     if (!persistRouteMatches(routes.ok, void)) {
         @compileError("app.zon .persist.restore.ok must name a void Msg arm in src/core.ts");
     }
@@ -489,6 +505,7 @@ fn validatePersistRoutes(comptime routes: anytype) void {
 }
 
 fn persistRouteMatches(comptime name: []const u8, comptime Payload: type) bool {
+    @setEvalBranchQuota(Adapter.msg_scan_quota);
     const info = @typeInfo(core.Msg);
     if (info != .@"union") return false;
     inline for (info.@"union".fields) |field| {
@@ -504,3 +521,4 @@ fn manifestAllowedOrigins() []const []const u8 {
         return manifestStringList(manifest.security.navigation, "allowed_origins");
     }
 }
+

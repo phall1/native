@@ -33,6 +33,7 @@ pub fn platformCursorFromCanvas(cursor: canvas.WidgetCursor) platform.Cursor {
         .pointing_hand => .pointing_hand,
         .text => .text,
         .resize_horizontal => .resize_horizontal,
+        .resize_vertical => .resize_vertical,
     };
 }
 
@@ -57,6 +58,7 @@ pub fn widgetRoleName(role: canvas.WidgetRole) []const u8 {
         .tab => "tab",
         .checkbox => "checkbox",
         .radio => "radio",
+        .radiogroup => "radiogroup",
         .switch_control => "switch",
         .slider => "slider",
         .progressbar => "progressbar",
@@ -91,6 +93,7 @@ pub fn platformWidgetAccessibilityRole(role: canvas.WidgetRole) platform.WidgetA
         .tab => .tab,
         .checkbox => .checkbox,
         .radio => .radio,
+        .radiogroup => .radiogroup,
         .switch_control => .switch_control,
         .slider => .slider,
         .progressbar => .progressbar,

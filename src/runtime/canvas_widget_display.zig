@@ -26,6 +26,67 @@ const platformWidgetAccessibilityTextRange = widget_bridge.platformWidgetAccessi
 const platformWidgetAccessibilityActions = widget_bridge.platformWidgetAccessibilityActions;
 const canvasWidgetSelectedState = widget_bridge.canvasWidgetSelectedState;
 
+const widget_display_log = std.log.scoped(.zero_canvas_widget_display);
+
+/// Per-thread emit scratch for `refreshCanvasWidgetDisplayList`.
+///
+/// These three buffers are sized from the per-view frame budgets, and at
+/// the terminal-scale command budget they no longer fit a stack frame:
+/// the display list alone is `max_canvas_commands_per_view` x 120 B, the
+/// chrome copy store carries the frame's glyph and text pools, and the
+/// diff output is twice the command budget. Together with the widget
+/// emit recursion that runs ON TOP of them, stack instances overflowed
+/// the thread (a measured segfault inside the button emitter, one budget
+/// raise after they last fit). Threadlocal, allocated once per thread,
+/// pointer stable for its lifetime — the same treatment the frame
+/// planner's scratch already gets. The refresh is a leaf frame builder
+/// and never re-enters itself, so one instance per thread is enough.
+const WidgetDisplayScratch = struct {
+    commands: [max_canvas_commands_per_view]canvas.CanvasCommand = undefined,
+    changes: [max_canvas_diff_changes_per_view]canvas.DiffChange = undefined,
+    chrome: CanvasDisplayListScratch = .{},
+    builder: canvas.Builder = undefined,
+};
+const widget_display_scratch = canvas.lazy_tls.LazyTls(WidgetDisplayScratch);
+
+/// Teach a degraded frame once, at the edge.
+///
+/// Emitters that DEGRADE instead of failing (today: the terminal grid
+/// painter, which drops whole rows rather than take the frame down)
+/// leave a `canvas.DisplayListDegradation` on the builder. A per-frame
+/// log line would drown a terminal that stays too dense for a minute,
+/// so this only speaks when the record CHANGES — the moment the screen
+/// starts losing rows, each time the loss deepens or shifts budget, and
+/// once more when it recovers. The alternative is what this replaces:
+/// a user staring at a half-blank terminal with nothing in any log.
+fn reportCanvasWidgetDisplayListDegradation(
+    view: anytype,
+    label: []const u8,
+    current: ?canvas.DisplayListDegradation,
+) void {
+    const previous = view.canvas_widget_display_list_degradation;
+    if (degradationsEqual(previous, current)) return;
+    view.canvas_widget_display_list_degradation = current;
+    if (current) |note| {
+        widget_display_log.warn(
+            "view \"{s}\": widget @{d} painted {d} of {d} rows — the frame's canvas_limits.max_canvas_{s}_per_view budget ran out. The rest of the surface is bare background; reduce the widget's size or its styling density, or raise the budget.",
+            .{ label, note.id, note.produced, note.requested, @tagName(note.store) },
+        );
+    } else if (previous) |note| {
+        widget_display_log.info(
+            "view \"{s}\": widget @{d} paints all {d} rows again (the {s} budget recovered)",
+            .{ label, note.id, note.requested, @tagName(note.store) },
+        );
+    }
+}
+
+fn degradationsEqual(a: ?canvas.DisplayListDegradation, b: ?canvas.DisplayListDegradation) bool {
+    const left = a orelse return b == null;
+    const right = b orelse return false;
+    return left.id == right.id and left.store == right.store and
+        left.produced == right.produced and left.requested == right.requested;
+}
+
 pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
     return struct {
         pub fn emitCanvasWidgetDisplayList(self: *Runtime, window_id: platform.WindowId, label: []const u8, tokens: canvas.DesignTokens) anyerror!platform.ViewInfo {
@@ -336,24 +397,33 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
             // so `first_view_built` -> this = reconcile + emit.
             defer launch_timing.lapOnce("first_display_list_emitted");
 
-            var commands: [max_canvas_commands_per_view]canvas.CanvasCommand = undefined;
-            var chrome_storage = CanvasDisplayListScratch{};
-            var builder = canvas.Builder.init(&commands);
+            const scratch = widget_display_scratch.get();
+            scratch.chrome.reset();
+            scratch.builder.initAt(&scratch.commands);
+            const builder = &scratch.builder;
+            const chrome_storage = &scratch.chrome;
             const current = self.views[view_index].canvasDisplayList();
             const prefix_count = self.views[view_index].canvas_widget_display_list_prefix_count;
             const suffix_count = self.views[view_index].canvas_widget_display_list_suffix_count;
             if (prefix_count > current.commands.len or suffix_count > current.commands.len - prefix_count) return error.InvalidCommand;
-            for (current.commands[0..prefix_count]) |command| try chrome_storage.appendCopiedCommand(&builder, command);
-            try self.views[view_index].widgetLayoutTree().emitDisplayListWithState(&builder, self.views[view_index].widget_tokens, self.views[view_index].canvasWidgetRenderState());
+            for (current.commands[0..prefix_count]) |command| try chrome_storage.appendCopiedCommand(builder, command);
+            try self.views[view_index].widgetLayoutTree().emitDisplayListWithState(builder, self.views[view_index].widget_tokens, self.views[view_index].canvasWidgetRenderState());
             const suffix_start = current.commands.len - suffix_count;
-            for (current.commands[suffix_start..current.commands.len]) |command| try chrome_storage.appendCopiedCommand(&builder, command);
+            for (current.commands[suffix_start..current.commands.len]) |command| try chrome_storage.appendCopiedCommand(builder, command);
 
             const display_list = builder.displayList();
+            // Content an emitter DROPPED rather than fail the frame (the
+            // terminal grid's row-atomic degradation). The frame below is
+            // valid and presentable; what it is missing must not be.
+            reportCanvasWidgetDisplayListDegradation(
+                &self.views[view_index],
+                self.views[view_index].label,
+                builder.degradation,
+            );
             if (display_list.commands.len + self.views[view_index].canvas_widget_display_list_reserved_count > max_canvas_commands_per_view) {
                 return error.CanvasCommandLimitReached;
             }
-            var canvas_changes: [max_canvas_diff_changes_per_view]canvas.DiffChange = undefined;
-            const changes = try canvas.DisplayList.diff(self.views[view_index].canvasDisplayList(), display_list, &canvas_changes);
+            const changes = try canvas.DisplayList.diff(self.views[view_index].canvasDisplayList(), display_list, &scratch.changes);
             try self.views[view_index].copyCanvasDisplayList(display_list);
             reconcileCanvasWidgetCaretBlink(self, view_index);
             reconcileCanvasWidgetLoopAnimations(self, view_index);
@@ -544,7 +614,20 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
         fn canvasWidgetCaretBlinkTarget(view: anytype) ?CanvasWidgetCaretBlinkTarget {
             if (!view.focused) return null;
             const focused_id = view.canvas_widget_focused_id;
-            if (focused_id == 0 or view.canvas_widget_focus_visible_id != focused_id) return null;
+            if (focused_id == 0) return null;
+            // A terminal whose emulator asked for a blinking cursor
+            // blinks through the SAME looping opacity animation a text
+            // caret uses — the painter has no clock, so the runtime owns
+            // the phase for both.
+            //
+            // Checked BEFORE the focus-visible gate below on purpose: a
+            // text caret only blinks once focus is VISIBLE (the
+            // keyboard-driven focus ring), but a terminal cursor blinks
+            // whenever the terminal holds focus, however it got it. A
+            // terminal focused by click would otherwise sit steady while
+            // the program that asked for `\x1b[1 q` waited for it.
+            if (canvasWidgetTerminalBlinkTarget(view, focused_id)) |target| return target;
+            if (view.canvas_widget_focus_visible_id != focused_id) return null;
             if (!view.canEditCanvasWidgetText(focused_id)) return null;
             const node_index = view.canvasWidgetNodeIndexById(focused_id) orelse return null;
             const widget = view.widget_layout_nodes[node_index].widget;
@@ -557,6 +640,23 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
                 .bounds = view.widget_layout_nodes[node_index].frame,
             };
         }
+    };
+}
+
+/// The blink target of a focused `.terminal` widget: its cursor
+/// command, when the producer's grid says the cursor blinks and the
+/// session is live. A stopped session's cursor is already the dim
+/// hollow at-rest pose and must not pulse.
+fn canvasWidgetTerminalBlinkTarget(view: anytype, focused_id: canvas.ObjectId) ?CanvasWidgetCaretBlinkTarget {
+    const node_index = view.canvasWidgetNodeIndexById(focused_id) orelse return null;
+    const widget = view.widget_layout_nodes[node_index].widget;
+    if (widget.kind != .terminal) return null;
+    const grid = widget.terminal.grid orelse return null;
+    const cursor = grid.cursor orelse return null;
+    if (!cursor.blinking or !grid.running) return null;
+    return .{
+        .command_id = canvas.terminal_grid.cursorCommandId(widget.id),
+        .bounds = view.widget_layout_nodes[node_index].frame,
     };
 }
 

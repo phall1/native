@@ -1,6 +1,13 @@
 const std = @import("std");
 const web_engine_tool = @import("src/tooling/web_engine.zig");
 
+fn repositoryScriptcBin(b: *std.Build) []const u8 {
+    return b.pathFromRoot(if (b.graph.host.result.os.tag == .windows)
+        "packages/core/node_modules/.bin/scriptc.cmd"
+    else
+        "packages/core/node_modules/.bin/scriptc");
+}
+
 const PlatformOption = enum {
     auto,
     null,
@@ -206,7 +213,38 @@ pub fn build(b: *std.Build) void {
         else
             sqliteCompileFlags(),
     });
+    const app_runner_window_placement_mod = module(b, target, optimize, "src/app_runner/window_placement.zig");
+    app_runner_window_placement_mod.addImport("native_sdk", desktop_mod);
+    const app_runner_window_placement_tests = testArtifact(b, app_runner_window_placement_mod);
+    const app_runner_options = b.addOptions();
+    app_runner_options.addOption([]const u8, "platform", "null");
+    app_runner_options.addOption([]const u8, "trace", "off");
+    app_runner_options.addOption([]const u8, "web_engine", "system");
+    app_runner_options.addOption(bool, "debug_overlay", false);
+    app_runner_options.addOption(bool, "automation", false);
+    app_runner_options.addOption(bool, "web_layer", false);
+    const app_runner_mod = module(b, target, optimize, "src/app_runner/root.zig");
+    app_runner_mod.addImport("native_sdk", desktop_mod);
+    app_runner_mod.addImport("build_options", app_runner_options.createModule());
+    app_runner_mod.addImport("app_manifest_zon", b.createModule(.{ .root_source_file = b.path("tests/app-runner/menu_commands_fixture.zon") }));
+    const app_runner_migrations_mod = module(b, target, optimize, "src/app_runner/no_migrations.zig");
+    app_runner_migrations_mod.addImport("native_sdk", desktop_mod);
+    app_runner_mod.addImport("relational_migrations", app_runner_migrations_mod);
+    const app_runner_tests = testArtifact(b, app_runner_mod);
+    const app_runner_test_run = b.addRunArtifact(app_runner_tests);
+    const app_runner_test_step = b.step("test-app-runner", "Run framework app-runner manifest fallback tests");
+    app_runner_test_step.dependOn(&app_runner_test_run.step);
     desktop_mod.link_libc = true;
+    if (target.result.os.tag == .macos) {
+        const flags: []const []const u8 = if (b.sysroot) |sysroot|
+            &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC", "-mmacosx-version-min=11.0", "-isysroot", sysroot, b.fmt("-I{s}/usr/include", .{sysroot}) }
+        else
+            &.{ "-fobjc-arc", "-fno-sanitize=builtin", "-ObjC", "-mmacosx-version-min=11.0" };
+        desktop_mod.addCSourceFile(.{ .file = b.path("src/platform/macos/image_fit_test.m"), .flags = flags });
+        desktop_mod.linkFramework("Foundation", .{});
+        desktop_mod.linkFramework("ImageIO", .{});
+        desktop_mod.linkSystemLibrary("objc", .{});
+    }
     const desktop_tests = testArtifact(b, desktop_mod);
     const desktop_test_shards = desktopTestShardArtifacts(b, desktop_mod);
     // Tier-5 crash battery: a child uses the public streamed sink, signals
@@ -582,6 +620,17 @@ pub fn build(b: *std.Build) void {
         .windows => "windows",
     };
 
+    const appkit_cell_grid_host_test_run = if (b.graph.host.result.os.tag == .macos) blk: {
+        const run = b.addSystemCommand(&.{ "sh", "scripts/test-appkit-cell-grid-host.sh" });
+        run.setCwd(b.path("."));
+        const step = b.step(
+            "test-appkit-cell-grid-host",
+            "Run the real AppKit binary cell-grid decoder, CoreText raster, and cache tests",
+        );
+        step.dependOn(&run.step);
+        break :blk run;
+    } else null;
+
     const test_step = b.step("test", "Run package and framework tests");
     test_step.dependOn(&b.addRunArtifact(build_graph_tests).step);
     test_step.dependOn(&b.addRunArtifact(geometry_tests).step);
@@ -593,9 +642,12 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(platform_info_tests).step);
     test_step.dependOn(&b.addRunArtifact(json_tests).step);
     test_step.dependOn(&b.addRunArtifact(app_runner_assets_tests).step);
+    test_step.dependOn(&b.addRunArtifact(app_runner_window_placement_tests).step);
+    test_step.dependOn(&app_runner_test_run.step);
     test_step.dependOn(&b.addRunArtifact(canvas_tests).step);
     test_step.dependOn(&b.addRunArtifact(record_store_tests).step);
     test_step.dependOn(&file_crash_run.step);
+    if (appkit_cell_grid_host_test_run) |run| test_step.dependOn(&run.step);
     for (desktop_test_shards) |shard_tests| {
         test_step.dependOn(&b.addRunArtifact(shard_tests).step);
     }
@@ -799,6 +851,43 @@ pub fn build(b: *std.Build) void {
         .{ .path = "build.zig", .pattern = "if (spec.emit_services) check.addFileInput(b.path(\"packages/core/package.json\"));" },
         .{ .path = "build/app.zig", .pattern = "if (has_services) check.addFileInput(dep.path(\"packages/core/package.json\"));" },
     });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-ts-build-invalidation-boundaries", "Verify generated TypeScript contracts stabilize by content and service implementation inputs cannot dirty the core compiler lane", &.{
+        .{ .path = "build/app.zig", .pattern = "pub fn stabilizeGeneratedFile" },
+        .{ .path = "build/app.zig", .pattern = "const contract = stabilizeGeneratedFile(b, contract_raw, \"core.contract.json\", build_trace);" },
+        .{ .path = "build/app.zig", .pattern = "break :services_contract stabilizeGeneratedFile(b, raw, \"services.contract.json\", build_trace);" },
+        .{ .path = "build/app.zig", .pattern = "addAppCoreTsDirInputs(b, stage_run, appPath(b, app_root, \"src\"));" },
+        .{ .path = "build/app.zig", .pattern = "addStagedCoreSdkInputs(b, dep.builder, stage_run);" },
+        .{ .path = "build/app.zig", .pattern = "for ([_][]const u8{ \"text.ts\", \"events.ts\" }) |source|" },
+        .{ .path = "build.zig", .pattern = "app_build.addStagedCoreSdkInputs(b, b, stage_run);" },
+        .{ .path = "packages/core/scripts/stage_external_core.mjs", .pattern = "for (const sdkFile of [\"text.ts\", \"events.ts\"])" },
+        .{ .path = "build/app.zig", .pattern = "if (std.mem.startsWith(u8, normalized, \"services/\")) continue;" },
+        .{ .path = "tools/corewire/emit_service.zig", .pattern = "native-sdk.services.abi.v3" },
+        .{ .path = "tools/corewire/emit_service.zig", .pattern = "implementation-only fingerprint" },
+        .{ .path = "build/app.zig", .pattern = "link_mod.addObject(markupDataObject(b, target, app_optimize, stage.markup_c));" },
+        .{ .path = "build/app.zig", .pattern = "addPlatformLinkSearchPaths(b, selected_platform, web_engine, cef_dir, link_mod);" },
+        .{ .path = "build/app.zig", .pattern = "mod.addFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, \"System/Library/Frameworks\" }) });" },
+        .{ .path = "build/app.zig", .pattern = "b.fmt(\"{s}-app-code\", .{app_options.name})" },
+        .{ .path = "src/app_runner/ts_core_main.zig", .pattern = "extern const native_sdk_app_markup: u8;" },
+        .{ .path = "packages/core/scripts/embed_markup_c.mjs", .pattern = "const unsigned char native_sdk_app_markup[]" },
+        .{ .path = "build/app.zig", .pattern = "node_modules\", \"scriptc\", \"dist\", \"bootstrap.js\"" },
+        .{ .path = "build/app.zig", .pattern = "setEnvironmentVariable(\"SCRIPTC_TIMING\", \"1\")" },
+        .{ .path = "build/app.zig", .pattern = "service_compile.addArg(\"--compiler-package-origin\")" },
+        .{ .path = "build/app.zig", .pattern = "compile.addArg(\"--compiler-package-origin\")" },
+        .{ .path = "packages/core/scripts/run_external_core_compiler.mjs", .pattern = "publishedScriptcArgv(args[\"compiler-package-origin\"])" },
+        .{ .path = "packages/core/scripts/run_external_service_compiler.mjs", .pattern = "publishedScriptcArgv(args[\"compiler-package-origin\"])" },
+        .{ .path = "build/app.zig", .pattern = "addFileInput(dep.path(\"packages/core/scripts/compiler_command.mjs\"))" },
+        .{ .path = "packages/core/scripts/run_external_core_compiler.mjs", .pattern = "compilerArgv(args.compiler)" },
+        .{ .path = "packages/core/scripts/run_external_service_compiler.mjs", .pattern = "compilerArgv(args.compiler)" },
+        .{ .path = "packages/core/scripts/compiler_command.mjs", .pattern = "npmTarget !== null" },
+        .{ .path = "build.zig", .pattern = "fn repositoryScriptcBin" },
+        .{ .path = "build.zig", .pattern = "packages/core/node_modules/.bin/scriptc.cmd" },
+        .{ .path = "build.zig", .pattern = "compile.addArgs(&.{ \"--compiler\", repositoryScriptcBin(b) });" },
+        .{ .path = "src/tooling/verbs.zig", .pattern = "Zig's full summary reports each named build step's duration" },
+        .{ .path = "src/tooling/verbs.zig", .pattern = "fn rebuildPathIgnored" },
+        .{ .path = "src/tooling/verbs.zig", .pattern = "var walker = try root.walkSelectively(allocator);" },
+        .{ .path = "src/tooling/verbs.zig", .pattern = "if (!rebuildPathIgnored(path)) try walker.enter(io, entry);" },
+        .{ .path = "tools/native-sdk/main.zig", .pattern = "--explain-rebuild" },
+    });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-scriptc-cross-target-plumbing", "Verify core and service archives share the target-aware ScriptC lane, and every direct Windows archive consumer links its runtime import libraries", &.{
         .{ .path = "build/app.zig", .pattern = ".linux => !cross or target.result.cpu.arch == .x86_64 or target.result.cpu.arch == .aarch64" },
         .{ .path = "build/app.zig", .pattern = ".windows => !cross or target.result.abi == .gnu" },
@@ -823,6 +912,31 @@ pub fn build(b: *std.Build) void {
         .{ .path = "build/app.zig", .pattern = "if (@hasDecl(app, \"main\")) _ = &app.main;" },
         .{ .path = "build/app.zig", .pattern = "test_step.dependOn(&analysis_obj.step);" },
         .{ .path = "src/runtime/ui_app.zig", .pattern = "has no default value - give every Model field a default" },
+    });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-owned-runner-window-placement", "Verify owned example runners preserve explicit origins and distinguish successful state restoration", &.{
+        .{ .path = "examples/hello/src/runner.zig", .pattern = ".initial_placement = if (@hasField(@TypeOf(window), \"x\") or @hasField(@TypeOf(window), \"y\")) .explicit else .default" },
+        .{ .path = "examples/hello/src/runner.zig", .pattern = "window.initial_placement = .restored;" },
+        .{ .path = "examples/hello/src/runner.zig", .pattern = "app_info.main_window.initial_placement = .restored;" },
+        .{ .path = "examples/capabilities/src/runner.zig", .pattern = "info.main_window.default_frame = manifestShellStartupFrame(info.main_window.default_frame);" },
+        .{ .path = "examples/capabilities/src/runner.zig", .pattern = "info.main_window.restore_state = manifestShellStartupRestoreState(info.main_window.restore_state);" },
+        .{ .path = "examples/capabilities/src/runner.zig", .pattern = "info.main_window.restore_policy = manifestShellStartupRestorePolicy(info.main_window.restore_policy);" },
+        .{ .path = "examples/capabilities/src/runner.zig", .pattern = "info.main_window.initial_placement = manifestShellStartupInitialPlacement(info.main_window.initial_placement);" },
+    });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-macos-window-placement-contracts", "Verify both macOS hosts use the primary display and restore persisted content frames without titlebar growth", &.{
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "return [NSScreen screens].firstObject ?: [NSScreen mainScreen];" },
+        .{ .path = "src/platform/macos/cef_host.mm", .pattern = "return [NSScreen screens].firstObject ?: [NSScreen mainScreen];" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "[window frameRectForContentRect:restoredContentFrame]" },
+        .{ .path = "src/platform/macos/cef_host.mm", .pattern = "[window frameRectForContentRect:restoredContentFrame]" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "[window setFrame:restoredWindowFrame display:NO];" },
+        .{ .path = "src/platform/macos/cef_host.mm", .pattern = "[window setFrame:restoredWindowFrame display:NO];" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "[window setFrame:NativeSdkCenterFrameOnScreen(window.frame, primaryScreen) display:NO];" },
+        .{ .path = "src/platform/macos/cef_host.mm", .pattern = "[window setFrame:NativeSdkCenterFrameOnScreen(window.frame, primaryScreen) display:NO];" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "else if (initialPlacement == 1) {\n        // Fresh authored dimensions are content size" },
+        .{ .path = "src/platform/macos/cef_host.mm", .pattern = "else if (initialPlacement == 1) {\n        // AppKit adds titlebar chrome" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "[window setFrame:NativeSdkConstrainFrame(window.frame) display:NO];" },
+        .{ .path = "src/platform/macos/cef_host.mm", .pattern = "[window setFrame:NativeSdkConstrainFrame(window.frame) display:NO];" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "initWithFrame:window.contentView.bounds" },
+        .{ .path = "src/platform/macos/cef_host.mm", .pattern = "initWithFrame:window.contentView.bounds" },
     });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-bridge-view-selector-helpers", "Verify injected view helpers accept string selectors", &.{
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "viewSelectorPayload(options)" },
@@ -1200,10 +1314,10 @@ pub fn build(b: *std.Build) void {
     // this step until the encoder comment, the host decoder comment, and
     // the patterns below move with it.
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-wire-format-version-prose", "Verify wire-format version prose matches the packet version constant", &.{
-        .{ .path = "src/primitives/canvas/serialization.zig", .pattern = "pub const binary_packet_version: u8 = 5;" },
-        .{ .path = "src/primitives/canvas/serialization.zig", .pattern = "Compact binary gpu-surface packet encoding (wire format v5)." },
-        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "Compact binary gpu-surface packet decoding (wire format v5)." },
-        .{ .path = "src/platform/windows/gpu_surface_renderer.cpp", .pattern = "Compact binary gpu-surface packet decoding (wire format v5)." },
+        .{ .path = "src/primitives/canvas/serialization.zig", .pattern = "pub const binary_packet_version: u8 = 7;" },
+        .{ .path = "src/primitives/canvas/serialization.zig", .pattern = "Compact binary gpu-surface packet encoding (wire format v7)." },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "Compact binary gpu-surface packet decoding (wire format v7)." },
+        .{ .path = "src/platform/windows/gpu_surface_renderer.cpp", .pattern = "Compact binary gpu-surface packet decoding (wire format v7)." },
     });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-windows-gpu-packet-presenter", "Verify Windows uses retained Direct2D packets with recovery, bounded resources, and dirty-region pixel fallback", &.{
         .{ .path = "src/platform/windows/root.zig", .pattern = ".present_gpu_surface_packet_binary_fn = presentGpuSurfacePacketBinary" },
@@ -1458,6 +1572,13 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NativeSdkTextNavigationNeedsRawKeyEvent(event)" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "NSEventModifierFlagCommand | NSEventModifierFlagOption" },
     });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-widget-accessibility-hierarchy", "Verify AppKit preserves retained-widget accessibility parentage", &.{
+        .{ .path = "src/platform/macos/appkit_host.h", .pattern = "uint64_t parent_id;" },
+        .{ .path = "src/platform/macos/root.zig", .pattern = ".parent_id = node.parent_id orelse 0" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "element.accessibilityParent = parent;" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "parent.accessibilityChildren = [childrenByParentId objectForKey:parentId];" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "return self.widgetAccessibilityRootElements ?: @[];" },
+    });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-appearance-bridge", "Verify AppKit reports system light and dark appearance changes", &.{
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "effectiveAppearance" },
         .{ .path = "src/platform/macos/appkit_host.m", .pattern = "accessibilityDisplayShouldReduceMotion" },
@@ -1466,6 +1587,14 @@ pub fn build(b: *std.Build) void {
         .{ .path = "src/platform/macos/root.zig", .pattern = ".reduce_motion = event.reduce_motion != 0" },
         .{ .path = "src/platform/macos/root.zig", .pattern = ".high_contrast = event.high_contrast != 0" },
         .{ .path = "src/platform/macos/root.zig", .pattern = ".appearance_changed => state.emit" },
+    });
+    addFileContainsCheckStep(b, file_contains_checker, test_step, "test-appkit-tray-segment-source-selection", "Verify both macOS tray hosts keep segmented selection model-owned", &.{
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "@property(nonatomic, assign) NSInteger sourceSelectedSegment;" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "if (options[i].selected != 0) control.sourceSelectedSegment = (NSInteger)i;" },
+        .{ .path = "src/platform/macos/appkit_host.m", .pattern = "for (NSInteger index = 0; index < control.segmentCount; index++) {\n        [control setSelected:index == sourceSelected forSegment:index];\n    }\n    self.trayCallback" },
+        .{ .path = "src/platform/macos/cef_host.mm", .pattern = "@property(nonatomic, assign) NSInteger sourceSelectedSegment;" },
+        .{ .path = "src/platform/macos/cef_host.mm", .pattern = "if (options[i].selected != 0) control.sourceSelectedSegment = (NSInteger)i;" },
+        .{ .path = "src/platform/macos/cef_host.mm", .pattern = "for (NSInteger index = 0; index < control.segmentCount; index++) {\n        [control setSelected:index == sourceSelected forSegment:index];\n    }\n    self.trayCallback" },
     });
     addFileContainsCheckStep(b, file_contains_checker, test_step, "test-docs-builtin-bridge-policy", "Verify bridge policy docs include guarded dialog commands", &.{
         .{ .path = "docs/src/app/docs/security/page.mdx", .pattern = ".{ .name = \"native-sdk.dialog.saveFile\"" },
@@ -1480,6 +1609,7 @@ pub fn build(b: *std.Build) void {
     addTestStep(b, "test-diagnostics", "Run diagnostics module tests", diagnostics_tests);
     addTestStep(b, "test-platform-info", "Run platform info module tests", platform_info_tests);
     addTestStep(b, "test-json", "Run JSON primitive tests", json_tests);
+    addTestStep(b, "test-app-runner-window-placement", "Run app-runner window placement decision tests", app_runner_window_placement_tests);
     addTestStep(b, "test-canvas", "Run canvas display list tests", canvas_tests);
     addTestStep(b, "test-desktop", "Run Native SDK framework tests", desktop_tests);
     for (desktop_test_shard_specs, desktop_test_shards) |spec, shard_tests| {
@@ -1652,6 +1782,7 @@ pub fn build(b: *std.Build) void {
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-menu-bar", "Run menu-bar lifecycle example tests", "examples/menu-bar", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-feed", "Run feed example tests", "examples/feed", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-service-feed-reader", "Run TypeScript service feed-reader example tests", "examples/service-feed-reader", .managed),
+        addExampleTestStep(b, host_cli_exe, native_examples_step, "test-native-extension-app", "Run the TypeScript native runner extension contract fixture", "tests/native-extension-app", .owned),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-canvas-preview", "Run canvas preview example tests", "examples/canvas-preview", .managed),
         addExampleTestStep(b, host_cli_exe, native_examples_step, "test-example-capabilities", "Run capabilities example tests", "examples/capabilities", .owned),
     };
@@ -1713,6 +1844,7 @@ pub fn build(b: *std.Build) void {
         "examples/calculator/zig-out/package/test-ios-layout/calculator.xcodeproj/xcshareddata/xcschemes/calculator.xcscheme",
         "examples/calculator/zig-out/package/test-ios-layout/Host/uikit_host.m",
         "examples/calculator/zig-out/package/test-ios-layout/Host/native_sdk_app.h",
+        "examples/calculator/zig-out/package/test-ios-layout/Host/apple_image_fit.h",
         "examples/calculator/zig-out/package/test-ios-layout/Host/Info.plist",
         "examples/calculator/zig-out/package/test-ios-layout/Assets.xcassets/AppIcon.appiconset/AppIcon.png",
         "examples/calculator/zig-out/package/test-ios-layout/Assets.xcassets/AppIcon.appiconset/Contents.json",
@@ -1813,13 +1945,20 @@ pub fn build(b: *std.Build) void {
     });
     addFileContainsCheckStep(b, file_contains_checker, mobile_examples_step, "test-example-mobile-widget-abi", "Verify mobile examples use stable widget ABI lookups", &.{
         .{ .path = "examples/ios/NativeSdkIOSExample/native_sdk.h", .pattern = "native_sdk_viewport_state_t" },
+        .{ .path = "examples/ios/NativeSdkIOSExample/native_sdk.h", .pattern = "NATIVE_SDK_WIDGET_ROLE_RADIOGROUP = 21" },
         .{ .path = "examples/ios/NativeSdkIOSExample/native_sdk.h", .pattern = "native_sdk_app_scroll" },
         .{ .path = "examples/ios/NativeSdkIOSExample/native_sdk.h", .pattern = "native_sdk_app_set_text_measure" },
+        .{ .path = "examples/android/app/src/main/cpp/native_sdk.h", .pattern = "NATIVE_SDK_WIDGET_ROLE_RADIOGROUP = 21" },
         .{ .path = "examples/android/app/src/main/cpp/native_sdk.h", .pattern = "native_sdk_app_set_text_measure" },
         .{ .path = "examples/mobile-canvas/ios/native_sdk_app.h", .pattern = "native_sdk_app_set_text_measure" },
         .{ .path = "examples/ios/NativeSdkIOSExample/NativeSdkHostViewController.swift", .pattern = "native_sdk_app_widget_semantics_by_id" },
+        .{ .path = "examples/ios/NativeSdkIOSExample/NativeSdkHostViewController.swift", .pattern = "NATIVE_SDK_WIDGET_ROLE_RADIO" },
+        .{ .path = "examples/ios/NativeSdkIOSExample/NativeSdkHostViewController.swift", .pattern = "childrenByParentId[node.parentId, default: []].append(element)" },
+        .{ .path = "examples/ios/NativeSdkIOSExample/NativeSdkHostViewController.swift", .pattern = "parent.accessibilityContainerType = .semanticGroup" },
+        .{ .path = "examples/ios/NativeSdkIOSExample/NativeSdkHostViewController.swift", .pattern = "parent.isAccessibilityElement = false" },
         .{ .path = "examples/android/app/src/main/cpp/native_sdk.h", .pattern = "native_sdk_app_widget_semantics_by_id" },
         .{ .path = "examples/android/app/src/main/java/dev/native_sdk/examples/android/MainActivity.kt", .pattern = "nativeScroll(nativeApp" },
+        .{ .path = "examples/android/app/src/main/java/dev/native_sdk/examples/android/MainActivity.kt", .pattern = "WIDGET_ROLE_RADIOGROUP -> \"android.widget.RadioGroup\"" },
         .{ .path = "examples/android/app/src/main/java/dev/native_sdk/examples/android/MainActivity.kt", .pattern = "nativeWidgetSemanticsByIdFields" },
         .{ .path = "examples/android/app/src/main/cpp/native_sdk_jni.c", .pattern = "native_sdk_app_widget_semantics_by_id" },
         .{ .path = "examples/android/app/src/main/cpp/native_sdk_jni.c", .pattern = "native_sdk_app_scroll" },
@@ -2102,6 +2241,52 @@ pub fn build(b: *std.Build) void {
     native_shell_smoke_run.step.dependOn(&native_shell_smoke_build.step);
     native_shell_smoke_run.step.dependOn(&cli_exe.step);
     native_shell_smoke_step.dependOn(&native_shell_smoke_run.step);
+
+    const menu_bar_smoke_step = b.step("test-menu-bar-smoke", "Run zero-config TypeScript app-menu automation smoke test");
+    const menu_bar_smoke_build = managedExampleRun(b, cli_exe, &.{ "build", "-Dplatform=macos", "-Dweb-engine=system", "-Dautomation=true", "-Doptimize=Debug" });
+    menu_bar_smoke_build.setCwd(b.path("examples/menu-bar"));
+    const menu_bar_smoke_run = b.addSystemCommand(&.{
+        "sh", "-c",
+        \\set -eu
+        \\cd examples/menu-bar
+        \\app="zig-out/bin/menu-bar"
+        \\cli="$1"
+        \\case "$cli" in /*) ;; *) cli="../../$cli" ;; esac
+        \\automation_dir=".zig-cache/native-sdk-automation"
+        \\mkdir -p "$automation_dir"
+        \\rm -f "$automation_dir/snapshot.txt" "$automation_dir/accessibility.txt" "$automation_dir/windows.txt" "$automation_dir"/command*.txt
+        \\"$app" > .zig-cache/native-sdk-menu-bar-smoke.log 2>&1 &
+        \\pid=$!
+        \\trap 'status=$?; kill "$pid" >/dev/null 2>&1 || true; wait "$pid" >/dev/null 2>&1 || true; if [ "$status" -ne 0 ]; then echo "---- app log (.zig-cache/native-sdk-menu-bar-smoke.log) ----" >&2; cat .zig-cache/native-sdk-menu-bar-smoke.log >&2 2>/dev/null || true; fi' EXIT
+        \\ready="$("$cli" automate wait 2>&1)"
+        \\case "$ready" in *"ready=true"*) ;; *) echo "menu-bar automation snapshot was not ready" >&2; exit 1 ;; esac
+        \\before="$(cat "$automation_dir/snapshot.txt" 2>/dev/null || true)"
+        \\case "$before" in *'command id="player.next" title="Next Track" enabled=true checked=false'*) ;; *) echo "app.zon command catalog was not loaded by the zero-config runner" >&2; exit 1 ;; esac
+        \\case "$before" in *'app-menu title="Player" items=6'*) ;; *) echo "app.zon Player menu was not loaded by the zero-config runner" >&2; exit 1 ;; esac
+        \\case "$before" in *'app-menu-item label="Next Track" command="player.next" enabled=true checked=false key="n" modifiers=(primary=true,command=false,control=false,option=false,shift=false)'*) ;; *) echo "app.zon player.next menu item was not loaded by the zero-config runner" >&2; exit 1 ;; esac
+        \\case "$before" in
+        \\  *'Ambient Coast'*) expected='Night Drive' ;;
+        \\  *'Night Drive'*) expected='Paper Planes' ;;
+        \\  *'Paper Planes'*) expected='Ambient Coast' ;;
+        \\  *) echo "menu-bar snapshot did not expose the current TypeScript model track" >&2; exit 1 ;;
+        \\esac
+        \\"$cli" automate menu-command player.next >/dev/null 2>&1
+        \\attempts=0
+        \\while [ "$attempts" -lt 50 ]; do
+        \\  snapshot="$(cat "$automation_dir/snapshot.txt" 2>/dev/null || true)"
+        \\  case "$snapshot" in *"$expected"*) break ;; esac
+        \\  attempts=$((attempts + 1))
+        \\  sleep 0.1
+        \\done
+        \\case "$snapshot" in *"$expected"*) ;; *) echo "app.zon menu command did not reach the zero-config TypeScript commandMsg mapper" >&2; exit 1 ;; esac
+        \\echo "menu-bar smoke ok"
+        ,
+        "sh",
+    });
+    menu_bar_smoke_run.addFileArg(cli_exe.getEmittedBin());
+    menu_bar_smoke_run.step.dependOn(&menu_bar_smoke_build.step);
+    menu_bar_smoke_run.step.dependOn(&cli_exe.step);
+    menu_bar_smoke_step.dependOn(&menu_bar_smoke_run.step);
 
     const gpu_surface_smoke_step = b.step("test-gpu-surface-smoke", "Run macOS GPU surface automation smoke test");
     // The GPU smoke apps are managed examples (no build.zig of their own),
@@ -2593,7 +2778,7 @@ pub fn build(b: *std.Build) void {
         \\case "$ready_snapshot" in *'view @w1/components-canvas kind=gpu_surface'*'gpu_nonblank=true'*'canvas_frame_gpu_packet_representable=true'*) ;; *) echo "component gallery GPU surface was not ready" >&2; exit 1 ;; esac
         \\case "$ready_snapshot" in *'view @w1/main kind=webview'*) echo "component gallery created an implicit WebView" >&2; exit 1 ;; *) ;; esac
         \\"$cli" automate assert 'role=tree name="Components"' 'role=treeitem name="Components".*state=\[expanded\]' 'role=treeitem name="Accordion".*state=\[selected\]' 'role=group name="Details".*state=\[selected,expanded\]' 'name="Accordion details are visible. The model owns this expanded state."'
-        \\"$cli" automate assert 'role=group name="Theme"' 'role=button name="Default".*state=\[selected\]' 'role=button name="Geist"'
+        \\"$cli" automate assert 'role=group name="Theme pack"' 'role=group name="Color scheme"' 'role=group name="Theme accent"' 'role=button name="Default".*state=\[selected\]' 'role=button name="Geist"' 'role=button name="System".*state=\[selected\]' 'role=button name="Pink"' 'role=button name="Teal"'
         \\"$cli" automate screenshot components-canvas >/dev/null 2>&1
         \\cp "$automation_dir/screenshot-components-canvas.png" "$automation_dir/screenshot-components-house.png"
         \\rm -f "$automation_dir/screenshot-components-canvas.png"
@@ -3115,7 +3300,7 @@ fn tsCoreE2eArtifact(
     if (b.graph.environ_map.get("NATIVE_SDK_CORE_COMPILER") == null) {
         b.build_root.handle.access(
             b.graph.io,
-            "packages/core/node_modules/scriptc/dist/main.js",
+            repositoryScriptcBin(b),
             .{},
         ) catch return null;
     }
@@ -3460,6 +3645,9 @@ fn tsCoreE2eArtifact(
     // against (the same module the generated shims stage).
     conformance_mod.addImport("corewire_rt", module(b, target, optimize, "tools/corewire/shim_rt.zig"));
     conformance_mod.addImport("shim_markup_core", sidecarShimModule(b, target, optimize, corewire_exe, b.path("tests/sidecar/markup_fixture.contract.json")));
+    // Compile-cost guard: this generated mirror carries 160 realistically
+    // named Msg arms and must need no quota setting in app or test code.
+    conformance_mod.addImport("shim_wide_core", sidecarShimModule(b, target, optimize, corewire_exe, b.path("tests/sidecar/wide_msg_fixture.contract.json")));
     // The integer-class fixture: a hand-written sidecar attesting mixed
     // i64/u64 slot classes, so the suite drives boundary and full-range
     // integer values through a generated mirror's decode paths.
@@ -3636,6 +3824,7 @@ fn externalServiceFixture(
 
     const compile = b.addSystemCommand(&.{node});
     compile.addFileArg(b.path("packages/core/scripts/run_external_service_compiler.mjs"));
+    compile.addFileInput(b.path("packages/core/scripts/compiler_command.mjs"));
     compile.addArg("--stage");
     compile.addDirectoryArg(stage_dir);
     compile.addArg("--manifest");
@@ -3664,8 +3853,7 @@ fn externalServiceFixture(
     if (b.graph.environ_map.get("NATIVE_SDK_CORE_COMPILER")) |override| {
         compile.addArgs(&.{ "--compiler", override });
     } else {
-        compile.addArg("--compiler-js");
-        compile.addFileArg(b.path("packages/core/node_modules/scriptc/dist/main.js"));
+        compile.addArgs(&.{ "--compiler", repositoryScriptcBin(b) });
     }
 
     return .{
@@ -3812,12 +4000,14 @@ fn externalCoreFixtureModule(
     check.addFileArg(b.path("packages/core/src/cli.ts"));
     check.addFileArg(b.path(spec.entry));
     check.addArg("--contract");
-    const contract = check.addOutputFileArg("core.contract.json");
+    const contract_raw = check.addOutputFileArg("core.contract.json");
+    const contract = app_build.stabilizeGeneratedFile(b, contract_raw, "core.contract.json", false);
     check.addArg("--contract-entry");
     check.addArg(spec.entry);
     const services_contract: ?std.Build.LazyPath = if (spec.emit_services) services: {
         check.addArg("--services-contract");
-        break :services check.addOutputFileArg("services.contract.json");
+        const raw = check.addOutputFileArg("services.contract.json");
+        break :services app_build.stabilizeGeneratedFile(b, raw, "services.contract.json", false);
     } else null;
     for (spec.service_packages) |package_entry| check.addArgs(&.{ "--service-package", package_entry });
     const services_client: ?std.Build.LazyPath = if (services_contract) |service_contract| client: {
@@ -3825,7 +4015,8 @@ fn externalCoreFixtureModule(
         service_project.addArg("--services-sidecar");
         service_project.addFileArg(service_contract);
         service_project.addArg("--service-client");
-        break :client service_project.addOutputFileArg("services.gen.ts");
+        const client_raw = service_project.addOutputFileArg("services.gen.ts");
+        break :client app_build.stabilizeGeneratedFile(b, client_raw, "services.gen.ts", false);
     } else null;
     if (spec.persist_capability) check.addArgs(&.{ "--capability", "persist" });
     if (spec.store_capability) check.addArgs(&.{ "--capability", "store" });
@@ -3878,6 +4069,8 @@ fn externalCoreFixtureModule(
         stage_run.addArg("--services-client");
         stage_run.addFileArg(client);
     }
+    tsCoreAddCoreDirInputs(b, stage_run, std.fs.path.dirname(spec.entry) orelse ".");
+    app_build.addStagedCoreSdkInputs(b, b, stage_run);
     stage_run.addArg("--out");
     const stage_dir = stage_run.addOutputDirectoryArg("stage");
 
@@ -3885,6 +4078,7 @@ fn externalCoreFixtureModule(
     // pin, archive normalized, the co-emitted sidecar captured.
     const compile = b.addSystemCommand(&.{node});
     compile.addFileArg(b.path("packages/core/scripts/run_external_core_compiler.mjs"));
+    compile.addFileInput(b.path("packages/core/scripts/compiler_command.mjs"));
     compile.addArg("--stage");
     compile.addDirectoryArg(stage_dir);
     compile.addArgs(&.{ "--name", spec.name });
@@ -3911,8 +4105,7 @@ fn externalCoreFixtureModule(
         // driver still refuses a release other than the SDK's pin.
         compile.addArgs(&.{ "--compiler", override });
     } else {
-        compile.addArg("--compiler-js");
-        compile.addFileArg(b.path("packages/core/node_modules/scriptc/dist/main.js"));
+        compile.addArgs(&.{ "--compiler", repositoryScriptcBin(b) });
     }
 
     // The mirror, generated from the archive's OWN co-emitted contract,
@@ -3957,6 +4150,24 @@ fn tsCoreAddDirInputs(b: *std.Build, transpile: *std.Build.Step.Run, dir_path: [
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.basename, ".ts")) continue;
         transpile.addFileInput(b.path(b.fmt("{s}/{s}", .{ dir_path, entry.path })));
+    }
+}
+
+/// The source set stage_external_core.mjs copies: every ordinary `.ts` file,
+/// excluding the independent services compiler class and declaration files.
+fn tsCoreAddCoreDirInputs(b: *std.Build, stage: *std.Build.Step.Run, dir_path: []const u8) void {
+    var dir = b.build_root.handle.openDir(b.graph.io, dir_path, .{ .iterate = true }) catch return;
+    defer dir.close(b.graph.io);
+    var walker = dir.walk(b.allocator) catch return;
+    defer walker.deinit();
+    while (walker.next(b.graph.io) catch null) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.basename, ".ts") or std.mem.endsWith(u8, entry.basename, ".d.ts")) continue;
+        const normalized = b.dupe(entry.path);
+        for (normalized) |*char| if (char.* == '\\') {
+            char.* = '/';
+        };
+        if (std.mem.startsWith(u8, normalized, "services/")) continue;
+        stage.addFileInput(b.path(b.fmt("{s}/{s}", .{ dir_path, entry.path })));
     }
 }
 

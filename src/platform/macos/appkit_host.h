@@ -115,6 +115,7 @@ typedef enum {
     NATIVE_SDK_APPKIT_CURSOR_POINTING_HAND = 1,
     NATIVE_SDK_APPKIT_CURSOR_TEXT = 2,
     NATIVE_SDK_APPKIT_CURSOR_RESIZE_HORIZONTAL = 3,
+    NATIVE_SDK_APPKIT_CURSOR_RESIZE_VERTICAL = 4,
 } native_sdk_appkit_cursor_t;
 
 typedef enum {
@@ -161,6 +162,7 @@ typedef enum {
     NATIVE_SDK_APPKIT_WIDGET_ROLE_SLIDER = 18,
     NATIVE_SDK_APPKIT_WIDGET_ROLE_PROGRESSBAR = 19,
     NATIVE_SDK_APPKIT_WIDGET_ROLE_RADIO = 20,
+    NATIVE_SDK_APPKIT_WIDGET_ROLE_RADIOGROUP = 21,
 } native_sdk_appkit_widget_role_t;
 
 enum {
@@ -207,6 +209,7 @@ typedef enum {
 
 typedef struct {
     uint64_t id;
+    uint64_t parent_id;
     int role;
     const char *label;
     size_t label_len;
@@ -258,6 +261,11 @@ typedef struct {
     double y;
     int open;
     int focused;
+    /* WINDOW_FRAME: nonzero while the window occupies its own
+     * fullscreen Space. Read from the window's style mask on every frame
+     * emit, so a transition the USER started (green button, a Space
+     * gesture) reports exactly like one the app asked for. */
+    int fullscreen;
     /* WINDOW_FRAME: nonzero while the window is alive but hidden by
      * its close_policy (.hide intercepted a user close). open stays 1
      * for the window's whole hidden stretch. */
@@ -380,7 +388,7 @@ typedef void (*native_sdk_appkit_bridge_callback_t)(void *context, uint64_t wind
 // web-only default menu items (Reload, Toggle Web Inspector, Undo/Redo)
 // exist only when it is set. dock_visible selects Regular (nonzero) or
 // Accessory (zero) before application configuration and window creation.
-native_sdk_appkit_host_t *native_sdk_appkit_create(const char *app_name, size_t app_name_len, const char *display_name, size_t display_name_len, const char *version, size_t version_len, const char *about_description, size_t about_description_len, int has_web_content, int dock_visible, const char *window_title, size_t window_title_len, const char *bundle_id, size_t bundle_id_len, const char *icon_path, size_t icon_path_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, int show_policy, uint32_t window_flags);
+native_sdk_appkit_host_t *native_sdk_appkit_create(const char *app_name, size_t app_name_len, const char *display_name, size_t display_name_len, const char *version, size_t version_len, const char *about_description, size_t about_description_len, int has_web_content, int dock_visible, const char *window_title, size_t window_title_len, const char *bundle_id, size_t bundle_id_len, const char *icon_path, size_t icon_path_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int initial_placement, int restore_policy, int resizable, int titlebar_style, int show_policy, uint32_t window_flags);
 void native_sdk_appkit_destroy(native_sdk_appkit_host_t *host);
 // Adopt pre-rendered straight-alpha RGBA8 pixels as the Dock icon (and
 // the About panel copy). The pixels are copied before return, so the
@@ -419,7 +427,7 @@ void native_sdk_appkit_emit_window_event(native_sdk_appkit_host_t *host, uint64_
 void native_sdk_appkit_set_security_policy(native_sdk_appkit_host_t *host, const char *allowed_origins, size_t allowed_origins_len, const char *external_urls, size_t external_urls_len, int external_action);
 void native_sdk_appkit_set_menus(native_sdk_appkit_host_t *host, const char *const *menu_titles, const size_t *menu_title_lens, size_t menu_count, const uint32_t *item_menu_indices, const char *const *item_labels, const size_t *item_label_lens, const char *const *item_commands, const size_t *item_command_lens, const char *const *item_keys, const size_t *item_key_lens, const uint32_t *item_modifiers, const int *item_separators, const int *item_enabled, const int *item_checked, size_t item_count);
 void native_sdk_appkit_set_shortcuts(native_sdk_appkit_host_t *host, const char *const *ids, const size_t *id_lens, const char *const *keys, const size_t *key_lens, const uint32_t *modifiers, size_t count);
-int native_sdk_appkit_create_window(native_sdk_appkit_host_t *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, int show_policy, uint32_t window_flags);
+int native_sdk_appkit_create_window(native_sdk_appkit_host_t *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int initial_placement, int restore_policy, int resizable, int titlebar_style, int show_policy, uint32_t window_flags);
 // Content min-size floor for a created window (NSWindow contentMinSize):
 // the user's resize stops at the floor. Values <= 0 leave that axis at
 // AppKit's default minimum. Returns 0 when the window id is unknown.
@@ -432,6 +440,7 @@ int native_sdk_appkit_close_window(native_sdk_appkit_host_t *host, uint64_t wind
 int native_sdk_appkit_minimize_window(native_sdk_appkit_host_t *host, uint64_t window_id);
 // Order a live window out without closing it. `show_window` is the inverse.
 int native_sdk_appkit_hide_window(native_sdk_appkit_host_t *host, uint64_t window_id);
+int native_sdk_appkit_set_window_fullscreen(native_sdk_appkit_host_t *host, uint64_t window_id, int fullscreen);
 // The show verb: bring the window back to the glass and activate the
 // app (deminiaturize + makeKeyAndOrderFront) — the counterpart to a
 // close_policy .hide hide, and the tray-menu "Open" consequence.
@@ -644,7 +653,7 @@ int native_sdk_appkit_unregister_font(uint64_t font_id, uint64_t token);
  * and -1 when the decoded pixels do not fit `pixels_len` (`out_width`/
  * `out_height` still report the decoded dimensions). It retains no AppKit
  * state, needs no host, and is main-thread independent. */
-int native_sdk_appkit_decode_image(const uint8_t *bytes, size_t bytes_len, uint8_t *pixels, size_t pixels_len, size_t *out_width, size_t *out_height);
+int native_sdk_appkit_decode_image(const uint8_t *bytes, size_t bytes_len, uint8_t *pixels, size_t pixels_len, size_t max_pixels, size_t *out_width, size_t *out_height);
 void native_sdk_appkit_clipboard_write(native_sdk_appkit_host_t *host, const char *text, size_t text_len);
 size_t native_sdk_appkit_clipboard_read_data(native_sdk_appkit_host_t *host, const char *mime_type, size_t mime_type_len, char *buffer, size_t buffer_len);
 int native_sdk_appkit_clipboard_write_data(native_sdk_appkit_host_t *host, const char *mime_type, size_t mime_type_len, const char *bytes, size_t bytes_len);
@@ -702,6 +711,44 @@ typedef struct {
 } native_sdk_appkit_message_dialog_opts_t;
 
 typedef void (*native_sdk_appkit_tray_callback_t)(void *context, uint32_t status_item_id, uint32_t item_id);
+
+typedef struct {
+    uint32_t item_id;
+    const char *label;
+    size_t label_len;
+    int selected;
+    int enabled;
+} native_sdk_appkit_tray_segment_option_t;
+
+typedef struct {
+    size_t row_index;
+    const native_sdk_appkit_tray_segment_option_t *options;
+    size_t option_count;
+} native_sdk_appkit_tray_segmented_row_t;
+
+typedef struct {
+    size_t row_index;
+    const char *primary_text;
+    size_t primary_text_len;
+    const char *secondary_text;
+    size_t secondary_text_len;
+    const char *accessibility_label;
+    size_t accessibility_label_len;
+} native_sdk_appkit_tray_metric_row_t;
+
+typedef struct {
+    size_t row_index;
+    const float *values;
+    size_t value_count;
+    double min_value;
+    double max_value;
+    const char *leading_caption;
+    size_t leading_caption_len;
+    const char *trailing_summary;
+    size_t trailing_summary_len;
+    const char *accessibility_label;
+    size_t accessibility_label_len;
+} native_sdk_appkit_tray_chart_row_t;
 
 /* One native scroll driver's desired state (see PlatformServices
  * set_gpu_surface_scroll_drivers_fn). Frame coordinates are view-local
@@ -770,15 +817,16 @@ int native_sdk_appkit_show_context_menu(native_sdk_appkit_host_t *host, uint64_t
 native_sdk_appkit_open_dialog_result_t native_sdk_appkit_show_open_dialog(native_sdk_appkit_host_t *host, const native_sdk_appkit_open_dialog_opts_t *opts, char *buffer, size_t buffer_len);
 size_t native_sdk_appkit_show_save_dialog(native_sdk_appkit_host_t *host, const native_sdk_appkit_save_dialog_opts_t *opts, char *buffer, size_t buffer_len);
 int native_sdk_appkit_show_message_dialog(native_sdk_appkit_host_t *host, const native_sdk_appkit_message_dialog_opts_t *opts);
-void native_sdk_appkit_create_tray(native_sdk_appkit_host_t *host, uint32_t status_item_id, const char *icon_path, size_t icon_path_len, const char *title, size_t title_len, const char *tooltip, size_t tooltip_len, int visible, double width, int tone, double icon_opacity, int monospaced, const char *activation_command, size_t activation_command_len, const char *alternate_activation_command, size_t alternate_activation_command_len, const char *open_command, size_t open_command_len);
+void native_sdk_appkit_create_tray(native_sdk_appkit_host_t *host, uint32_t status_item_id, const char *icon_path, size_t icon_path_len, const char *title, size_t title_len, const char *tooltip, size_t tooltip_len, int visible, double width, int tone, double icon_opacity, int monospaced, double font_size, int font_weight, const char *activation_command, size_t activation_command_len, const char *alternate_activation_command, size_t alternate_activation_command_len, const char *open_command, size_t open_command_len);
 void native_sdk_appkit_update_tray_shell(native_sdk_appkit_host_t *host, uint32_t status_item_id, const char *icon_path, size_t icon_path_len, const char *tooltip, size_t tooltip_len, int visible, const char *activation_command, size_t activation_command_len, const char *alternate_activation_command, size_t alternate_activation_command_len, const char *open_command, size_t open_command_len);
 void native_sdk_appkit_update_tray_menu(native_sdk_appkit_host_t *host, uint32_t status_item_id, const uint32_t *item_ids, const char *const *labels, const size_t *label_lens, const int *separators, const int *enabled_flags, const char *const *details, const size_t *detail_lens, const int *roles, const char *const *keys, const size_t *key_lens, const uint32_t *modifiers, size_t count);
+void native_sdk_appkit_update_tray_rich_rows(native_sdk_appkit_host_t *host, uint32_t status_item_id, const native_sdk_appkit_tray_segmented_row_t *segmented_rows, size_t segmented_count, const native_sdk_appkit_tray_metric_row_t *metric_rows, size_t metric_count, const native_sdk_appkit_tray_chart_row_t *chart_rows, size_t chart_count);
 /* Retitle the live status item's button without re-creating it (create
  * would flicker and reshuffle the menu bar). Empty title falls back to
  * the icon-only square well, or the app-name initial when there is no
  * icon either — the same fallbacks as create. */
 void native_sdk_appkit_update_tray_title(native_sdk_appkit_host_t *host, uint32_t status_item_id, const char *title, size_t title_len);
-void native_sdk_appkit_update_tray_presentation(native_sdk_appkit_host_t *host, uint32_t status_item_id, const char *title, size_t title_len, double width, int tone, double icon_opacity, int monospaced);
+void native_sdk_appkit_update_tray_presentation(native_sdk_appkit_host_t *host, uint32_t status_item_id, const char *title, size_t title_len, double width, int tone, double icon_opacity, int monospaced, double font_size, int font_weight);
 void native_sdk_appkit_remove_tray(native_sdk_appkit_host_t *host, uint32_t status_item_id);
 void native_sdk_appkit_set_tray_callback(native_sdk_appkit_host_t *host, native_sdk_appkit_tray_callback_t callback, void *context);
 

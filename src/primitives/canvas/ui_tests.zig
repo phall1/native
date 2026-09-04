@@ -349,6 +349,43 @@ test "keyboard events resolve activation and submit messages" {
     try testing.expectEqual(@as(?Msg, null), tree.msgForKeyboard(checkbox.id, letter));
 }
 
+test "combobox Enter prefers submit while its other open keys still press" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+
+    var ui = InboxUi.init(arena_state.allocator());
+    const tree = try ui.finalize(ui.column(.{}, .{
+        ui.el(.combobox, .{
+            .text = "both handlers",
+            .on_press = .load_more,
+            .on_submit = .add,
+        }, .{}),
+        ui.el(.combobox, .{
+            .text = "press only",
+            .on_press = .load_more,
+        }, .{}),
+        ui.el(.combobox, .{
+            .text = "submit only",
+            .on_submit = .add,
+        }, .{}),
+    }));
+
+    const both = tree.root.children[0];
+    const press_only = tree.root.children[1];
+    const submit_only = tree.root.children[2];
+    const enter = canvas.WidgetKeyboardEvent{ .phase = .key_down, .key = "enter" };
+    const space = canvas.WidgetKeyboardEvent{ .phase = .key_down, .key = "space" };
+    const arrow_down = canvas.WidgetKeyboardEvent{ .phase = .key_down, .key = "arrowdown" };
+    const arrow_up = canvas.WidgetKeyboardEvent{ .phase = .key_down, .key = "arrowup" };
+
+    try testing.expectEqual(Msg.add, tree.msgForKeyboard(both.id, enter).?);
+    try testing.expectEqual(Msg.load_more, tree.msgForKeyboard(both.id, space).?);
+    try testing.expectEqual(Msg.load_more, tree.msgForKeyboard(both.id, arrow_down).?);
+    try testing.expectEqual(Msg.load_more, tree.msgForKeyboard(both.id, arrow_up).?);
+    try testing.expectEqual(Msg.load_more, tree.msgForKeyboard(press_only.id, enter).?);
+    try testing.expectEqual(Msg.add, tree.msgForKeyboard(submit_only.id, enter).?);
+}
+
 test "tree keyboard navigation can select without dispatching pointer activation" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
@@ -372,6 +409,53 @@ test "tree keyboard navigation can select without dispatching pointer activation
     try testing.expectEqual(Msg.add, tree.msgForKeyboard(row.id, .{
         .phase = .key_down,
         .key = "enter",
+    }).?);
+}
+
+test "radio selection dispatches change then toggle then press on every input path" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+
+    var ui = InboxUi.init(arena_state.allocator());
+    const tree = try ui.finalize(ui.el(.radio_group, .{}, .{
+        ui.el(.radio, .{ .text = "All", .on_change = .add, .on_toggle = .load_more }, .{}),
+        ui.el(.radio, .{ .text = "Toggle fallback", .on_toggle = .load_more, .on_press = .add }, .{}),
+        ui.el(.radio, .{ .text = "Press fallback", .on_press = .add }, .{}),
+        ui.el(.radio, .{ .text = "Selected", .checked = true, .on_change = .add, .on_press = .load_more }, .{}),
+    }));
+    const change_radio = tree.root.children[0];
+    const toggle_radio = tree.root.children[1];
+    const press_radio = tree.root.children[2];
+    const selected_radio = tree.root.children[3];
+
+    try testing.expectEqual(Msg.add, tree.msgForPointer(change_radio.id, .up).?);
+    try testing.expectEqual(Msg.add, tree.msgForKeyboard(change_radio.id, .{ .phase = .key_down, .key = "space" }).?);
+    try testing.expectEqual(Msg.add, tree.msgForKeyboard(change_radio.id, .{ .phase = .key_down, .key = "enter" }).?);
+    try testing.expectEqual(Msg.add, tree.msgForKeyboard(change_radio.id, .{
+        .phase = .key_down,
+        .key = "arrowright",
+        .focus_moved = true,
+        .radio_group_navigation = true,
+        .radio_group_selection = true,
+    }).?);
+    try testing.expectEqual(Msg.load_more, tree.msgForPointer(toggle_radio.id, .up).?);
+    try testing.expectEqual(Msg.add, tree.msgForPointer(press_radio.id, .up).?);
+
+    // `on_change` is an edge, not an activation alias. Direct tree
+    // consumers derive the result from source state; runtime events carry
+    // the retained mutation explicitly. Reselecting falls through to the
+    // historical activation handler when one exists.
+    try testing.expectEqual(Msg.load_more, tree.msgForPointer(selected_radio.id, .up).?);
+    try testing.expectEqual(Msg.load_more, tree.msgForKeyboard(selected_radio.id, .{ .phase = .key_down, .key = "space" }).?);
+    try testing.expectEqual(Msg.load_more, tree.msgForPointerEvent(change_radio.id, .{
+        .phase = .up,
+        .point = .{},
+        .radio_selection_changed = false,
+    }).?);
+    try testing.expectEqual(Msg.add, tree.msgForKeyboard(selected_radio.id, .{
+        .phase = .key_down,
+        .key = "space",
+        .radio_selection_changed = true,
     }).?);
 }
 
@@ -478,9 +562,9 @@ test "avatar and image sugar carry registered image ids" {
 
     var ui = InboxUi.init(arena_state.allocator());
     const tree = try ui.finalize(ui.column(.{}, .{
-        ui.avatar(.{ .image = 77, .semantics = .{ .label = "Native SDK" } }, "NS"),
+        ui.avatar(.{ .image = 77, .image_src = geometry.RectF.init(32, 0, 32, 32), .semantics = .{ .label = "Native SDK" } }, "NS"),
         ui.avatar(.{}, "NS"),
-        ui.image(.{ .image = 42, .semantics = .{ .label = "Chart" } }),
+        ui.image(.{ .image = 42, .image_src = geometry.RectF.init(4, 8, 24, 16), .semantics = .{ .label = "Chart" } }),
     }));
 
     // With an image id the avatar clips it to the circle (cover fit);
@@ -488,6 +572,7 @@ test "avatar and image sugar carry registered image ids" {
     const with_image = tree.root.children[0];
     try testing.expectEqual(canvas.WidgetKind.avatar, with_image.kind);
     try testing.expectEqual(@as(canvas.ImageId, 77), with_image.image_id);
+    try testing.expectEqualDeep(@as(?geometry.RectF, geometry.RectF.init(32, 0, 32, 32)), with_image.image_src);
     try testing.expectEqual(canvas.ImageFit.cover, with_image.image_fit);
     try testing.expectEqualStrings("NS", with_image.text);
 
@@ -498,6 +583,7 @@ test "avatar and image sugar carry registered image ids" {
     const image_leaf = tree.root.children[2];
     try testing.expectEqual(canvas.WidgetKind.image, image_leaf.kind);
     try testing.expectEqual(@as(canvas.ImageId, 42), image_leaf.image_id);
+    try testing.expectEqualDeep(@as(?geometry.RectF, geometry.RectF.init(4, 8, 24, 16)), image_leaf.image_src);
 }
 
 test "payload-carrying handlers build messages from edits and values" {
@@ -1565,6 +1651,20 @@ test "virtualWindow without a source falls back to the request viewport" {
     // And a zero fallback builds nothing — the honest "viewport unknown".
     options.viewport_fallback = 0;
     try testing.expect(ui.virtualWindow(options).isEmpty());
+}
+
+test "terminal context menu policy flows from ElementOptions into the widget tree" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    var ui = InboxUi.init(arena_state.allocator());
+
+    const tree = try ui.finalize(ui.terminal(.{
+        .pty = 7,
+        .context_menu_policy = .disabled,
+    }));
+
+    try testing.expectEqual(canvas.WidgetKind.terminal, tree.root.kind);
+    try testing.expectEqual(canvas.WidgetContextMenuPolicy.disabled, tree.root.semantics.context_menu_policy);
 }
 
 test "widget kind codes are pinned: assigned at birth, declaration-order-independent" {

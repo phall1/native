@@ -408,6 +408,8 @@ struct native_sdk_gtk_host {
     char *window_label;
     double init_x, init_y, init_width, init_height;
     int restore_frame;
+    int initial_placement;
+    int restore_policy;
     /* Startup-window options applied when on_activate creates @w1 (the
      * window does not exist yet when the host is created). */
     int init_resizable;
@@ -3108,7 +3110,7 @@ static void native_sdk_ensure_transparent_css(native_sdk_gtk_host_t *host) {
     host->transparent_css_provider = provider;
 }
 
-static native_sdk_gtk_window_t *native_sdk_create_window_internal(native_sdk_gtk_host_t *host, uint64_t window_id, const char *title, const char *label, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, double min_width, double min_height, int show_policy, uint32_t window_flags) {
+static native_sdk_gtk_window_t *native_sdk_create_window_internal(native_sdk_gtk_host_t *host, uint64_t window_id, const char *title, const char *label, double x, double y, double width, double height, int restore_frame, int initial_placement, int restore_policy, int resizable, int titlebar_style, double min_width, double min_height, int show_policy, uint32_t window_flags) {
     if (native_sdk_find_window(host, window_id)) return NULL;
 
     int slot = -1;
@@ -3127,8 +3129,10 @@ static native_sdk_gtk_window_t *native_sdk_create_window_internal(native_sdk_gtk
     memset(win, 0, sizeof(*win));
     win->id = window_id;
     win->host = host;
-    win->x = restore_frame ? x : 0;
-    win->y = restore_frame ? y : 0;
+    (void)restore_frame;
+    (void)restore_policy;
+    win->x = initial_placement != 2 ? x : 0;
+    win->y = initial_placement != 2 ? y : 0;
     win->label = native_sdk_strndup(label && label[0] ? label : "main", strlen(label && label[0] ? label : "main"));
     win->title = native_sdk_strndup(title && title[0] ? title : host->app_name, strlen(title && title[0] ? title : host->app_name));
     win->transparent = (window_flags & (1u << 0)) != 0;
@@ -3257,7 +3261,8 @@ static void on_activate(GtkApplication *app, gpointer data) {
         host->init_x, host->init_y,
         host->init_width > 0 ? host->init_width : 720,
         host->init_height > 0 ? host->init_height : 480,
-        host->restore_frame, host->init_resizable, host->init_titlebar_style,
+        host->restore_frame, host->initial_placement, host->restore_policy,
+        host->init_resizable, host->init_titlebar_style,
         host->init_min_width, host->init_min_height,
         host->init_show_policy, host->init_window_flags);
     if (!win) return;
@@ -3281,7 +3286,8 @@ native_sdk_gtk_host_t *native_sdk_gtk_create(
     const char *icon_path, size_t icon_path_len,
     const char *window_label, size_t window_label_len,
     double x, double y, double width, double height,
-    int restore_frame, int resizable, int titlebar_style,
+    int restore_frame, int initial_placement, int restore_policy,
+    int resizable, int titlebar_style,
     double min_width, double min_height, int show_policy,
     uint32_t window_flags)
 {
@@ -3298,6 +3304,8 @@ native_sdk_gtk_host_t *native_sdk_gtk_create(
     host->init_width = width;
     host->init_height = height;
     host->restore_frame = restore_frame;
+    host->initial_placement = initial_placement;
+    host->restore_policy = restore_policy;
     host->init_resizable = resizable;
     host->init_titlebar_style = titlebar_style;
     host->init_min_width = min_width;
@@ -3475,13 +3483,38 @@ void native_sdk_gtk_request_frame(native_sdk_gtk_host_t *host) {
  * codec its loaders ship — the framework bundles none. Decoded rows are
  * repacked tightly (gdk-pixbuf rowstride may pad) as straight-alpha RGBA8,
  * the layout the canvas image pipeline expects. */
-int native_sdk_gtk_decode_image(const uint8_t *bytes, size_t bytes_len, uint8_t *pixels, size_t pixels_len, size_t *out_width, size_t *out_height) {
+typedef struct {
+    size_t max_pixels;
+} native_sdk_image_fit_t;
+
+#define NATIVE_SDK_MAX_DECODED_IMAGE_DIMENSION 8192
+
+static void native_sdk_gtk_image_size_prepared(GdkPixbufLoader *loader, int width, int height, gpointer user_data) {
+    native_sdk_image_fit_t *fit = user_data;
+    if (!fit || fit->max_pixels == 0 || width <= 0 || height <= 0) return;
+    double source_pixels = (double)width * (double)height;
+    if (source_pixels <= (double)fit->max_pixels && width <= NATIVE_SDK_MAX_DECODED_IMAGE_DIMENSION && height <= NATIVE_SDK_MAX_DECODED_IMAGE_DIMENSION) return;
+    double area_scale = sqrt((double)fit->max_pixels / source_pixels);
+    double axis_scale = (double)NATIVE_SDK_MAX_DECODED_IMAGE_DIMENSION / (double)MAX(width, height);
+    double scale = MIN(1.0, MIN(area_scale, axis_scale));
+    int fitted_width = MAX(1, (int)floor((double)width * scale));
+    int fitted_height = MAX(1, (int)floor((double)height * scale));
+    while ((size_t)fitted_width * (size_t)fitted_height > fit->max_pixels) {
+        if (fitted_width > 1 && (fitted_height == 1 || fitted_width > fitted_height)) fitted_width -= 1;
+        else fitted_height -= 1;
+    }
+    gdk_pixbuf_loader_set_size(loader, fitted_width, fitted_height);
+}
+
+int native_sdk_gtk_decode_image(const uint8_t *bytes, size_t bytes_len, uint8_t *pixels, size_t pixels_len, size_t max_pixels, size_t *out_width, size_t *out_height) {
     if (out_width) *out_width = 0;
     if (out_height) *out_height = 0;
-    if (!bytes || bytes_len == 0 || !pixels) return 0;
+    if (!bytes || bytes_len == 0 || !pixels || max_pixels == 0) return 0;
 
     GdkPixbufLoader *loader = gdk_pixbuf_loader_new();
     if (!loader) return 0;
+    native_sdk_image_fit_t fit = { .max_pixels = max_pixels };
+    g_signal_connect(loader, "size-prepared", G_CALLBACK(native_sdk_gtk_image_size_prepared), &fit);
     gboolean ok = gdk_pixbuf_loader_write(loader, bytes, bytes_len, NULL);
     ok = gdk_pixbuf_loader_close(loader, NULL) && ok;
     GdkPixbuf *decoded = ok ? gdk_pixbuf_loader_get_pixbuf(loader) : NULL;
@@ -3503,7 +3536,7 @@ int native_sdk_gtk_decode_image(const uint8_t *bytes, size_t bytes_len, uint8_t 
 
     int width_px = gdk_pixbuf_get_width(rgba);
     int height_px = gdk_pixbuf_get_height(rgba);
-    if (width_px <= 0 || height_px <= 0 || width_px > 8192 || height_px > 8192) {
+    if (width_px <= 0 || height_px <= 0 || width_px > NATIVE_SDK_MAX_DECODED_IMAGE_DIMENSION || height_px > NATIVE_SDK_MAX_DECODED_IMAGE_DIMENSION) {
         g_object_unref(rgba);
         g_object_unref(loader);
         return 0;
@@ -3838,10 +3871,10 @@ void native_sdk_gtk_set_shortcuts(native_sdk_gtk_host_t *host, const char *const
     }
 }
 
-int native_sdk_gtk_create_window(native_sdk_gtk_host_t *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, double min_width, double min_height, int show_policy, uint32_t window_flags) {
+int native_sdk_gtk_create_window(native_sdk_gtk_host_t *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int initial_placement, int restore_policy, int resizable, int titlebar_style, double min_width, double min_height, int show_policy, uint32_t window_flags) {
     char *title = window_title_len > 0 ? native_sdk_strndup(window_title, window_title_len) : NULL;
     char *label = window_label_len > 0 ? native_sdk_strndup(window_label, window_label_len) : NULL;
-    native_sdk_gtk_window_t *win = native_sdk_create_window_internal(host, window_id, title, label, x, y, width, height, restore_frame, resizable, titlebar_style, min_width, min_height, show_policy, window_flags);
+    native_sdk_gtk_window_t *win = native_sdk_create_window_internal(host, window_id, title, label, x, y, width, height, restore_frame, initial_placement, restore_policy, resizable, titlebar_style, min_width, min_height, show_policy, window_flags);
     free(title);
     free(label);
     if (!win) return 0;

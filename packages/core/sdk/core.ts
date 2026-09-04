@@ -388,6 +388,7 @@ export function windowDescriptor(spec: WindowDescriptorSpec): WindowDescriptor {
     x: spec.x ?? null,
     y: spec.y ?? null,
     resizable: spec.resizable ?? true,
+    restorePolicy: spec.restorePolicy ?? "clamp_to_visible_screen",
     minWidth: spec.minWidth ?? 0,
     minHeight: spec.minHeight ?? 0,
     titlebar: spec.titlebar ?? "standard",
@@ -614,7 +615,9 @@ export type VideoEventKind<M extends Msgish> = M extends Msgish
 /// live id), "not_found" (missing local file, no url), "io_failed" (a local
 /// read failure), "connect_failed"/"tls_failed"/"protocol_failed"/"timed_out"
 /// (the fetch taxonomy), "http_status" (a non-2xx answer; `status` carries
-/// it), "cancelled", "too_large" (source or decoded pixels over budget),
+/// it), "cancelled", "too_large" (the encoded source exceeds the fixed
+/// source bound; conforming codecs decode photo-scale pixels down to the
+/// app's registered-image budget),
 /// "unsupported" (no platform codec), "decode_failed", "registry_full", and
 /// "alloc_failed" (the host refused the memory the registration needed —
 /// resource exhaustion, not corrupt bytes: the same source may load once

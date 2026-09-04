@@ -102,21 +102,22 @@ pub const WidgetKind = enum {
     /// hash `widgetKindCode`, not declaration order, so placement here
     /// carries no meaning.)
     chart,
-    /// Two-pane horizontal splitter: exactly two flow children (the
-    /// panes) separated by a builder-synthesized `.split_divider` handle.
-    /// `value` is the MODEL-OWNED fraction of the content width the
-    /// first pane takes (0 means "unset" and lays out at 0.5); dragging
-    /// the divider dispatches a `canvas_widget_resize` event so the
-    /// model can own the fraction (`on_resize`), and the runtime keeps
-    /// an uncontrolled divider position across rebuilds with the same
-    /// source-wins reconcile rule as scroll offsets.
+    /// Two-pane splitter: exactly two flow children (the panes) separated
+    /// by a builder-synthesized `.split_divider` handle. `split_axis`
+    /// chooses left/right or top/bottom while preserving horizontal as the
+    /// default. `value` is the MODEL-OWNED fraction of the split axis the
+    /// first pane takes (0 means "unset" and lays out at 0.5); dragging the
+    /// divider dispatches a `canvas_widget_resize` event so the model can
+    /// own the fraction (`on_resize`), and the runtime keeps an uncontrolled
+    /// divider position across rebuilds with the same source-wins reconcile
+    /// rule as scroll offsets.
     split,
     /// The draggable divider handle between a `.split`'s panes. Never
     /// authored directly: `Ui.finalizeNode` synthesizes it between the
     /// two panes (both markup engines build through the same builder).
-    /// Focusable, `resize_horizontal` cursor, ARIA separator semantics;
-    /// arrow keys adjust the parent split's fraction when it holds
-    /// focus. `value` mirrors the parent split's fraction.
+    /// Focusable, axis-appropriate resize cursor, ARIA separator semantics;
+    /// matching arrow keys adjust the parent split's fraction when it holds
+    /// focus. `value` and `split_axis` mirror the parent split.
     split_divider,
     /// Disclosure-tree container (vertical flow like `list`): descendant
     /// widgets carrying `role = .treeitem` form ONE roving keyboard
@@ -245,11 +246,17 @@ pub fn widgetKindCode(kind: WidgetKind) u16 {
     };
 }
 
+pub const SplitAxis = enum(u1) {
+    horizontal,
+    vertical,
+};
+
 pub const WidgetCursor = enum {
     arrow,
     pointing_hand,
     text,
     resize_horizontal,
+    resize_vertical,
 };
 
 pub const WidgetState = struct {
@@ -264,16 +271,17 @@ pub const WidgetState = struct {
     invalid: bool = false,
 };
 
-/// Engine-owned widget markers share one byte so adding runtime policy does
-/// not expand every retained `Widget`. Builder-facing behavior remains on
-/// ordinary named fields; these bits are stamped only by engine code.
+/// Compact widget policy shares one byte so adding runtime or builder-facing
+/// behavior does not expand every retained `Widget`.
 pub const WidgetRuntimeFlags = packed struct(u8) {
     /// `Ui.code` stamped this textarea as the editor surface.
     code_editor: bool = false,
     /// The runtime installed an OS-native scroll driver; engine-drawn
     /// scrollbar and kinetic physics stand down for this scroll view.
     native_scroll: bool = false,
-    _reserved: u6 = 0,
+    /// The axis declared by a split and mirrored onto its divider.
+    split_axis: SplitAxis = .horizontal,
+    _reserved: u5 = 0,
 };
 
 /// Two 128-line masks for code-only diff presentation. `Widget` packs them
@@ -577,6 +585,8 @@ pub const WidgetRole = enum {
     tab,
     checkbox,
     radio,
+    /// A single-choice group containing descendant radio controls.
+    radiogroup,
     switch_control,
     slider,
     progressbar,
@@ -743,7 +753,7 @@ pub fn builtinComponentDescriptor(kind: BuiltinComponentKind) BuiltinComponentDe
         .input => builtinComponent(.input, .input, .textbox, false),
         .pagination => builtinComponent(.pagination, .pagination, .group, true),
         .progress => builtinComponent(.progress, .progress, .progressbar, false),
-        .radio_group => builtinComponent(.radio_group, .radio_group, .group, true),
+        .radio_group => builtinComponent(.radio_group, .radio_group, .radiogroup, true),
         .resizable => builtinComponent(.resizable, .resizable, .group, true),
         .select => builtinComponent(.select, .select, .button, true),
         .separator => builtinComponent(.separator, .separator, .none, false),
@@ -812,8 +822,46 @@ pub const WidgetSemantics = struct {
     list_item_index: ?u32 = null,
     list_item_count: ?u32 = null,
     actions: WidgetActions = .{},
+    /// VISIBILITY, not an accessibility annotation: the widget and its
+    /// subtree keep their layout box — the space stays reserved and
+    /// siblings do not reflow — but drop out of painting, hit-testing,
+    /// focus traversal, drag/drop, and the accessibility tree. This is
+    /// the flag for "lay out an empty slot here": a fixed-width spacer
+    /// that reserves room for an affordance that is not currently shown,
+    /// or `Ui.nav`'s retained-but-inactive pages.
+    ///
+    /// It is NOT the way to keep a decoration off a screen reader —
+    /// `hidden` paints nothing, which is why a `hidden` magnifier glyph
+    /// or caret renders as blank space. Use `decorative` for that.
     hidden: bool = false,
+    /// ACCESSIBILITY only: the widget and its subtree are omitted from
+    /// the accessibility tree and can never be focusable, while painting,
+    /// layout, hit-testing, and event routing stay exactly as they are.
+    /// The `aria-hidden` / `role="presentation"` counterpart, and the
+    /// right flag for chrome that is meaningful to the eye but noise to
+    /// assistive tech: a search field's magnifier glyph, a rendered
+    /// caret, a decorative rule beside a labeled control.
+    ///
+    /// Deliberately separate from `hidden`, which suppresses paint too.
+    /// Marking an interactive control decorative hides a working control
+    /// from assistive tech — reach for it on decoration only.
+    ///
+    /// Retained metadata that fits existing struct padding, so it costs
+    /// no bytes on the `Widget` hot path.
+    decorative: bool = false,
     focusable: bool = false,
+    /// Context-menu selection policy. This is retained action metadata and
+    /// occupies existing struct padding, keeping every `Widget` compact.
+    context_menu_policy: WidgetContextMenuPolicy = .automatic,
+
+    /// True when this widget (and its subtree) stays out of the
+    /// accessibility tree — either because nothing paints (`hidden`) or
+    /// because the paint is decoration (`decorative`). The single
+    /// predicate every accessibility-facing walk asks, so the two flags
+    /// can never drift apart on the announcement side.
+    pub fn concealedFromAccessibility(self: WidgetSemantics) bool {
+        return self.hidden or self.decorative;
+    }
 };
 
 /// One declared context-menu entry carried on a widget (label/enabled/
@@ -823,6 +871,17 @@ pub const WidgetContextMenuItem = struct {
     label: []const u8 = "",
     enabled: bool = true,
     separator: bool = false,
+};
+
+/// Which context menus a widget permits. `.automatic` preserves the
+/// platform defaults (declared items first, then SDK text/terminal menus),
+/// `.declared_only` suppresses those SDK defaults while retaining an
+/// app-declared menu, and `.disabled` bypasses context-menu handling so the
+/// secondary-button stream follows ordinary widget routing and capture.
+pub const WidgetContextMenuPolicy = enum {
+    automatic,
+    declared_only,
+    disabled,
 };
 
 /// Per-region edge behavior of a scroll container. `.default` follows
@@ -1040,9 +1099,8 @@ pub const Widget = struct {
     layer: ?i32 = null,
     /// Modal surfaces (dialog/drawer/sheet) paint a token-driven scrim
     /// (dim + backdrop blur) across the whole tree behind them. False
-    /// opts a surface out — for embedding one as an inline PREVIEW
-    /// (a component catalog card, a docs specimen) where it is not
-    /// actually modal. Ignored on every other kind.
+    /// opts out of the scrim for a non-modal specimen; placement remains
+    /// root-relative. Ignored on every other kind.
     scrim: bool = true,
     state: WidgetState = .{},
     layout: WidgetLayoutStyle = .{},
@@ -1210,8 +1268,8 @@ pub const BuiltinComponentOptions = struct {
     text_composition: ?TextRange = null,
     value: f32 = 0,
     layer: ?i32 = null,
-    /// See `Widget.scrim`: false embeds a modal surface as an inline
-    /// preview without the behind-it dim + blur.
+    /// See `Widget.scrim`: false keeps root-relative placement but omits
+    /// the behind-it dim + blur.
     scrim: bool = true,
     state: WidgetState = .{},
     layout: WidgetLayoutStyle = .{},
@@ -1509,6 +1567,18 @@ fn builtinComponentSemantics(descriptor: BuiltinComponentDescriptor, semantics: 
 /// concentric with the container's at every position.
 pub const tabs_list_inset: f32 = 3;
 
+/// Additive control-size step shared by token-backed chrome metrics and
+/// token-independent kind defaults. The default alert inset uses the
+/// house 16px base / 2px step here; runtime token packs feed their own
+/// base and step through `widget_metrics.widgetSizedTokenValue`.
+pub fn widgetSizeSteppedValue(size: WidgetSize, value: f32, step: f32) f32 {
+    return switch (size) {
+        .sm => @max(0, value - step),
+        .default, .icon, .heading, .display => value,
+        .lg => value + step,
+    };
+}
+
 /// Ergonomic per-kind layout defaults for the composite surfaces whose
 /// house reference carries built-in content spacing, shared by EVERY
 /// authoring path — `builtinComponentWidget` and (via the ui builder,
@@ -1525,7 +1595,7 @@ pub fn widgetKindDefaultLayout(kind: WidgetKind, size: WidgetSize) ?WidgetLayout
             .clip_content = true,
         },
         .alert => .{
-            .padding = geometry.InsetsF.all(16),
+            .padding = geometry.InsetsF.all(widgetSizeSteppedValue(size, 16, 2)),
             .gap = 12,
             .clip_content = true,
         },

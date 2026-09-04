@@ -44,7 +44,8 @@
 //! the committed model. One model-helper convention joins that wiring:
 //! an exported `themePack(model): "house" | "geist"` helper selects the
 //! stock pack live through `theme_fn`, without taking ownership of the
-//! system appearance axes. An exported
+//! system appearance axes; `themeState(model)` subsumes it with scheme and
+//! accent axes through `theme_state_fn`. An exported
 //! `statusItem(model): StatusItemState` helper similarly owns one complete
 //! menu-bar item through `status_item_fn`; `statusItems(model)` owns a keyed
 //! collection through `status_items_fn`. Both keep shell, presentation, and
@@ -80,6 +81,27 @@ const ts_core_host = @import("ts_core_host.zig");
 
 const ts_ui_app_log = std.log.scoped(.zero_ts_ui_app);
 
+/// Quota for a comptime scan of an app-authored type. TS `Msg` unions may
+/// legally carry 256 arms; include total identifier bytes because
+/// `std.mem.eql`'s comptime scalar path scales with the compared names.
+fn typeScanQuota(comptime T: type) u32 {
+    const fields = switch (@typeInfo(T)) {
+        .@"struct" => |info| info.fields,
+        .@"union" => |info| info.fields,
+        .@"enum" => |info| info.fields,
+        else => return 2_000,
+    };
+    var name_bytes: u64 = 0;
+    for (fields) |field| name_bytes += field.name.len;
+    const quota: u64 = 100_000 + @as(u64, fields.len) * 1_024 + name_bytes * 256;
+    return @intCast(@min(quota, std.math.maxInt(u32)));
+}
+
+fn scaledTypeScanQuota(comptime T: type, comptime scans: usize) u32 {
+    const quota = @as(u64, typeScanQuota(T)) * @max(scans, 1);
+    return @intCast(@min(quota, std.math.maxInt(u32)));
+}
+
 pub fn TsUiApp(comptime core: type) type {
     return struct {
         /// The effect bridge — shared with any direct `TsCoreHost(core)`
@@ -92,6 +114,9 @@ pub fn TsUiApp(comptime core: type) type {
         pub const Options = App.Options;
         pub const Effects = App.Effects;
         pub const Ui = App.Ui;
+        /// Shared with generated launchers that perform their own Msg scans.
+        pub const msg_scan_quota = typeScanQuota(Msg);
+        pub const persist_route_scan_quota = scaledTypeScanQuota(Msg, 3);
 
         /// Internal keyed-channel namespace for persistence write failures
         /// ("TSPR"). It never shares an app-authored TS bridge index.
@@ -142,22 +167,28 @@ pub fn TsUiApp(comptime core: type) type {
             outcome_handle: ?*runtime_effects.ChannelHandle = null,
         };
 
-        /// One effects host binding must carry both app services and the
-        /// framework-owned persistence verbs when an app enables both. The
-        /// reserved persistence names route to that binding; every other
-        /// command and the worker completion lifecycle stay with the app
-        /// service carrier.
-        const HostCallMux = struct {
-            primary: runtime_effects.HostCallBinding,
-            persist: runtime_effects.HostCallBinding,
+        /// Compose two named-command hosts without hiding either host's
+        /// completion or lifecycle seams. Names accepted by `route_fn` go to
+        /// `routed`; every other name goes to `default`. Cancellation fans out
+        /// because it carries only a key, while polling alternates so one busy
+        /// host cannot starve the other.
+        ///
+        /// Generated runners use this for persistence plus services. Native
+        /// extensions can use the same type to reserve an app namespace while
+        /// leaving generated service bindings intact.
+        pub const HostCallMux = struct {
+            default: runtime_effects.HostCallBinding,
+            routed: runtime_effects.HostCallBinding,
+            route_fn: *const fn (name: []const u8) bool,
+            poll_routed_first: bool = false,
 
-            fn binding(self: *HostCallMux) runtime_effects.HostCallBinding {
+            pub fn binding(self: *HostCallMux) runtime_effects.HostCallBinding {
                 return .{
                     .context = self,
                     .send_fn = send,
                     .request_fn = request,
                     .cancel_fn = cancel,
-                    .reject_duplicate_keys = self.primary.reject_duplicate_keys,
+                    .reject_duplicate_keys = self.default.reject_duplicate_keys or self.routed.reject_duplicate_keys,
                     .poll_fn = poll,
                     .pending_fn = pending,
                     .bind_services_fn = bindServices,
@@ -166,69 +197,84 @@ pub fn TsUiApp(comptime core: type) type {
                 };
             }
 
-            fn persistenceName(name: []const u8) bool {
-                return std.mem.eql(u8, name, "core.persist") or std.mem.eql(u8, name, "core.persist.flush");
-            }
-
             fn send(context: *anyopaque, name: []const u8, payload: []const u8) void {
                 const self: *HostCallMux = @ptrCast(@alignCast(context));
-                const target = if (persistenceName(name)) self.persist else self.primary;
+                const target = if (self.route_fn(name)) self.routed else self.default;
                 target.send_fn(target.context, name, payload);
             }
 
             fn request(context: *anyopaque, name: []const u8, key: u64, payload: []const u8) void {
                 const self: *HostCallMux = @ptrCast(@alignCast(context));
-                const target = if (persistenceName(name)) self.persist else self.primary;
+                const target = if (self.route_fn(name)) self.routed else self.default;
                 target.request_fn(target.context, name, key, payload);
             }
 
             fn cancel(context: *anyopaque, key: u64) void {
                 const self: *HostCallMux = @ptrCast(@alignCast(context));
-                if (self.primary.cancel_fn) |cancel_fn| cancel_fn(self.primary.context, key);
+                if (self.default.cancel_fn) |cancel_fn| cancel_fn(self.default.context, key);
+                if (self.routed.cancel_fn) |cancel_fn| cancel_fn(self.routed.context, key);
             }
 
             fn poll(context: *anyopaque) ?runtime_effects.HostCallCompletion {
                 const self: *HostCallMux = @ptrCast(@alignCast(context));
-                const poll_fn = self.primary.poll_fn orelse return null;
-                return poll_fn(self.primary.context);
+                const first = if (self.poll_routed_first) self.routed else self.default;
+                const second = if (self.poll_routed_first) self.default else self.routed;
+                self.poll_routed_first = !self.poll_routed_first;
+                if (pollOne(first)) |completion| return completion;
+                return pollOne(second);
+            }
+
+            fn pollOne(binding_value: runtime_effects.HostCallBinding) ?runtime_effects.HostCallCompletion {
+                const poll_fn = binding_value.poll_fn orelse return null;
+                return poll_fn(binding_value.context);
             }
 
             fn pending(context: *anyopaque) bool {
                 const self: *HostCallMux = @ptrCast(@alignCast(context));
-                const pending_fn = self.primary.pending_fn orelse return false;
-                return pending_fn(self.primary.context);
+                return isPending(self.default) or isPending(self.routed);
+            }
+
+            fn isPending(binding_value: runtime_effects.HostCallBinding) bool {
+                const pending_fn = binding_value.pending_fn orelse return false;
+                return pending_fn(binding_value.context);
             }
 
             fn bindServices(context: *anyopaque, services: *const platform.PlatformServices) void {
                 const self: *HostCallMux = @ptrCast(@alignCast(context));
-                if (self.primary.bind_services_fn) |bind_fn| bind_fn(self.primary.context, services);
-                if (self.persist.bind_services_fn) |bind_fn| bind_fn(self.persist.context, services);
+                if (self.default.bind_services_fn) |bind_fn| bind_fn(self.default.context, services);
+                if (self.routed.bind_services_fn) |bind_fn| bind_fn(self.routed.context, services);
             }
 
             fn bindChannels(context: *anyopaque, channels: runtime_effects.HostChannelBinding) void {
                 const self: *HostCallMux = @ptrCast(@alignCast(context));
-                if (self.primary.bind_channels_fn) |bind_fn| bind_fn(self.primary.context, channels);
-                if (self.persist.bind_channels_fn) |bind_fn| bind_fn(self.persist.context, channels);
+                if (self.default.bind_channels_fn) |bind_fn| bind_fn(self.default.context, channels);
+                if (self.routed.bind_channels_fn) |bind_fn| bind_fn(self.routed.context, channels);
             }
 
             fn shutdown(context: *anyopaque) void {
                 const self: *HostCallMux = @ptrCast(@alignCast(context));
-                if (self.primary.shutdown_fn) |shutdown_fn| shutdown_fn(self.primary.context);
-                if (self.persist.shutdown_fn) |shutdown_fn| shutdown_fn(self.persist.context);
+                if (self.default.shutdown_fn) |shutdown_fn| shutdown_fn(self.default.context);
+                if (self.routed.shutdown_fn) |shutdown_fn| shutdown_fn(self.routed.context);
             }
         };
+
+        fn persistenceHostCall(name: []const u8) bool {
+            return std.mem.eql(u8, name, "core.persist") or std.mem.eql(u8, name, "core.persist.flush");
+        }
 
         /// Build-time manifest/wire fence for the three persistence routes.
         /// The generated runner calls this with app.zon's comptime strings so
         /// a typo or payload mismatch fails during `native build`, before a
         /// first boot can reach the dynamic dispatch path below.
         pub fn validatePersistRoutes(comptime routes: PersistRoutes) void {
+            @setEvalBranchQuota(persist_route_scan_quota);
             validatePersistRoute(routes.ok, void, "ok");
             validatePersistRoute(routes.none, void, "none");
             validatePersistRoute(routes.err, []const u8, "err");
         }
 
         fn validatePersistRoute(comptime route: []const u8, comptime Payload: type, comptime role: []const u8) void {
+            @setEvalBranchQuota(msg_scan_quota);
             inline for (@typeInfo(Msg).@"union".fields) |arm| {
                 if (comptime std.mem.eql(u8, arm.name, route)) {
                     if (arm.type != Payload) {
@@ -344,8 +390,9 @@ pub fn TsUiApp(comptime core: type) type {
             host_calls_store = core_options.host_calls;
             persist_options_store = core_options.persist;
             host_call_mux_store = if (core_options.host_calls != null and core_options.persist != null) .{
-                .primary = core_options.host_calls.?,
-                .persist = core_options.persist.?.binding,
+                .default = core_options.host_calls.?,
+                .routed = core_options.persist.?.binding,
+                .route_fn = persistenceHostCall,
             } else null;
             if (core_options.env_values.len > 0 and comptime !@hasDecl(core, "envMsgs")) {
                 @panic("TsUiApp received env_values but the core exports no envMsgs channel - declare `export const envMsgs = [{ env: \"NAME\", msg: \"<arm>\" }] as const` in core.ts");
@@ -379,11 +426,21 @@ pub fn TsUiApp(comptime core: type) type {
             // external-core mirror. The app owns only the pack; UiApp's
             // stock-token path keeps following the OS appearance.
             if (comptime @hasDecl(Model, "themePack")) {
+                if (comptime @hasDecl(Model, "themeState")) {
+                    @compileError("TsUiApp: export either themePack or themeState, not both");
+                }
                 if (options.theme_fn != null) {
                     @panic("TsUiApp wires theme_fn from the core's themePack helper - remove the wiring's theme_fn");
                 }
                 comptime validateThemePackHelper();
                 stamped.theme_fn = themePackAdapter;
+            }
+            if (comptime @hasDecl(Model, "themeState")) {
+                if (options.theme_state_fn != null or options.theme_fn != null) {
+                    @panic("TsUiApp wires theme_state_fn from the core's themeState helper - remove the wiring's theme_state_fn/theme_fn");
+                }
+                comptime validateThemeStateHelper();
+                stamped.theme_state_fn = themeStateAdapter;
             }
             // A statusItem helper is the TS app's model-derived shell
             // declaration. UiApp installs it on the first frame and
@@ -503,6 +560,82 @@ pub fn TsUiApp(comptime core: type) type {
             }
         }
 
+        fn themeStateAdapter(model: *const Model) App.ThemeState {
+            const params = @typeInfo(@TypeOf(Model.themeState)).@"fn".params;
+            const raw_state = if (comptime params.len == 1)
+                model.themeState()
+            else
+                model.themeState(core.rt.frameAllocator());
+            const state = if (comptime @typeInfo(@TypeOf(raw_state)) == .pointer) raw_state.* else raw_state;
+            const accent = if (state.accent) |value| parseThemeAccent(value) else null;
+            return .{
+                .pack = if (state.pack) |pack| canvas.ThemePack.fromName(@tagName(pack)).? else null,
+                .color_scheme = if (state.colorScheme) |scheme| themeColorScheme(scheme) else .system,
+                .accent = accent,
+                .invalid_accent = if (state.accent != null and accent == null) state.accent else null,
+            };
+        }
+
+        fn themeColorScheme(value: anytype) App.ThemeColorScheme {
+            const name = @tagName(value);
+            inline for (std.meta.fields(App.ThemeColorScheme)) |field| {
+                if (std.mem.eql(u8, name, field.name)) return @enumFromInt(field.value);
+            }
+            unreachable;
+        }
+
+        fn parseThemeAccent(value: []const u8) ?canvas.Color {
+            if (value.len != 7 or value[0] != '#') return null;
+            const r = themeHexByte(value[1], value[2]) orelse return null;
+            const g = themeHexByte(value[3], value[4]) orelse return null;
+            const b = themeHexByte(value[5], value[6]) orelse return null;
+            return canvas.Color.rgb8(r, g, b);
+        }
+
+        fn themeHexByte(hi: u8, lo: u8) ?u8 {
+            const h = themeHexNibble(hi) orelse return null;
+            const l = themeHexNibble(lo) orelse return null;
+            return h * 16 + l;
+        }
+
+        fn themeHexNibble(byte: u8) ?u8 {
+            return switch (byte) {
+                '0'...'9' => byte - '0',
+                'a'...'f' => byte - 'a' + 10,
+                'A'...'F' => byte - 'A' + 10,
+                else => null,
+            };
+        }
+
+        fn validateThemeStateHelper() void {
+            const teaching = "TsUiApp: themeState must be exported from core.ts as themeState(model: Model): ThemeState; import ThemeState from @native-sdk/core/events";
+            const helper_info = @typeInfo(@TypeOf(Model.themeState));
+            if (helper_info != .@"fn") @compileError(teaching);
+            const function = helper_info.@"fn";
+            if ((function.params.len != 1 and function.params.len != 2) or function.params[0].type == null or function.params[0].type.? != *const Model) {
+                @compileError(teaching);
+            }
+            if (function.params.len == 2) {
+                if (function.params[1].type == null or function.params[1].type.? != std.mem.Allocator or
+                    !@hasDecl(core, "rt") or !@hasDecl(core.rt, "frameAllocator"))
+                {
+                    @compileError(teaching);
+                }
+            }
+            const RawState = function.return_type orelse @compileError(teaching);
+            const State = statusItemRecordType(RawState, teaching);
+            const info = @typeInfo(State).@"struct";
+            if (info.fields.len != 3 or !@hasField(State, "pack") or !@hasField(State, "colorScheme") or !@hasField(State, "accent")) {
+                @compileError(teaching);
+            }
+            if (!optionalEnumType(@FieldType(State, "pack"), &.{ "house", "geist" }) or
+                !optionalEnumType(@FieldType(State, "colorScheme"), &.{ "light", "dark", "system" }) or
+                @FieldType(State, "accent") != ?[]const u8)
+            {
+                @compileError(teaching);
+            }
+        }
+
         /// Convert the compiled core's canonical status-item records into
         /// the platform rows UiApp already knows how to validate, copy,
         /// hash, install, and patch. Interface records cross the core ABI
@@ -525,23 +658,13 @@ pub fn TsUiApp(comptime core: type) type {
             }
             for (state.items, 0..) |raw_item, index| {
                 const item = if (comptime @typeInfo(@TypeOf(raw_item)) == .pointer) raw_item.* else raw_item;
-                scratch.items[index] = .{
-                    .id = statusItemId(item.id),
-                    .label = item.label,
-                    .command = item.command,
-                    .separator = item.separator,
-                    .enabled = item.enabled,
-                    .detail = item.detail,
-                    .role = statusItemRole(item.role),
-                    .key = item.key,
-                    .modifiers = .{
-                        .primary = item.modifiers.primary,
-                        .command = item.modifiers.command,
-                        .control = item.modifiers.control,
-                        .option = item.modifiers.option,
-                        .shift = item.modifiers.shift,
-                    },
-                };
+                const segment_start = index * platform.max_tray_segment_options;
+                const chart_start = index * platform.max_tray_chart_values;
+                scratch.items[index] = statusItemMenuItem(
+                    item,
+                    scratch.segment_options[segment_start .. segment_start + platform.max_tray_segment_options],
+                    scratch.chart_values[chart_start .. chart_start + platform.max_tray_chart_values],
+                );
             }
             return statusItemState(state, scratch.items[0..state.items.len]);
         }
@@ -571,7 +694,14 @@ pub fn TsUiApp(comptime core: type) type {
                 }
                 for (state.items, 0..) |raw_item, item_index| {
                     const item = if (comptime @typeInfo(@TypeOf(raw_item)) == .pointer) raw_item.* else raw_item;
-                    row_storage[item_index] = statusItemMenuItem(item);
+                    const flat_row_index = row_start + item_index;
+                    const segment_start = flat_row_index * platform.max_tray_segment_options;
+                    const chart_start = flat_row_index * platform.max_tray_chart_values;
+                    row_storage[item_index] = statusItemMenuItem(
+                        item,
+                        scratch.segment_options[segment_start .. segment_start + platform.max_tray_segment_options],
+                        scratch.chart_values[chart_start .. chart_start + platform.max_tray_chart_values],
+                    );
                 }
                 scratch.status_items[status_index] = .{
                     .id = statusItemId(state.id),
@@ -607,6 +737,7 @@ pub fn TsUiApp(comptime core: type) type {
                     .x = optionalWindowFloat(window.x),
                     .y = optionalWindowFloat(window.y),
                     .resizable = window.resizable,
+                    .restore_policy = windowRestorePolicy(window.restorePolicy),
                     .min_width = statusItemFloat(window.minWidth),
                     .min_height = statusItemFloat(window.minHeight),
                     .titlebar = windowTitlebar(window.titlebar),
@@ -633,6 +764,14 @@ pub fn TsUiApp(comptime core: type) type {
 
         fn windowTitlebar(value: anytype) @import("app_manifest").WindowTitlebarStyle {
             const Target = @import("app_manifest").WindowTitlebarStyle;
+            inline for (std.meta.fields(Target)) |field| {
+                if (std.mem.eql(u8, @tagName(value), field.name)) return @enumFromInt(field.value);
+            }
+            unreachable;
+        }
+
+        fn windowRestorePolicy(value: anytype) @import("app_manifest").WindowRestorePolicy {
+            const Target = @import("app_manifest").WindowRestorePolicy;
             inline for (std.meta.fields(Target)) |field| {
                 if (std.mem.eql(u8, @tagName(value), field.name)) return @enumFromInt(field.value);
             }
@@ -668,8 +807,8 @@ pub fn TsUiApp(comptime core: type) type {
             };
         }
 
-        fn statusItemMenuItem(item: anytype) platform.TrayMenuItem {
-            return .{
+        fn statusItemMenuItem(item: anytype, segment_storage: []platform.TraySegmentOption, chart_storage: []f32) platform.TrayMenuItem {
+            var result = platform.TrayMenuItem{
                 .id = statusItemId(item.id),
                 .label = item.label,
                 .command = item.command,
@@ -686,6 +825,49 @@ pub fn TsUiApp(comptime core: type) type {
                     .shift = item.modifiers.shift,
                 },
             };
+            if (@hasField(@TypeOf(item), "segmented")) if (item.segmented) |raw_segmented| {
+                const segmented = if (comptime @typeInfo(@TypeOf(raw_segmented)) == .pointer) raw_segmented.* else raw_segmented;
+                if (segmented.options.len <= segment_storage.len) {
+                    for (segmented.options, 0..) |raw_option, index| {
+                        const option = if (comptime @typeInfo(@TypeOf(raw_option)) == .pointer) raw_option.* else raw_option;
+                        segment_storage[index] = .{
+                            .id = statusItemId(option.id),
+                            .label = option.label,
+                            .command = option.command,
+                            .selected = option.selected,
+                            .enabled = option.enabled,
+                        };
+                    }
+                    result.segmented = .{ .options = segment_storage[0..segmented.options.len] };
+                } else {
+                    result.segmented = .{};
+                }
+            };
+            if (@hasField(@TypeOf(item), "metric")) if (item.metric) |raw_metric| {
+                const metric = if (comptime @typeInfo(@TypeOf(raw_metric)) == .pointer) raw_metric.* else raw_metric;
+                result.metric = .{
+                    .primary_text = metric.primaryText,
+                    .secondary_text = metric.secondaryText,
+                    .accessibility_label = metric.accessibilityLabel,
+                };
+            };
+            if (@hasField(@TypeOf(item), "chart")) if (item.chart) |raw_chart| {
+                const chart = if (comptime @typeInfo(@TypeOf(raw_chart)) == .pointer) raw_chart.* else raw_chart;
+                if (chart.values.len <= chart_storage.len) {
+                    for (chart.values, 0..) |value, index| chart_storage[index] = statusItemFloat(value);
+                    result.chart = .{
+                        .values = chart_storage[0..chart.values.len],
+                        .min_value = statusItemFloat(chart.minValue),
+                        .max_value = statusItemFloat(chart.maxValue),
+                        .leading_caption = chart.leadingCaption,
+                        .trailing_summary = chart.trailingSummary,
+                        .accessibility_label = chart.accessibilityLabel,
+                    };
+                } else {
+                    result.chart = .{};
+                }
+            };
+            return result;
         }
 
         fn statusItemState(state: anytype, items: []const platform.TrayMenuItem) App.StatusItemState {
@@ -697,6 +879,8 @@ pub fn TsUiApp(comptime core: type) type {
                     .tone = statusItemTone(presentation.tone),
                     .icon_opacity = statusItemFloat(presentation.iconOpacity),
                     .monospaced = presentation.monospaced,
+                    .font_size = if (presentation.fontSize) |value| statusItemFloat(value) else 0,
+                    .font_weight = if (presentation.fontWeight) |value| statusItemFontWeight(value) else .regular,
                 },
                 .icon_path = state.iconPath,
                 .tooltip = state.tooltip,
@@ -732,6 +916,14 @@ pub fn TsUiApp(comptime core: type) type {
         fn statusItemTone(value: anytype) platform.TrayTone {
             const name = @tagName(value);
             inline for (std.meta.fields(platform.TrayTone)) |field| {
+                if (std.mem.eql(u8, name, field.name)) return @enumFromInt(field.value);
+            }
+            unreachable;
+        }
+
+        fn statusItemFontWeight(value: anytype) platform.TrayFontWeight {
+            const name = @tagName(value);
+            inline for (std.meta.fields(platform.TrayFontWeight)) |field| {
                 if (std.mem.eql(u8, name, field.name)) return @enumFromInt(field.value);
             }
             unreachable;
@@ -780,14 +972,17 @@ pub fn TsUiApp(comptime core: type) type {
             }
             const Presentation = statusItemRecordType(@FieldType(State, "presentation"), teaching);
             const presentation_info = @typeInfo(Presentation).@"struct";
-            if (presentation_info.fields.len != 5 or !@hasField(Presentation, "title") or !@hasField(Presentation, "width") or
-                !@hasField(Presentation, "tone") or !@hasField(Presentation, "iconOpacity") or !@hasField(Presentation, "monospaced"))
+            if (presentation_info.fields.len != 7 or !@hasField(Presentation, "title") or !@hasField(Presentation, "width") or
+                !@hasField(Presentation, "tone") or !@hasField(Presentation, "iconOpacity") or !@hasField(Presentation, "monospaced") or
+                !@hasField(Presentation, "fontSize") or !@hasField(Presentation, "fontWeight"))
             {
                 @compileError(teaching);
             }
             if (@FieldType(Presentation, "title") != []const u8 or !statusItemNumericType(@FieldType(Presentation, "width")) or
                 !statusItemEnumType(@FieldType(Presentation, "tone"), &.{ "normal", "warning", "critical" }) or
-                !statusItemNumericType(@FieldType(Presentation, "iconOpacity")) or @FieldType(Presentation, "monospaced") != bool)
+                !statusItemNumericType(@FieldType(Presentation, "iconOpacity")) or @FieldType(Presentation, "monospaced") != bool or
+                !optionalNumericType(@FieldType(Presentation, "fontSize")) or
+                !optionalEnumType(@FieldType(Presentation, "fontWeight"), &.{ "regular", "medium", "semibold", "bold" }))
             {
                 @compileError(teaching);
             }
@@ -795,9 +990,10 @@ pub fn TsUiApp(comptime core: type) type {
             if (items_info != .pointer or items_info.pointer.size != .slice or !items_info.pointer.is_const) @compileError(teaching);
             const Item = statusItemRecordType(items_info.pointer.child, teaching);
             const item_info = @typeInfo(Item).@"struct";
-            if (item_info.fields.len != 9 or !@hasField(Item, "id") or !@hasField(Item, "label") or
+            if (item_info.fields.len != 12 or !@hasField(Item, "id") or !@hasField(Item, "label") or
                 !@hasField(Item, "command") or !@hasField(Item, "separator") or !@hasField(Item, "enabled") or
-                !@hasField(Item, "detail") or !@hasField(Item, "role") or !@hasField(Item, "key") or !@hasField(Item, "modifiers"))
+                !@hasField(Item, "detail") or !@hasField(Item, "role") or !@hasField(Item, "key") or !@hasField(Item, "modifiers") or
+                !@hasField(Item, "segmented") or !@hasField(Item, "metric") or !@hasField(Item, "chart"))
             {
                 @compileError(teaching);
             }
@@ -805,7 +1001,7 @@ pub fn TsUiApp(comptime core: type) type {
             if (@FieldType(Item, "label") != []const u8 or @FieldType(Item, "command") != []const u8 or
                 @FieldType(Item, "separator") != bool or @FieldType(Item, "enabled") != bool or
                 @FieldType(Item, "detail") != []const u8 or
-                !statusItemEnumType(@FieldType(Item, "role"), &.{ "command", "info", "header", "hero", "agent", "context" }) or
+                !statusItemEnumType(@FieldType(Item, "role"), &.{ "command", "info", "header", "hero", "agent", "context", "segmented", "chart" }) or
                 @FieldType(Item, "key") != []const u8)
             {
                 @compileError(teaching);
@@ -819,6 +1015,7 @@ pub fn TsUiApp(comptime core: type) type {
             {
                 @compileError(teaching);
             }
+            validateStatusItemRichTypes(Item, teaching);
         }
 
         fn validateStatusItemsHelper() void {
@@ -854,11 +1051,14 @@ pub fn TsUiApp(comptime core: type) type {
             }
             const Presentation = statusItemRecordType(@FieldType(State, "presentation"), teaching);
             const presentation_info = @typeInfo(Presentation).@"struct";
-            if (presentation_info.fields.len != 5 or !@hasField(Presentation, "title") or !@hasField(Presentation, "width") or
+            if (presentation_info.fields.len != 7 or !@hasField(Presentation, "title") or !@hasField(Presentation, "width") or
                 !@hasField(Presentation, "tone") or !@hasField(Presentation, "iconOpacity") or !@hasField(Presentation, "monospaced") or
+                !@hasField(Presentation, "fontSize") or !@hasField(Presentation, "fontWeight") or
                 @FieldType(Presentation, "title") != []const u8 or !statusItemNumericType(@FieldType(Presentation, "width")) or
                 !statusItemEnumType(@FieldType(Presentation, "tone"), &.{ "normal", "warning", "critical" }) or
-                !statusItemNumericType(@FieldType(Presentation, "iconOpacity")) or @FieldType(Presentation, "monospaced") != bool)
+                !statusItemNumericType(@FieldType(Presentation, "iconOpacity")) or @FieldType(Presentation, "monospaced") != bool or
+                !optionalNumericType(@FieldType(Presentation, "fontSize")) or
+                !optionalEnumType(@FieldType(Presentation, "fontWeight"), &.{ "regular", "medium", "semibold", "bold" }))
             {
                 @compileError(teaching);
             }
@@ -866,18 +1066,20 @@ pub fn TsUiApp(comptime core: type) type {
             if (items_info != .pointer or items_info.pointer.size != .slice or !items_info.pointer.is_const) @compileError(teaching);
             const Item = statusItemRecordType(items_info.pointer.child, teaching);
             const item_info = @typeInfo(Item).@"struct";
-            if (item_info.fields.len != 9 or !@hasField(Item, "id") or !@hasField(Item, "label") or
+            if (item_info.fields.len != 12 or !@hasField(Item, "id") or !@hasField(Item, "label") or
                 !@hasField(Item, "command") or !@hasField(Item, "separator") or !@hasField(Item, "enabled") or
                 !@hasField(Item, "detail") or !@hasField(Item, "role") or !@hasField(Item, "key") or
-                !@hasField(Item, "modifiers") or !statusItemNumericType(@FieldType(Item, "id")) or
+                !@hasField(Item, "modifiers") or !@hasField(Item, "segmented") or !@hasField(Item, "metric") or !@hasField(Item, "chart") or
+                !statusItemNumericType(@FieldType(Item, "id")) or
                 @FieldType(Item, "label") != []const u8 or @FieldType(Item, "command") != []const u8 or
                 @FieldType(Item, "separator") != bool or @FieldType(Item, "enabled") != bool or
                 @FieldType(Item, "detail") != []const u8 or
-                !statusItemEnumType(@FieldType(Item, "role"), &.{ "command", "info", "header", "hero", "agent", "context" }) or
+                !statusItemEnumType(@FieldType(Item, "role"), &.{ "command", "info", "header", "hero", "agent", "context", "segmented", "chart" }) or
                 @FieldType(Item, "key") != []const u8)
             {
                 @compileError(teaching);
             }
+            validateStatusItemRichTypes(Item, teaching);
             const Modifiers = statusItemRecordType(@FieldType(Item, "modifiers"), teaching);
             const modifiers_info = @typeInfo(Modifiers).@"struct";
             if (modifiers_info.fields.len != 5 or !@hasField(Modifiers, "primary") or !@hasField(Modifiers, "command") or
@@ -905,9 +1107,10 @@ pub fn TsUiApp(comptime core: type) type {
             if (return_info != .pointer or return_info.pointer.size != .slice or !return_info.pointer.is_const) @compileError(teaching);
             const Window = statusItemRecordType(return_info.pointer.child, teaching);
             const info = @typeInfo(Window).@"struct";
-            if (info.fields.len != 18 or !@hasField(Window, "label") or !@hasField(Window, "canvasLabel") or
+            if (info.fields.len != 19 or !@hasField(Window, "label") or !@hasField(Window, "canvasLabel") or
                 !@hasField(Window, "title") or !@hasField(Window, "width") or !@hasField(Window, "height") or
                 !@hasField(Window, "x") or !@hasField(Window, "y") or !@hasField(Window, "resizable") or
+                !@hasField(Window, "restorePolicy") or
                 !@hasField(Window, "minWidth") or !@hasField(Window, "minHeight") or !@hasField(Window, "titlebar") or
                 !@hasField(Window, "transparent") or !@hasField(Window, "alwaysOnTop") or !@hasField(Window, "clickThrough") or
                 !@hasField(Window, "activateOnShow") or !@hasField(Window, "allowsFullscreen") or
@@ -916,6 +1119,7 @@ pub fn TsUiApp(comptime core: type) type {
                 @FieldType(Window, "title") != []const u8 or !statusItemNumericType(@FieldType(Window, "width")) or
                 !statusItemNumericType(@FieldType(Window, "height")) or !optionalNumericType(@FieldType(Window, "x")) or
                 !optionalNumericType(@FieldType(Window, "y")) or @FieldType(Window, "resizable") != bool or
+                !statusItemEnumType(@FieldType(Window, "restorePolicy"), &.{ "clamp_to_visible_screen", "center_on_primary" }) or
                 !statusItemNumericType(@FieldType(Window, "minWidth")) or !statusItemNumericType(@FieldType(Window, "minHeight")) or
                 !statusItemEnumType(@FieldType(Window, "titlebar"), &.{ "standard", "hidden_inset", "hidden_inset_tall", "chromeless" }) or
                 @FieldType(Window, "transparent") != bool or @FieldType(Window, "alwaysOnTop") != bool or
@@ -928,6 +1132,48 @@ pub fn TsUiApp(comptime core: type) type {
         fn optionalNumericType(comptime T: type) bool {
             const info = @typeInfo(T);
             return info == .optional and statusItemNumericType(info.optional.child);
+        }
+
+        fn optionalEnumType(comptime T: type, comptime expected: []const []const u8) bool {
+            const info = @typeInfo(T);
+            return info == .optional and statusItemEnumType(info.optional.child, expected);
+        }
+
+        fn validateStatusItemRichTypes(comptime Item: type, comptime teaching: []const u8) void {
+            const segmented_info = @typeInfo(@FieldType(Item, "segmented"));
+            const metric_info = @typeInfo(@FieldType(Item, "metric"));
+            const chart_info = @typeInfo(@FieldType(Item, "chart"));
+            if (segmented_info != .optional or metric_info != .optional or chart_info != .optional) @compileError(teaching);
+
+            const Segmented = statusItemRecordType(segmented_info.optional.child, teaching);
+            const segmented_fields = @typeInfo(Segmented).@"struct".fields;
+            if (segmented_fields.len != 1 or !@hasField(Segmented, "options")) @compileError(teaching);
+            const options_info = @typeInfo(@FieldType(Segmented, "options"));
+            if (options_info != .pointer or options_info.pointer.size != .slice or !options_info.pointer.is_const) @compileError(teaching);
+            const Option = statusItemRecordType(options_info.pointer.child, teaching);
+            const option_info = @typeInfo(Option).@"struct";
+            if (option_info.fields.len != 5 or !@hasField(Option, "id") or !@hasField(Option, "label") or
+                !@hasField(Option, "command") or !@hasField(Option, "selected") or !@hasField(Option, "enabled") or
+                !statusItemNumericType(@FieldType(Option, "id")) or @FieldType(Option, "label") != []const u8 or
+                @FieldType(Option, "command") != []const u8 or @FieldType(Option, "selected") != bool or
+                @FieldType(Option, "enabled") != bool) @compileError(teaching);
+
+            const Metric = statusItemRecordType(metric_info.optional.child, teaching);
+            const metric_fields = @typeInfo(Metric).@"struct".fields;
+            if (metric_fields.len != 3 or !@hasField(Metric, "primaryText") or !@hasField(Metric, "secondaryText") or
+                !@hasField(Metric, "accessibilityLabel") or @FieldType(Metric, "primaryText") != []const u8 or
+                @FieldType(Metric, "secondaryText") != []const u8 or @FieldType(Metric, "accessibilityLabel") != []const u8) @compileError(teaching);
+
+            const Chart = statusItemRecordType(chart_info.optional.child, teaching);
+            const chart_fields = @typeInfo(Chart).@"struct".fields;
+            if (chart_fields.len != 6 or !@hasField(Chart, "values") or !@hasField(Chart, "minValue") or
+                !@hasField(Chart, "maxValue") or !@hasField(Chart, "leadingCaption") or
+                !@hasField(Chart, "trailingSummary") or !@hasField(Chart, "accessibilityLabel")) @compileError(teaching);
+            const values_info = @typeInfo(@FieldType(Chart, "values"));
+            if (values_info != .pointer or values_info.pointer.size != .slice or !values_info.pointer.is_const or
+                !statusItemNumericType(values_info.pointer.child) or !statusItemNumericType(@FieldType(Chart, "minValue")) or
+                !statusItemNumericType(@FieldType(Chart, "maxValue")) or @FieldType(Chart, "leadingCaption") != []const u8 or
+                @FieldType(Chart, "trailingSummary") != []const u8 or @FieldType(Chart, "accessibilityLabel") != []const u8) @compileError(teaching);
         }
 
         fn statusItemNumericType(comptime T: type) bool {
@@ -1029,6 +1275,7 @@ pub fn TsUiApp(comptime core: type) type {
         }
 
         fn persistOutcomeMsg(event: runtime_effects.EffectChannelEvent) Msg {
+            @setEvalBranchQuota(msg_scan_quota);
             const reason: []const u8 = switch (event.kind) {
                 .data => event.bytes,
                 .rejected => "rejected",
@@ -1044,6 +1291,7 @@ pub fn TsUiApp(comptime core: type) type {
         }
 
         fn dispatchPersistVoid(fx: *Effects, route: []const u8) void {
+            @setEvalBranchQuota(msg_scan_quota);
             inline for (@typeInfo(Msg).@"union".fields) |arm| {
                 if (comptime arm.type == void) {
                     if (std.mem.eql(u8, arm.name, route)) {
@@ -1056,6 +1304,7 @@ pub fn TsUiApp(comptime core: type) type {
         }
 
         fn dispatchPersistError(fx: *Effects, route: []const u8, reason: []const u8) void {
+            @setEvalBranchQuota(msg_scan_quota);
             inline for (@typeInfo(Msg).@"union".fields) |arm| {
                 if (comptime arm.type == []const u8) {
                     if (std.mem.eql(u8, arm.name, route)) {
@@ -1098,6 +1347,7 @@ pub fn TsUiApp(comptime core: type) type {
         /// One env delivery: resolve the arm by name and dispatch the
         /// value through a full core cycle.
         fn dispatchOneEnvValue(fx: *Effects, msg: []const u8, value: []const u8) void {
+            @setEvalBranchQuota(msg_scan_quota);
             inline for (@typeInfo(Msg).@"union".fields) |arm| {
                 if (comptime arm.type == []const u8) {
                     if (std.mem.eql(u8, arm.name, msg)) {
@@ -1117,6 +1367,7 @@ pub fn TsUiApp(comptime core: type) type {
         /// hand-assembled cores: every `envMsgs` entry must name a Msg
         /// arm carrying exactly one bytes payload.
         fn validateEnvMsgs() void {
+            @setEvalBranchQuota(scaledTypeScanQuota(Msg, core.envMsgs.len));
             for (core.envMsgs) |entry| {
                 var found = false;
                 for (@typeInfo(Msg).@"union".fields) |arm| {
@@ -1333,6 +1584,7 @@ pub fn TsUiApp(comptime core: type) type {
         /// error the frontend's NS1033 re-derives for hand-written
         /// cores.
         fn channelArmIndex(comptime tag: []const u8, comptime channel: []const u8) usize {
+            @setEvalBranchQuota(msg_scan_quota);
             for (@typeInfo(Msg).@"union".fields, 0..) |arm, index| {
                 if (std.mem.eql(u8, arm.name, tag)) return index;
             }
@@ -1426,7 +1678,7 @@ pub fn TsUiApp(comptime core: type) type {
 
 const StatusItemsAdapterTestCore = struct {
     const Tone = enum { normal, warning, critical };
-    const Role = enum { command, info, header, hero, agent, context };
+    const Role = enum { command, info, header, hero, agent, context, segmented, chart };
     const Modifiers = struct {
         primary: bool,
         command: bool,
@@ -1440,6 +1692,29 @@ const StatusItemsAdapterTestCore = struct {
         tone: Tone,
         iconOpacity: f64,
         monospaced: bool,
+        fontSize: ?f64,
+        fontWeight: ?enum { regular, medium, semibold, bold },
+    };
+    const SegmentOption = struct {
+        id: f64,
+        label: []const u8,
+        command: []const u8,
+        selected: bool,
+        enabled: bool,
+    };
+    const Segmented = struct { options: []const SegmentOption };
+    const Metric = struct {
+        primaryText: []const u8,
+        secondaryText: []const u8,
+        accessibilityLabel: []const u8,
+    };
+    const Chart = struct {
+        values: []const f64,
+        minValue: f64,
+        maxValue: f64,
+        leadingCaption: []const u8,
+        trailingSummary: []const u8,
+        accessibilityLabel: []const u8,
     };
     const Item = struct {
         id: f64,
@@ -1451,6 +1726,9 @@ const StatusItemsAdapterTestCore = struct {
         role: Role,
         key: []const u8,
         modifiers: Modifiers,
+        segmented: ?Segmented,
+        metric: ?Metric,
+        chart: ?Chart,
     };
     const Descriptor = struct {
         id: f64,
@@ -1474,6 +1752,9 @@ const StatusItemsAdapterTestCore = struct {
         .role = .command,
         .key = "r",
         .modifiers = .{ .primary = true, .command = false, .control = false, .option = false, .shift = false },
+        .segmented = null,
+        .metric = null,
+        .chart = null,
     }};
     const descriptors = [_]Descriptor{.{
         .id = 7,
@@ -1483,7 +1764,7 @@ const StatusItemsAdapterTestCore = struct {
         .activationCommand = "spend.open",
         .alternateActivationCommand = "",
         .openCommand = "spend.refresh",
-        .presentation = .{ .title = "$7", .width = 52, .tone = .warning, .iconOpacity = 0.75, .monospaced = true },
+        .presentation = .{ .title = "$7", .width = 52, .tone = .warning, .iconOpacity = 0.75, .monospaced = true, .fontSize = null, .fontWeight = null },
         .items = &rows,
     }};
 
@@ -1505,6 +1786,8 @@ test "TypeScript statusItems adapter validates and projects canonical descriptor
     try std.testing.expectEqual(@as(platform.StatusItemId, 7), descriptors[0].id);
     try std.testing.expect(!descriptors[0].visible);
     try std.testing.expectEqualStrings("$7", descriptors[0].state.presentation.title);
+    try std.testing.expectEqual(@as(f32, 0), descriptors[0].state.presentation.font_size);
+    try std.testing.expectEqual(platform.TrayFontWeight.regular, descriptors[0].state.presentation.font_weight);
     try std.testing.expectEqualStrings("spend.png", descriptors[0].state.icon_path);
     try std.testing.expectEqual(@as(usize, 1), descriptors[0].state.items.len);
     try std.testing.expectEqual(@as(platform.TrayItemId, 3), descriptors[0].state.items[0].id);
@@ -1513,6 +1796,7 @@ test "TypeScript statusItems adapter validates and projects canonical descriptor
 
 const WindowsAdapterTestCore = struct {
     const Titlebar = enum { standard, hidden_inset, hidden_inset_tall, chromeless };
+    const RestorePolicy = enum { clamp_to_visible_screen, center_on_primary };
     const ClosePolicy = enum { quit, hide };
     const Descriptor = struct {
         label: []const u8,
@@ -1523,6 +1807,7 @@ const WindowsAdapterTestCore = struct {
         x: ?f64,
         y: ?f64,
         resizable: bool,
+        restorePolicy: RestorePolicy,
         minWidth: f64,
         minHeight: f64,
         titlebar: Titlebar,
@@ -1536,11 +1821,11 @@ const WindowsAdapterTestCore = struct {
     };
 
     const descriptors = [_]Descriptor{
-        .{ .label = "one", .canvasLabel = "one-canvas", .title = "", .width = 100, .height = 100, .x = null, .y = null, .resizable = true, .minWidth = 0, .minHeight = 0, .titlebar = .chromeless, .transparent = true, .alwaysOnTop = false, .clickThrough = false, .activateOnShow = true, .allowsFullscreen = true, .closePolicy = .quit, .onCloseCommand = "" },
-        .{ .label = "two", .canvasLabel = "two-canvas", .title = "", .width = 100, .height = 100, .x = null, .y = null, .resizable = true, .minWidth = 0, .minHeight = 0, .titlebar = .standard, .transparent = false, .alwaysOnTop = false, .clickThrough = false, .activateOnShow = true, .allowsFullscreen = true, .closePolicy = .quit, .onCloseCommand = "" },
-        .{ .label = "three", .canvasLabel = "three-canvas", .title = "", .width = 100, .height = 100, .x = null, .y = null, .resizable = true, .minWidth = 0, .minHeight = 0, .titlebar = .standard, .transparent = false, .alwaysOnTop = false, .clickThrough = false, .activateOnShow = true, .allowsFullscreen = true, .closePolicy = .quit, .onCloseCommand = "" },
-        .{ .label = "four", .canvasLabel = "four-canvas", .title = "", .width = 100, .height = 100, .x = null, .y = null, .resizable = true, .minWidth = 0, .minHeight = 0, .titlebar = .standard, .transparent = false, .alwaysOnTop = false, .clickThrough = false, .activateOnShow = true, .allowsFullscreen = true, .closePolicy = .quit, .onCloseCommand = "" },
-        .{ .label = "excess", .canvasLabel = "excess-canvas", .title = "", .width = 100, .height = 100, .x = null, .y = null, .resizable = true, .minWidth = 0, .minHeight = 0, .titlebar = .standard, .transparent = false, .alwaysOnTop = false, .clickThrough = false, .activateOnShow = true, .allowsFullscreen = true, .closePolicy = .quit, .onCloseCommand = "" },
+        .{ .label = "one", .canvasLabel = "one-canvas", .title = "", .width = 100, .height = 100, .x = null, .y = null, .resizable = true, .restorePolicy = .center_on_primary, .minWidth = 0, .minHeight = 0, .titlebar = .chromeless, .transparent = true, .alwaysOnTop = false, .clickThrough = false, .activateOnShow = true, .allowsFullscreen = true, .closePolicy = .quit, .onCloseCommand = "" },
+        .{ .label = "two", .canvasLabel = "two-canvas", .title = "", .width = 100, .height = 100, .x = null, .y = null, .resizable = true, .restorePolicy = .clamp_to_visible_screen, .minWidth = 0, .minHeight = 0, .titlebar = .standard, .transparent = false, .alwaysOnTop = false, .clickThrough = false, .activateOnShow = true, .allowsFullscreen = true, .closePolicy = .quit, .onCloseCommand = "" },
+        .{ .label = "three", .canvasLabel = "three-canvas", .title = "", .width = 100, .height = 100, .x = null, .y = null, .resizable = true, .restorePolicy = .clamp_to_visible_screen, .minWidth = 0, .minHeight = 0, .titlebar = .standard, .transparent = false, .alwaysOnTop = false, .clickThrough = false, .activateOnShow = true, .allowsFullscreen = true, .closePolicy = .quit, .onCloseCommand = "" },
+        .{ .label = "four", .canvasLabel = "four-canvas", .title = "", .width = 100, .height = 100, .x = null, .y = null, .resizable = true, .restorePolicy = .clamp_to_visible_screen, .minWidth = 0, .minHeight = 0, .titlebar = .standard, .transparent = false, .alwaysOnTop = false, .clickThrough = false, .activateOnShow = true, .allowsFullscreen = true, .closePolicy = .quit, .onCloseCommand = "" },
+        .{ .label = "excess", .canvasLabel = "excess-canvas", .title = "", .width = 100, .height = 100, .x = null, .y = null, .resizable = true, .restorePolicy = .clamp_to_visible_screen, .minWidth = 0, .minHeight = 0, .titlebar = .standard, .transparent = false, .alwaysOnTop = false, .clickThrough = false, .activateOnShow = true, .allowsFullscreen = true, .closePolicy = .quit, .onCloseCommand = "" },
     };
 
     pub const Msg = union(enum) { noop };
@@ -1551,6 +1836,45 @@ const WindowsAdapterTestCore = struct {
     };
 };
 
+const ThemeStateAdapterTestCore = struct {
+    const Pack = enum { house, geist };
+    const Scheme = enum { light, dark, system };
+    const State = struct {
+        pack: ?Pack,
+        colorScheme: ?Scheme,
+        accent: ?[]const u8,
+    };
+
+    pub const Msg = union(enum) { noop };
+    pub const Model = struct {
+        bad: bool = false,
+
+        pub fn themeState(self: *const Model) State {
+            return .{
+                .pack = .geist,
+                .colorScheme = .dark,
+                .accent = if (self.bad) "hot-pink" else "#Df2670",
+            };
+        }
+    };
+};
+
+test "TypeScript themeState adapter validates, parses hex, and preserves malformed accent teaching" {
+    const Adapter = TsUiApp(ThemeStateAdapterTestCore);
+    comptime Adapter.validateThemeStateHelper();
+    var model = ThemeStateAdapterTestCore.Model{};
+    var state = Adapter.themeStateAdapter(&model);
+    try std.testing.expectEqual(canvas.ThemePack.geist, state.pack.?);
+    try std.testing.expectEqual(Adapter.App.ThemeColorScheme.dark, state.color_scheme);
+    try std.testing.expectEqual(canvas.Color.rgb8(0xdf, 0x26, 0x70), state.accent.?);
+    try std.testing.expect(state.invalid_accent == null);
+
+    model.bad = true;
+    state = Adapter.themeStateAdapter(&model);
+    try std.testing.expect(state.accent == null);
+    try std.testing.expectEqualStrings("hot-pink", state.invalid_accent.?);
+}
+
 test "TypeScript windows adapter keeps the declared prefix on overflow and projects chromeless" {
     const Adapter = TsUiApp(WindowsAdapterTestCore);
     comptime Adapter.validateWindowsHelper();
@@ -1560,6 +1884,7 @@ test "TypeScript windows adapter keeps the declared prefix on overflow and proje
     try std.testing.expectEqual(Adapter.App.max_ui_windows, descriptors.len);
     try std.testing.expectEqualStrings("one", descriptors[0].label);
     try std.testing.expectEqual(@import("app_manifest").WindowTitlebarStyle.chromeless, descriptors[0].titlebar);
+    try std.testing.expectEqual(@import("app_manifest").WindowRestorePolicy.center_on_primary, descriptors[0].restore_policy);
     try std.testing.expect(descriptors[0].transparent);
     try std.testing.expectEqualStrings("four", descriptors[3].label);
 }
@@ -1582,4 +1907,103 @@ test "TypeScript window close commands refuse missing and unmapped command callb
     Adapter.command_store = mappedWindowCloseCommand;
     try std.testing.expectError(error.UnmappedCommand, Adapter.windowCloseMsg("settings.missing"));
     try std.testing.expectEqual(WindowCloseCommandTestCore.Msg.closed, (try Adapter.windowCloseMsg("settings.closed")).?);
+}
+
+const HostCallMuxTestCore = struct {
+    pub const Msg = union(enum) { noop, other };
+    pub const Model = struct {};
+};
+
+const HostCallMuxTestHost = struct {
+    name_buffer: [64]u8 = undefined,
+    name_len: usize = 0,
+    request_key: u64 = 0,
+    cancel_count: usize = 0,
+    completion: ?runtime_effects.HostCallCompletion = null,
+
+    fn binding(self: *HostCallMuxTestHost, reject_duplicates: bool) runtime_effects.HostCallBinding {
+        return .{
+            .context = self,
+            .send_fn = send,
+            .request_fn = request,
+            .cancel_fn = cancel,
+            .reject_duplicate_keys = reject_duplicates,
+            .poll_fn = poll,
+            .pending_fn = pending,
+        };
+    }
+
+    fn remember(self: *HostCallMuxTestHost, value: []const u8) void {
+        self.name_len = @min(value.len, self.name_buffer.len);
+        @memcpy(self.name_buffer[0..self.name_len], value[0..self.name_len]);
+    }
+
+    fn name(self: *const HostCallMuxTestHost) []const u8 {
+        return self.name_buffer[0..self.name_len];
+    }
+
+    fn send(context: *anyopaque, name_value: []const u8, _: []const u8) void {
+        const self: *HostCallMuxTestHost = @ptrCast(@alignCast(context));
+        self.remember(name_value);
+    }
+
+    fn request(context: *anyopaque, name_value: []const u8, key: u64, _: []const u8) void {
+        const self: *HostCallMuxTestHost = @ptrCast(@alignCast(context));
+        self.remember(name_value);
+        self.request_key = key;
+    }
+
+    fn cancel(context: *anyopaque, _: u64) void {
+        const self: *HostCallMuxTestHost = @ptrCast(@alignCast(context));
+        self.cancel_count += 1;
+    }
+
+    fn poll(context: *anyopaque) ?runtime_effects.HostCallCompletion {
+        const self: *HostCallMuxTestHost = @ptrCast(@alignCast(context));
+        const completion = self.completion;
+        self.completion = null;
+        return completion;
+    }
+
+    fn pending(context: *anyopaque) bool {
+        const self: *HostCallMuxTestHost = @ptrCast(@alignCast(context));
+        return self.completion != null;
+    }
+};
+
+fn cockpitHostCall(name: []const u8) bool {
+    return std.mem.startsWith(u8, name, "cockpit.");
+}
+
+// GUARD: ts-host-call-mux
+test "TypeScript host call mux routes names and preserves both completion lifecycles" {
+    const Adapter = TsUiApp(HostCallMuxTestCore);
+    var generated = HostCallMuxTestHost{ .completion = .{ .key = 11, .ok = true, .bytes = "service" } };
+    var extension = HostCallMuxTestHost{ .completion = .{ .key = 22, .ok = true, .bytes = "cockpit" } };
+    var mux = Adapter.HostCallMux{
+        .default = generated.binding(true),
+        .routed = extension.binding(false),
+        .route_fn = cockpitHostCall,
+    };
+    const binding = mux.binding();
+
+    binding.send_fn(binding.context, "generated.save", "");
+    binding.request_fn(binding.context, "cockpit.snapshot", 22, "");
+    try std.testing.expectEqualStrings("generated.save", generated.name());
+    try std.testing.expectEqualStrings("cockpit.snapshot", extension.name());
+    try std.testing.expectEqual(@as(u64, 22), extension.request_key);
+    try std.testing.expect(binding.reject_duplicate_keys);
+    try std.testing.expect(binding.pending_fn.?(binding.context));
+
+    const first = binding.poll_fn.?(binding.context).?;
+    const second = binding.poll_fn.?(binding.context).?;
+    try std.testing.expectEqual(@as(u64, 11), first.key);
+    try std.testing.expectEqualStrings("service", first.bytes);
+    try std.testing.expectEqual(@as(u64, 22), second.key);
+    try std.testing.expectEqualStrings("cockpit", second.bytes);
+    try std.testing.expect(!binding.pending_fn.?(binding.context));
+
+    binding.cancel_fn.?(binding.context, 22);
+    try std.testing.expectEqual(@as(usize, 1), generated.cancel_count);
+    try std.testing.expectEqual(@as(usize, 1), extension.cancel_count);
 }

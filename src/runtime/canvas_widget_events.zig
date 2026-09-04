@@ -2450,7 +2450,7 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             return true;
         }
 
-        pub fn updateCanvasWidgetControlFromPointer(self: *Runtime, pointer_event: CanvasWidgetPointerEvent) anyerror!void {
+        pub fn updateCanvasWidgetControlFromPointer(self: *Runtime, pointer_event: *CanvasWidgetPointerEvent) anyerror!void {
             const index = runtimeFindViewIndex(self, pointer_event.window_id, pointer_event.view_label) orelse return;
             if (self.views[index].kind != .gpu_surface) return;
 
@@ -2461,6 +2461,12 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             // one gesture. For controls hit directly (checkbox, slider,
             // chip) both resolve to themselves — behavior is unchanged.
             const resolved_pressed_id = canvasWidgetResolvedPressedId(self, index, self.views[index].canvas_widget_pressed_id);
+            const radio_selection = pointer_event.pointer.phase == .up and resolved_pressed_id != 0 and radio: {
+                const hit = pointer_event.press_target orelse break :radio false;
+                break :radio hit.kind == .radio and
+                    hit.id == resolved_pressed_id and
+                    hit.bounds.normalized().containsPoint(pointer_event.pointer.point);
+            };
             const toggle_animation = self.views[index].canvasWidgetToggleAnimationForPointer(
                 pointer_event.pointer,
                 pointer_event.press_target,
@@ -2470,9 +2476,11 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                 pointer_event.pointer,
                 pointer_event.press_target,
                 resolved_pressed_id,
-            ) orelse return;
+            );
+            if (radio_selection) pointer_event.pointer.radio_selection_changed = dirty != null;
+            const dirty_bounds = dirty orelse return;
             if (toggle_animation) |animation| try runtime_canvas_widget_display.RuntimeCanvasWidgetDisplay(Runtime).scheduleCanvasWidgetToggleAnimation(self, index, animation);
-            if (canvasDirtyRegionForView(self.views[index].frame, dirty)) |dirty_region| {
+            if (canvasDirtyRegionForView(self.views[index].frame, dirty_bounds)) |dirty_region| {
                 self.invalidateFor(.state, dirty_region);
             } else {
                 self.invalidateFor(.state, self.views[index].frame);
@@ -2480,18 +2488,27 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             _ = try runtime_canvas_widget_display.RuntimeCanvasWidgetDisplay(Runtime).refreshCanvasWidgetDisplayListIfOwned(self, index);
         }
 
-        pub fn updateCanvasWidgetControlFromKeyboard(self: *Runtime, keyboard_event: CanvasWidgetKeyboardEvent) anyerror!void {
+        pub fn updateCanvasWidgetControlFromKeyboard(self: *Runtime, keyboard_event: *CanvasWidgetKeyboardEvent) anyerror!void {
             const index = runtimeFindViewIndex(self, keyboard_event.window_id, keyboard_event.view_label) orelse return;
             if (self.views[index].kind != .gpu_surface) return;
             const target = keyboard_event.target orelse return;
 
+            const radio_selection = if (target.kind == .radio)
+                if (canvas.widgetKeyboardControlIntent(self.views[index].widget_layout_nodes[target.index].widget, keyboard_event.keyboard)) |intent|
+                    intent.kind == .select
+                else
+                    false
+            else
+                false;
             const toggle_animation = self.views[index].canvasWidgetToggleAnimationForKeyboard(target.id, keyboard_event.keyboard);
-            const dirty = try self.views[index].applyCanvasWidgetControlKeyboard(target.id, keyboard_event.keyboard) orelse return;
+            const dirty = try self.views[index].applyCanvasWidgetControlKeyboard(target.id, keyboard_event.keyboard);
+            if (radio_selection) keyboard_event.keyboard.radio_selection_changed = dirty != null;
+            const dirty_bounds = dirty orelse return;
             if (toggle_animation) |animation| try runtime_canvas_widget_display.RuntimeCanvasWidgetDisplay(Runtime).scheduleCanvasWidgetToggleAnimation(self, index, animation);
             const previous_cursor = self.views[index].canvas_widget_cursor;
             if (target.kind == .scroll_view) try reconcileCanvasWidgetRenderStateAfterScrollWithTooltipIntent(self, index, null);
             if (previous_cursor != self.views[index].canvas_widget_cursor) try syncCanvasWidgetCursorForView(self, index);
-            if (canvasDirtyRegionForView(self.views[index].frame, dirty)) |dirty_region| {
+            if (canvasDirtyRegionForView(self.views[index].frame, dirty_bounds)) |dirty_region| {
                 self.invalidateFor(.state, dirty_region);
             } else {
                 self.invalidateFor(.state, self.views[index].frame);
@@ -2509,7 +2526,6 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             const index = runtimeFindViewIndex(self, pointer_event.window_id, pointer_event.view_label) orelse return 0;
             if (self.views[index].kind != .gpu_surface or !self.views[index].focused) return 0;
             const focused_id = self.views[index].canvas_widget_focused_id;
-            if (focused_id == 0) return 0;
 
             const previous_cursor = self.views[index].canvas_widget_cursor;
             const dismissal = try self.views[index].dismissCanvasWidgetSurfaceForPointerOutsideFocusedTarget(focused_id, pointer_event.route) orelse return 0;
@@ -2701,11 +2717,33 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                     }
                 }
                 const direction: canvas.WidgetFocusDirection = if (input_event.modifiers.shift) .backward else .forward;
-                const target = if (current_id) |id|
-                    self.views[index].canvasWidgetScopedFocusTarget(id, direction) orelse layout.focusTarget(current_id, direction) orelse return false
-                else
-                    layout.focusTarget(current_id, direction) orelse return false;
-                const moved = try setCanvasWidgetFocusFromKeyboardMoved(self, index, current_id, target.id, true);
+                var target = self.views[index].canvasWidgetRovingTabTarget(current_id, direction) orelse return false;
+                var moved = try setCanvasWidgetFocusFromKeyboardMoved(self, index, current_id, target.id, true);
+                if (!moved and target.id != (current_id orelse 0)) {
+                    // A selected radio may be a valid LOGICAL group entry
+                    // while fully hidden by a fixed clip. The focus setter
+                    // first gave every runtime scroll ancestor a chance to
+                    // reveal it; if it is still unreachable, keep the group
+                    // in the Tab order through a visible radio. When the
+                    // entire group is clipped, continue the one-stop walk
+                    // from the failed entry to the next visible control.
+                    if (self.views[index].canvasWidgetNodeIndexById(target.id)) |target_index| {
+                        if (canvas_widget_runtime.canvasWidgetRovingTabScope(layout, target_index)) |scope| {
+                            if (canvas_widget_runtime.canvasWidgetRovingTabVisibleEntryTarget(layout, scope)) |visible| {
+                                if (visible.id != target.id) {
+                                    target = visible;
+                                    moved = try setCanvasWidgetFocusFromKeyboardMoved(self, index, current_id, target.id, true);
+                                }
+                            }
+                        }
+                    }
+                    if (!moved) {
+                        const fallback = self.views[index].canvasWidgetRovingTabTarget(target.id, direction) orelse return false;
+                        if (fallback.id == target.id) return false;
+                        target = fallback;
+                        moved = try setCanvasWidgetFocusFromKeyboardMoved(self, index, current_id, target.id, true);
+                    }
+                }
                 if (moved and
                     (canvasWidgetTerminalOwnsTabInput(layout, target) or
                         canvasWidgetCodeEditorOwnsTabInput(layout, target)))
@@ -2743,6 +2781,20 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                     return try setCanvasWidgetFocusFromKeyboardMoved(self, index, current_id, target.id, preserve_focus_visible);
                 }
                 const target = canvasWidgetGroupFocusEdgeTarget(layout, focused, edge) orelse return false;
+                if (focused.kind == .radio and canvas_widget_runtime.canvasWidgetRadioGroupScopeIndex(layout, focused.index) != null) {
+                    const retry_direction: canvas.WidgetFocusDirection = switch (edge) {
+                        .first => .right,
+                        .last => .left,
+                    };
+                    return try setCanvasWidgetRadioGroupFocusFromKeyboardMoved(
+                        self,
+                        index,
+                        current_id,
+                        target,
+                        retry_direction,
+                        preserve_focus_visible,
+                    );
+                }
                 return try setCanvasWidgetFocusFromKeyboardMoved(self, index, current_id, target.id, preserve_focus_visible);
             }
             const direction = canvasWidgetSpatialFocusDirection(input_event) orelse return false;
@@ -2768,6 +2820,16 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                 return try setCanvasWidgetFocusFromKeyboardMoved(self, index, current_id, target.id, preserve_focus_visible);
             }
             if (canvasWidgetGroupDirectionalFocusTarget(layout, focused, direction)) |target| {
+                if (focused.kind == .radio and canvas_widget_runtime.canvasWidgetRadioGroupScopeIndex(layout, focused.index) != null) {
+                    return try setCanvasWidgetRadioGroupFocusFromKeyboardMoved(
+                        self,
+                        index,
+                        current_id,
+                        target,
+                        direction,
+                        preserve_focus_visible,
+                    );
+                }
                 return try setCanvasWidgetFocusFromKeyboardMoved(self, index, current_id, target.id, preserve_focus_visible);
             }
             const target = layout.focusTarget(focused_id, direction) orelse return false;
@@ -2781,18 +2843,74 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             return target_id != 0 and target_id != previous and self.views[view_index].canvas_widget_focused_id == target_id;
         }
 
+        /// Logical radio traversal admits scroll-clipped targets so the
+        /// focus setter can reveal them. A fixed clip cannot be scrolled;
+        /// after such a candidate stays unreachable, continue around the
+        /// same nearest group until a visible radio accepts focus or the
+        /// bounded walk returns to its starting point.
+        fn setCanvasWidgetRadioGroupFocusFromKeyboardMoved(
+            self: *Runtime,
+            view_index: usize,
+            previous_id: ?canvas.ObjectId,
+            initial_target: canvas.WidgetFocusTarget,
+            direction: canvas.WidgetFocusDirection,
+            focus_visible: bool,
+        ) anyerror!bool {
+            const previous = previous_id orelse 0;
+            var target = initial_target;
+            var attempts: usize = 0;
+            while (attempts < self.views[view_index].widget_layout_node_count) : (attempts += 1) {
+                if (target.id == 0 or target.id == previous) return false;
+                if (try setCanvasWidgetFocusFromKeyboardMoved(self, view_index, previous_id, target.id, focus_visible)) return true;
+
+                const next = canvas_widget_runtime.canvasWidgetRadioGroupDirectionalFocusTarget(
+                    self.views[view_index].widgetLayoutTree(),
+                    target,
+                    direction,
+                ) orelse return false;
+                if (next.id == target.id or next.id == initial_target.id) return false;
+                target = next;
+            }
+            return false;
+        }
+
         pub fn setCanvasWidgetFocusFromKeyboard(self: *Runtime, view_index: usize, target_id: canvas.ObjectId) anyerror!void {
             try setCanvasWidgetFocusFromKeyboardWithVisibility(self, view_index, target_id, true);
         }
 
-        fn setCanvasWidgetFocusFromKeyboardWithVisibility(self: *Runtime, view_index: usize, target_id: canvas.ObjectId, focus_visible: bool) anyerror!void {
-            const next_focus_visible_id: canvas.ObjectId = if (focus_visible) target_id else 0;
-            if (self.views[view_index].canvas_widget_focused_id == target_id and self.views[view_index].canvas_widget_focus_visible_id == next_focus_visible_id) return;
+        pub const CanvasWidgetFocusReveal = struct {
+            target: canvas.WidgetFocusTarget,
+            scroll_dirty: ?geometry.RectF,
+        };
 
-            // Roving tree/list navigation may resolve a logical row that
-            // is currently clipped. Reveal it before the focus write so
-            // keyboard routing, semantics, and rendering all see an
-            // ordinary visible target during this same key event.
+        /// Validate a programmatic focus reveal without changing retained
+        /// geometry. Automation uses this before asking the platform to
+        /// focus the view, keeping both halves of the operation untouched
+        /// when either the target or the platform focus request is invalid.
+        pub fn canRevealCanvasWidgetFocusTarget(self: *const Runtime, view_index: usize, target_id: canvas.ObjectId) bool {
+            if (view_index >= self.view_count or target_id == 0) return false;
+            const layout = self.views[view_index].widgetLayoutTree();
+            if (layout.focusTargetById(target_id) == null) {
+                const node_index = canvas_widget_runtime.canvasWidgetLayoutNodeIndexById(layout, target_id) orelse return false;
+                _ = canvas_widget_runtime.canvasWidgetLogicalFocusTarget(layout, node_index) orelse return false;
+            }
+            return self.views[view_index].canScrollCanvasWidgetIntoView(target_id);
+        }
+
+        /// Resolve a programmatic focus target without applying the pointer
+        /// path's geometry clip first, reveal it through runtime-owned scroll
+        /// ancestors, then re-verify the ordinary visible focus contract.
+        /// Keyboard traversal, autofocus, and automation all enter through
+        /// this seam so an offscreen logical target is never focused before
+        /// its retained geometry and semantics have caught up with the scroll.
+        pub fn revealCanvasWidgetFocusTarget(self: *Runtime, view_index: usize, target_id: canvas.ObjectId) anyerror!?CanvasWidgetFocusReveal {
+            if (view_index >= self.view_count or target_id == 0) return null;
+            const layout = self.views[view_index].widgetLayoutTree();
+            if (layout.focusTargetById(target_id) == null) {
+                const node_index = canvas_widget_runtime.canvasWidgetLayoutNodeIndexById(layout, target_id) orelse return null;
+                _ = canvas_widget_runtime.canvasWidgetLogicalFocusTarget(layout, node_index) orelse return null;
+            }
+
             const scroll_dirty = try self.views[view_index].scrollCanvasWidgetIntoView(target_id);
             if (scroll_dirty) |dirty| {
                 const previous_cursor = self.views[view_index].canvas_widget_cursor;
@@ -2804,12 +2922,19 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                     self.invalidateFor(.state, self.views[view_index].frame);
                 }
             }
-            // Logical tree/list navigation may name a row before geometry
-            // filtering so a scroll viewport can reveal it. If no runtime-
-            // owned scroll ancestor actually made the row visible (for
-            // example, a fixed clip_content card), keep focus on the current
-            // target instead of committing an invisible, unroutable id.
-            if (target_id != 0 and self.views[view_index].widgetLayoutTree().focusTargetById(target_id) == null) return;
+
+            // A fixed clip cannot be repaired by scrolling. Re-check the
+            // pointer-visible contract only after every scrollable ancestor
+            // has had its chance to reveal the logical target.
+            const target = self.views[view_index].widgetLayoutTree().focusTargetById(target_id) orelse return null;
+            return .{ .target = target, .scroll_dirty = scroll_dirty };
+        }
+
+        fn setCanvasWidgetFocusFromKeyboardWithVisibility(self: *Runtime, view_index: usize, target_id: canvas.ObjectId, focus_visible: bool) anyerror!void {
+            const next_focus_visible_id: canvas.ObjectId = if (focus_visible) target_id else 0;
+            if (self.views[view_index].canvas_widget_focused_id == target_id and self.views[view_index].canvas_widget_focus_visible_id == next_focus_visible_id) return;
+
+            const reveal = try revealCanvasWidgetFocusTarget(self, view_index, target_id) orelse return;
             const previous_state = self.views[view_index].canvasWidgetRenderState();
             self.views[view_index].canvas_widget_focused_id = target_id;
             self.views[view_index].canvas_widget_focus_visible_id = next_focus_visible_id;
@@ -2842,7 +2967,7 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                 }
             }
             try invalidateForCanvasWidgetRenderStateChange(self, view_index, previous_state, self.views[view_index].canvasWidgetRenderState());
-            if (scroll_dirty != null) {
+            if (reveal.scroll_dirty != null) {
                 _ = try runtime_canvas_widget_display.RuntimeCanvasWidgetDisplay(Runtime).refreshCanvasWidgetDisplayListIfOwned(self, view_index);
             }
         }

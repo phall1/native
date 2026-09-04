@@ -18,9 +18,55 @@ pub const CanvasWidgetToggleAnimation = struct {
     dirty_bounds: ?geometry.RectF,
 };
 
-fn setCanvasWidgetNodeWidth(node: *canvas.WidgetLayoutNode, width: f32) void {
-    node.frame.width = width;
-    node.widget.frame.width = width;
+fn splitMainExtent(rect: geometry.RectF, axis: canvas.SplitAxis) f32 {
+    return switch (axis) {
+        .horizontal => rect.width,
+        .vertical => rect.height,
+    };
+}
+
+fn splitMainMax(rect: geometry.RectF, axis: canvas.SplitAxis) f32 {
+    return switch (axis) {
+        .horizontal => rect.maxX(),
+        .vertical => rect.maxY(),
+    };
+}
+
+fn splitMainPoint(point: geometry.PointF, axis: canvas.SplitAxis) f32 {
+    return switch (axis) {
+        .horizontal => point.x,
+        .vertical => point.y,
+    };
+}
+
+fn splitMainOrigin(rect: geometry.RectF, axis: canvas.SplitAxis) f32 {
+    return switch (axis) {
+        .horizontal => rect.x,
+        .vertical => rect.y,
+    };
+}
+
+fn splitPaneMin(widget: canvas.Widget, axis: canvas.SplitAxis) f32 {
+    return @max(0, switch (axis) {
+        .horizontal => widget.layout.min_size.width,
+        .vertical => widget.layout.min_size.height,
+    });
+}
+
+fn setCanvasWidgetNodeMainExtent(node: *canvas.WidgetLayoutNode, axis: canvas.SplitAxis, extent: f32) void {
+    switch (axis) {
+        .horizontal => node.frame.width = extent,
+        .vertical => node.frame.height = extent,
+    }
+    node.widget.frame = node.frame;
+}
+
+fn setCanvasWidgetNodeMainOrigin(node: *canvas.WidgetLayoutNode, axis: canvas.SplitAxis, origin: f32) void {
+    switch (axis) {
+        .horizontal => node.frame.x = origin,
+        .vertical => node.frame.y = origin,
+    }
+    node.widget.frame = node.frame;
 }
 
 pub fn RuntimeViewCanvasWidgetControl(comptime RuntimeView: type) type {
@@ -79,12 +125,12 @@ pub fn RuntimeViewCanvasWidgetControl(comptime RuntimeView: type) type {
             };
         }
 
-        /// Divider drag: the captured `.split_divider` follows the
-        /// pointer's absolute x within the parent split's content box.
-        /// The runtime applies the fraction as the optimistic echo
-        /// (frames move geometrically; the model's rebuild is the exact
-        /// layout) and notes a resize event so the split's `on_resize`
-        /// Msg dispatches with the applied fraction.
+        /// Divider drag: the captured `.split_divider` follows the pointer
+        /// within the parent split's main-axis content box. The runtime
+        /// applies the fraction as the optimistic echo (frames move
+        /// geometrically; the model's rebuild is the exact layout) and notes
+        /// a resize event so the split's `on_resize` Msg dispatches with the
+        /// applied fraction.
         pub fn applyCanvasWidgetSplitPointer(self: *RuntimeView, id: canvas.ObjectId, point: geometry.PointF) anyerror!?geometry.RectF {
             const divider_index = self.canvasWidgetNodeIndexById(id) orelse return null;
             const divider = self.widget_layout_nodes[divider_index].widget;
@@ -94,11 +140,12 @@ pub fn RuntimeViewCanvasWidgetControl(comptime RuntimeView: type) type {
             const split_node = self.widget_layout_nodes[split_index];
             if (split_node.widget.kind != .split) return null;
 
+            const axis = split_node.widget.runtime_flags.split_axis;
             const content = split_node.frame.inset(split_node.widget.layout.padding).normalized();
-            const divider_extent = self.widget_layout_nodes[divider_index].frame.width;
-            const available = content.width - divider_extent;
+            const divider_extent = splitMainExtent(self.widget_layout_nodes[divider_index].frame, axis);
+            const available = splitMainExtent(content, axis) - divider_extent;
             if (!(available > 0)) return null;
-            const fraction = (point.x - content.x - divider_extent * 0.5) / available;
+            const fraction = (splitMainPoint(point, axis) - splitMainOrigin(content, axis) - divider_extent * 0.5) / available;
             // A live drag owns the fraction: an armed layout tween on
             // this split retires here, so the pointer's per-step echoes
             // (live re-wrap) never fight the tween's slide — the
@@ -108,10 +155,10 @@ pub fn RuntimeViewCanvasWidgetControl(comptime RuntimeView: type) type {
             return self.applyCanvasWidgetSplitFraction(split_index, fraction);
         }
 
-        /// Apply a first-pane fraction to a split: clamp against the
-        /// panes' min widths, move the divider and pane frames (pane
-        /// content translates with its pane; internal reflow waits for
-        /// the model's rebuild), and note the resize event.
+        /// Apply a first-pane fraction to a split: clamp against the panes'
+        /// main-axis minimums, move the divider and pane frames (pane content
+        /// translates with its pane; internal reflow waits for the model's
+        /// rebuild), and note the resize event.
         pub fn applyCanvasWidgetSplitFraction(self: *RuntimeView, split_index: usize, requested_fraction: f32) anyerror!?geometry.RectF {
             return self.applyCanvasWidgetSplitFractionMoved(split_index, requested_fraction, true);
         }
@@ -153,31 +200,33 @@ pub fn RuntimeViewCanvasWidgetControl(comptime RuntimeView: type) type {
             const second_index = pane_indices[1] orelse return null;
             const handle_index = divider_index orelse return null;
 
+            const axis = split_node.widget.runtime_flags.split_axis;
             const content = split_node.frame.inset(split_node.widget.layout.padding).normalized();
-            const divider_extent = self.widget_layout_nodes[handle_index].frame.width;
-            const available = @max(0, content.width - divider_extent);
-            const first_min = @max(0, self.widget_layout_nodes[first_index].widget.layout.min_size.width);
-            const second_min = @max(0, self.widget_layout_nodes[second_index].widget.layout.min_size.width);
+            const divider_extent = splitMainExtent(self.widget_layout_nodes[handle_index].frame, axis);
+            const available = @max(0, splitMainExtent(content, axis) - divider_extent);
+            const first_min = splitPaneMin(self.widget_layout_nodes[first_index].widget, axis);
+            const second_min = splitPaneMin(self.widget_layout_nodes[second_index].widget, axis);
             const fraction = canvas.splitEffectiveFraction(@max(requested_fraction, 0.0001), available, first_min, second_min);
             const previous_fraction = canvas.splitEffectiveFraction(self.widget_layout_nodes[handle_index].widget.value, available, first_min, second_min);
             if (fraction == previous_fraction) return null;
 
-            const first_width = available * fraction;
-            const divider_x = content.x + first_width;
-            const dx = divider_x - self.widget_layout_nodes[handle_index].frame.x;
-            if (dx == 0) return null;
+            const first_extent = available * fraction;
+            const divider_origin = splitMainOrigin(content, axis) + first_extent;
+            const delta = divider_origin - splitMainOrigin(self.widget_layout_nodes[handle_index].frame, axis);
+            if (delta == 0) return null;
 
             self.widget_layout_nodes[split_index].widget.value = fraction;
             self.widget_layout_nodes[handle_index].widget.value = fraction;
-            setCanvasWidgetNodeWidth(&self.widget_layout_nodes[first_index], first_width);
-            self.widget_layout_nodes[handle_index].frame.x = divider_x;
-            self.widget_layout_nodes[handle_index].widget.frame.x = divider_x;
-            const second_x = divider_x + divider_extent;
-            const second_width = @max(0, content.maxX() - second_x);
-            self.widget_layout_nodes[second_index].frame.x = second_x;
-            self.widget_layout_nodes[second_index].widget.frame.x = second_x;
-            setCanvasWidgetNodeWidth(&self.widget_layout_nodes[second_index], second_width);
-            self.translateCanvasWidgetDescendantsX(second_index, dx);
+            setCanvasWidgetNodeMainExtent(&self.widget_layout_nodes[first_index], axis, first_extent);
+            setCanvasWidgetNodeMainOrigin(&self.widget_layout_nodes[handle_index], axis, divider_origin);
+            const second_origin = divider_origin + divider_extent;
+            setCanvasWidgetNodeMainOrigin(&self.widget_layout_nodes[second_index], axis, second_origin);
+            setCanvasWidgetNodeMainExtent(
+                &self.widget_layout_nodes[second_index],
+                axis,
+                @max(0, splitMainMax(content, axis) - second_origin),
+            );
+            self.translateCanvasWidgetDescendants(second_index, axis, delta);
 
             if (note_resize) self.noteCanvasWidgetResizeEvent(split_node.widget.id);
             try self.refreshCanvasWidgetSemantics();
@@ -213,16 +262,25 @@ pub fn RuntimeViewCanvasWidgetControl(comptime RuntimeView: type) type {
             self.widget_change_event_count += 1;
         }
 
-        /// Horizontal twin of `translateCanvasWidgetScrollDescendants`:
-        /// shift a pane subtree sideways when its pane edge moves.
-        pub fn translateCanvasWidgetDescendantsX(self: *RuntimeView, node_index: usize, dx: f32) void {
+        /// Shift a pane subtree along its split axis when the leading edge
+        /// moves. Frames and widget mirrors stay synchronized.
+        pub fn translateCanvasWidgetDescendants(self: *RuntimeView, node_index: usize, axis: canvas.SplitAxis, delta: f32) void {
             const depth = self.widget_layout_nodes[node_index].depth;
+            const offset = switch (axis) {
+                .horizontal => geometry.OffsetF.init(delta, 0),
+                .vertical => geometry.OffsetF.init(0, delta),
+            };
             var index = node_index + 1;
             while (index < self.widget_layout_node_count and self.widget_layout_nodes[index].depth > depth) : (index += 1) {
-                const translated = self.widget_layout_nodes[index].frame.translate(.{ .dx = dx, .dy = 0 });
+                const translated = self.widget_layout_nodes[index].frame.translate(offset);
                 self.widget_layout_nodes[index].frame = translated;
                 self.widget_layout_nodes[index].widget.frame = translated;
             }
+        }
+
+        /// Compatibility entry point for existing horizontal callers.
+        pub fn translateCanvasWidgetDescendantsX(self: *RuntimeView, node_index: usize, dx: f32) void {
+            self.translateCanvasWidgetDescendants(node_index, .horizontal, dx);
         }
 
         pub fn applyCanvasWidgetResizableDelta(self: *RuntimeView, id: canvas.ObjectId, delta_x: f32) anyerror!?geometry.RectF {
@@ -377,6 +435,24 @@ pub fn RuntimeViewCanvasWidgetControl(comptime RuntimeView: type) type {
                     node.widget.state.selected = false;
                     node.widget.value = 0;
                     dirty = unionRects(dirty, self.canvasWidgetDirtyBounds(row_index, node.frame));
+                    changed = true;
+                }
+            } else if (selected and widget.kind == .radio) {
+                // A radio group is one logical selection scope even when
+                // layout containers wrap its radios. Nearest-ancestor
+                // resolution also isolates nested radio groups. A bare
+                // radio deliberately falls back to its direct parent.
+                const scope = canvas_widget_runtime.canvasWidgetRadioGroupScopeIndex(self.widgetLayoutTree(), index);
+                const parent_index = self.widget_layout_nodes[index].parent_index;
+                for (self.widget_layout_nodes[0..self.widget_layout_node_count], 0..) |*node, radio_index| {
+                    if (radio_index == index or node.widget.kind != .radio) continue;
+                    if (scope) |radio_group_index| {
+                        if (canvas_widget_runtime.canvasWidgetRadioGroupScopeIndex(self.widgetLayoutTree(), radio_index) != radio_group_index) continue;
+                    } else if (node.parent_index != parent_index or canvas_widget_runtime.canvasWidgetRadioGroupScopeIndex(self.widgetLayoutTree(), radio_index) != null) continue;
+                    if (!canvasWidgetSelectableSelected(node.widget)) continue;
+                    node.widget.state.selected = false;
+                    node.widget.value = 0;
+                    dirty = unionRects(dirty, self.canvasWidgetDirtyBounds(radio_index, node.frame));
                     changed = true;
                 }
             } else if (selected and canvasWidgetSelectionClearsSiblings(widget.kind)) {

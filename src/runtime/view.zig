@@ -17,6 +17,7 @@ const max_canvas_gradient_stops_per_view = canvas_limits.max_canvas_gradient_sto
 const max_canvas_path_elements_per_view = canvas_limits.max_canvas_path_elements_per_view;
 const max_canvas_glyphs_per_view = canvas_limits.max_canvas_glyphs_per_view;
 const max_canvas_text_bytes_per_view = canvas_limits.max_canvas_text_bytes_per_view;
+const max_canvas_cells_per_view = canvas_limits.max_canvas_cells_per_view;
 const max_canvas_render_animations_per_view = canvas_limits.max_canvas_render_animations_per_view;
 const max_canvas_render_animation_dirty_bounds_per_view = canvas_limits.max_canvas_render_animation_dirty_bounds_per_view;
 const max_canvas_render_overrides_per_view = canvas_limits.max_canvas_render_overrides_per_view;
@@ -132,6 +133,17 @@ pub const CanvasWidgetClaimedKeyGrace = enum {
             .enter => std.mem.eql(u8, text, "\r") or std.mem.eql(u8, text, "\n"),
         };
     }
+};
+
+/// Owner chosen by a secondary-button down for that gesture's full
+/// lifetime. The SDK currently retains one pressed widget per view, so one
+/// secondary gesture per view is the matching honest capacity; pointer_id
+/// prevents a different pointer from terminating that standing gesture on
+/// hosts that distinguish identities (desktop mouse hosts use id 0).
+pub const CanvasWidgetSecondaryGestureOwner = enum {
+    none,
+    context_menu,
+    ordinary,
 };
 
 /// Blur-side IME hygiene, shared by EVERY focus-mutation entry point —
@@ -280,6 +292,17 @@ pub const RuntimeView = struct {
     canvas_packet_baseline_count: usize = 0,
     canvas_packet_baseline_surface_size: geometry.SizeF = geometry.SizeF.init(0, 0),
     canvas_packet_baseline_scale: f32 = 1,
+    /// The baseline frame's distinct CLIP RECTS (see
+    /// `canvas_frame.CanvasClipSet`). Clips are erased by the render
+    /// planner — they never become render commands — so no retained key
+    /// names one, and a clip that moved reveals (or vacates) pixels the
+    /// key+fingerprint edit script cannot describe. The next frame's
+    /// dirty derivation compares its clip set against this one and adds
+    /// the difference; `overflow` marks a set too large to compare, and
+    /// refuses the refinement rather than guess.
+    canvas_packet_baseline_clip_rects: [canvas_limits.max_canvas_packet_clip_rects_per_view]geometry.RectF = undefined,
+    canvas_packet_baseline_clip_count: usize = 0,
+    canvas_packet_baseline_clip_overflow: bool = false,
     canvas_packet_baseline_keys: [max_canvas_retained_packet_commands_per_view]u64 = undefined,
     canvas_packet_baseline_fingerprints: [max_canvas_retained_packet_commands_per_view]u64 = undefined,
     /// Draw-order-parallel bounds of the retained baseline commands: the
@@ -306,7 +329,19 @@ pub const RuntimeView = struct {
     canvas_glyph_count: usize = 0,
     canvas_text_bytes: [max_canvas_text_bytes_per_view]u8 = undefined,
     canvas_text_len: usize = 0,
+    /// The retained copy of every `cell_grid` command's cells. One
+    /// terminal screen is one command but 30,000 cells, so this is the
+    /// view's largest single array — and the reason a terminal's cost is
+    /// now linear in AREA instead of quadratic in styling.
+    canvas_cells: [max_canvas_cells_per_view]canvas.Cell = undefined,
+    canvas_cell_count: usize = 0,
     canvas_display_list_widget_owned: bool = false,
+    /// What the last widget emit could NOT place (see
+    /// `canvas.DisplayListDegradation`): the terminal grid painter's
+    /// row-atomic degradation, retained so the runtime logs the cliff on
+    /// its EDGES rather than once per frame, and so an app or a test can
+    /// ask a view whether its content is complete.
+    canvas_widget_display_list_degradation: ?canvas.DisplayListDegradation = null,
     canvas_widget_display_list_prefix_count: usize = 0,
     canvas_widget_display_list_suffix_count: usize = 0,
     canvas_widget_display_list_reserved_count: usize = 0,
@@ -445,6 +480,7 @@ pub const RuntimeView = struct {
     canvas_frame_profile_dirty_ratio: f32 = 0,
     widget_layout_nodes: [max_canvas_widget_nodes_per_view]canvas.WidgetLayoutNode = undefined,
     widget_layout_node_count: usize = 0,
+    widget_layout_root_bounds: ?geometry.RectF = null,
     widget_semantics_nodes: [max_canvas_widget_semantics_per_view]canvas.WidgetSemanticsNode = undefined,
     widget_semantics_node_count: usize = 0,
     /// Fingerprint of the last accessibility tree actually handed to the
@@ -608,6 +644,12 @@ pub const RuntimeView = struct {
     /// the item under the pointer itself eases into its destination.
     canvas_widget_drag_landing_source_id: canvas.ObjectId = 0,
     canvas_widget_drag_landing_origin: geometry.PointF = .{},
+    /// Context-menu versus ordinary routing is chosen exactly once on a
+    /// secondary down and survives widget-tree rebuilds until the matching
+    /// pointer's up/cancel. This prevents a policy change from leaking a
+    /// consumed menu gesture into capture, or stranding ordinary capture.
+    canvas_widget_secondary_gesture_owner: CanvasWidgetSecondaryGestureOwner = .none,
+    canvas_widget_secondary_gesture_pointer_id: u64 = 0,
     /// The STANDING hover-Msg containment chain: every widget on the
     /// last resolved raw hover hit's ancestor path that listens for
     /// hover Msgs (`Widget.hover_msgs`), outermost first
@@ -863,6 +905,7 @@ pub const RuntimeView = struct {
     pub const applyCanvasWidgetTextareaScroll = CanvasWidgetScrollMethods.applyCanvasWidgetTextareaScroll;
     pub const applyCanvasWidgetScrollDriverOffset = CanvasWidgetScrollMethods.applyCanvasWidgetScrollDriverOffset;
     pub const applyCanvasWidgetScrollKeyboardTarget = CanvasWidgetScrollMethods.applyCanvasWidgetScrollKeyboardTarget;
+    pub const canScrollCanvasWidgetIntoView = CanvasWidgetScrollMethods.canScrollCanvasWidgetIntoView;
     pub const scrollCanvasWidgetIntoView = CanvasWidgetScrollMethods.scrollCanvasWidgetIntoView;
     pub const stepCanvasWidgetKineticScroll = CanvasWidgetScrollMethods.stepCanvasWidgetKineticScroll;
     pub const canvasWidgetScrollContentExtent = CanvasWidgetScrollMethods.canvasWidgetScrollContentExtent;
@@ -882,6 +925,7 @@ pub const RuntimeView = struct {
     pub const applyCanvasWidgetSplitFractionMoved = CanvasWidgetControlMethods.applyCanvasWidgetSplitFractionMoved;
     pub const noteCanvasWidgetResizeEvent = CanvasWidgetControlMethods.noteCanvasWidgetResizeEvent;
     pub const noteCanvasWidgetChangeEvent = CanvasWidgetControlMethods.noteCanvasWidgetChangeEvent;
+    pub const translateCanvasWidgetDescendants = CanvasWidgetControlMethods.translateCanvasWidgetDescendants;
     pub const translateCanvasWidgetDescendantsX = CanvasWidgetControlMethods.translateCanvasWidgetDescendantsX;
     pub const toggleCanvasWidgetTreeItemExpanded = CanvasWidgetControlMethods.toggleCanvasWidgetTreeItemExpanded;
     pub const applyCanvasWidgetControlKeyboard = CanvasWidgetControlMethods.applyCanvasWidgetControlKeyboard;
@@ -940,6 +984,7 @@ pub const RuntimeView = struct {
     pub const copyCanvasGradientStops = CanvasFrameMethods.copyCanvasGradientStops;
     pub const copyCanvasPathElements = CanvasFrameMethods.copyCanvasPathElements;
     pub const copyCanvasGlyphs = CanvasFrameMethods.copyCanvasGlyphs;
+    pub const copyCanvasCells = CanvasFrameMethods.copyCanvasCells;
     pub const copyCanvasText = CanvasFrameMethods.copyCanvasText;
 
     const CanvasWidgetTreeMethods = view_widget_tree.RuntimeViewCanvasWidgetTree(RuntimeView);
@@ -981,6 +1026,7 @@ pub const RuntimeView = struct {
     pub const canvasWidgetTopmostAnchoredDismissibleIndex = CanvasWidgetTreeMethods.canvasWidgetTopmostAnchoredDismissibleIndex;
     pub const canvasWidgetRouteDescendsFromIndex = CanvasWidgetTreeMethods.canvasWidgetRouteDescendsFromIndex;
     pub const canvasWidgetScopedFocusTarget = CanvasWidgetTreeMethods.canvasWidgetScopedFocusTarget;
+    pub const canvasWidgetRovingTabTarget = CanvasWidgetTreeMethods.canvasWidgetRovingTabTarget;
     pub const canvasWidgetFocusTargetInScope = CanvasWidgetTreeMethods.canvasWidgetFocusTargetInScope;
     pub const canvasWidgetForwardFocusTargetInScope = CanvasWidgetTreeMethods.canvasWidgetForwardFocusTargetInScope;
     pub const canvasWidgetBackwardFocusTargetInScope = CanvasWidgetTreeMethods.canvasWidgetBackwardFocusTargetInScope;

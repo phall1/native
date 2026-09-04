@@ -187,6 +187,48 @@ test "null platform reports hidden startup state" {
     try std.testing.expectEqual(true, recorder.startup_hidden.?);
 }
 
+test "null platform captures fresh restored and explicit placement independently" {
+    var null_platform = NullPlatform.init(.{});
+    const services = null_platform.platform().services;
+
+    _ = try services.createWindow(.{
+        .id = 1,
+        .label = "fresh",
+        .restore_state = true,
+        .initial_placement = .default,
+    });
+    _ = try services.createWindow(.{
+        .id = 2,
+        .label = "restored",
+        .initial_placement = .restored,
+    });
+    _ = try services.createWindow(.{
+        .id = 3,
+        .label = "explicit",
+        .default_frame = geometry.RectF.init(80, 120, 640, 480),
+        .initial_placement = .explicit,
+        .restore_policy = .center_on_primary,
+    });
+
+    try std.testing.expectEqual(types.WindowInitialPlacement.default, null_platform.window_placement[0]);
+    try std.testing.expectEqual(types.WindowInitialPlacement.restored, null_platform.window_placement[1]);
+    try std.testing.expectEqual(types.WindowInitialPlacement.explicit, null_platform.window_placement[2]);
+    try std.testing.expectEqual(types.WindowRestorePolicy.center_on_primary, null_platform.window_restore_policy[2]);
+}
+
+test "window option conversion preserves legacy nonzero origins as explicit" {
+    const runtime_options: types.WindowCreateOptions = .{
+        .default_frame = geometry.RectF.init(32, 48, 640, 480),
+    };
+    try std.testing.expectEqual(types.WindowInitialPlacement.explicit, runtime_options.windowOptions(7, "runtime").initial_placement);
+
+    const app_info: types.AppInfo = .{
+        .main_window = .{ .default_frame = geometry.RectF.init(64, 96, 720, 480) },
+    };
+    try std.testing.expectEqual(types.WindowInitialPlacement.explicit, app_info.resolvedMainWindow().initial_placement);
+    try std.testing.expectEqual(types.WindowInitialPlacement.explicit, app_info.resolvedStartupWindow(0).initial_placement);
+}
+
 test "null platform records accessory launch presence from app info" {
     const null_platform = NullPlatform.initWithOptions(.{}, .system, .{
         .app_name = "Menu Bar",
@@ -286,6 +328,59 @@ test "null platform preserves the tray title when presentation styles are set" {
     try std.testing.expectEqualStrings("Builds", retitled.title);
     try std.testing.expectEqual(@as(f32, 60), retitled.width);
     try std.testing.expectEqual(types.TrayTone.warning, retitled.tone);
+}
+
+test "null platform owns retained rich tray row bytes" {
+    var null_platform = NullPlatform.init(.{});
+    defer null_platform.deinit();
+
+    var segment_label = [_]u8{ 'D', 'a', 'y' };
+    var segment_command = [_]u8{ 'r', 'a', 'n', 'g', 'e' };
+    var metric_primary = [_]u8{ '2', '4', '9', '4' };
+    var metric_secondary = [_]u8{ 'T', 'o', 'd', 'a', 'y' };
+    var metric_accessibility = [_]u8{ 'M', 'e', 't', 'r', 'i', 'c' };
+    var chart_caption = [_]u8{ 'C', 'P', 'U' };
+    var chart_summary = [_]u8{ '5', '0', '%' };
+    var chart_accessibility = [_]u8{ 'C', 'P', 'U', ' ', '5', '0' };
+    const chart_values = [_]f32{0.5};
+
+    try null_platform.platform().services.createTray(.{ .items = &.{
+        .{ .role = .segmented, .segmented = .{ .options = &.{.{
+            .id = 20,
+            .label = &segment_label,
+            .command = &segment_command,
+        }} } },
+        .{ .role = .hero, .metric = .{
+            .primary_text = &metric_primary,
+            .secondary_text = &metric_secondary,
+            .accessibility_label = &metric_accessibility,
+        } },
+        .{ .role = .chart, .chart = .{
+            .values = &chart_values,
+            .leading_caption = &chart_caption,
+            .trailing_summary = &chart_summary,
+            .accessibility_label = &chart_accessibility,
+        } },
+    } });
+
+    @memset(&segment_label, 'X');
+    @memset(&segment_command, 'Y');
+    @memset(&metric_primary, 'P');
+    @memset(&metric_secondary, 'S');
+    @memset(&metric_accessibility, 'A');
+    @memset(&chart_caption, 'Z');
+    @memset(&chart_summary, 'W');
+    @memset(&chart_accessibility, 'Q');
+
+    const items = null_platform.trayItems();
+    try std.testing.expectEqualStrings("Day", items[0].segmented.?.options[0].label);
+    try std.testing.expectEqualStrings("range", items[0].segmented.?.options[0].command);
+    try std.testing.expectEqualStrings("2494", items[1].metric.?.primary_text);
+    try std.testing.expectEqualStrings("Today", items[1].metric.?.secondary_text);
+    try std.testing.expectEqualStrings("Metric", items[1].metric.?.accessibility_label);
+    try std.testing.expectEqualStrings("CPU", items[2].chart.?.leading_caption);
+    try std.testing.expectEqualStrings("50%", items[2].chart.?.trailing_summary);
+    try std.testing.expectEqualStrings("CPU 50", items[2].chart.?.accessibility_label);
 }
 
 test "null platform records OS actions" {
@@ -731,10 +826,11 @@ test "gpu surface image upload bounds are honest per id namespace" {
     defer std.testing.allocator.free(buffer);
     @memset(buffer, 128);
 
-    // Ordinary registered-image ids keep the registry's avatar-scale
-    // bound: exactly 1 MiB (512x512 RGBA8) passes, one pixel past it is
-    // an engine bug and refuses loudly.
-    try services.uploadGpuSurfaceImage(.{ .id = 7, .width = 512, .height = 512, .rgba8 = buffer[0..types.max_gpu_surface_image_pixel_bytes] });
+    // Ordinary registered-image ids accept the registry's configurable
+    // ceiling: exactly 8 MiB (2048x1024 RGBA8) passes, one pixel past it
+    // is an engine bug and refuses loudly. Apps on the default 1 MiB tier
+    // still refuse earlier, at registration.
+    try services.uploadGpuSurfaceImage(.{ .id = 7, .width = 2048, .height = 1024, .rgba8 = buffer[0..types.max_gpu_surface_image_pixel_bytes] });
     try std.testing.expectError(error.InvalidGpuSurfaceImage, services.uploadGpuSurfaceImage(.{
         .id = 7,
         .width = types.max_gpu_surface_image_pixel_bytes / 4 + 1,

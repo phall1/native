@@ -1,45 +1,52 @@
 # Config
 
-The `app.zon` manifest declares app metadata, permissions, security rules, window layout, and packaging inputs. It is read by the CLI and tooling at build, package, and validation time.
+The `app.json` manifest declares app metadata, permissions, security rules, window layout, and packaging inputs. It is read by the CLI and tooling at build, package, and validation time. New projects use JSON so TypeScript developers get familiar syntax, completion, and inline validation through [`$schema`](https://schema.native-sdk.dev/app/v1.json). Existing `app.zon` manifests remain fully supported and expose the same fields—there is no reduced JSON feature set. The versioned URL stays compatible for the lifetime of the v1 manifest contract; `/app.json` is the current-version alias.
 
 ## Example: native-rendered app
 
 The manifest `native init` generates — identity, one shell window with a GPU surface view, and the minimal permission set:
 
-```zig:app.zon
-.{
-    .id = "dev.native_sdk.my-app",
-    .name = "my-app",
-    .display_name = "My App",
-    .description = "A counter that lives in one native window.",
-    .version = "0.1.0",
-    .icons = .{"assets/icon.png"},
-    .platforms = .{"macos"},
-    .permissions = .{ "view", "command" },
-    .capabilities = .{ "native_views", "gpu_surfaces" },
-    .shell = .{
-        .windows = .{
-            .{
-                .label = "main",
-                .title = "My App",
-                .width = 480,
-                .height = 320,
-                .restore_state = false,
-                .restore_policy = "center_on_primary",
-                .views = .{
-                    .{ .label = "main-canvas", .kind = "gpu_surface", .fill = true, .role = "Counter canvas", .accessibility_label = "Counter", .gpu_backend = "metal", .gpu_pixel_format = "bgra8_unorm", .gpu_present_mode = "timer", .gpu_alpha_mode = "opaque", .gpu_color_space = "srgb", .gpu_vsync = true },
-                },
-            },
-        },
-    },
-    .security = .{
-        .navigation = .{
-            .allowed_origins = .{ "zero://app", "zero://inline" },
-            .external_links = .{ .action = "deny" },
-        },
-    },
-    .web_engine = "system",
-    .cef = .{ .dir = "third_party/cef/macos", .auto_install = false },
+```json:app.json
+{
+  "$schema": "https://schema.native-sdk.dev/app/v1.json",
+  "id": "dev.native_sdk.my-app",
+  "name": "my-app",
+  "display_name": "My App",
+  "description": "A counter that lives in one native window.",
+  "version": "0.1.0",
+  "icons": ["assets/icon.png"],
+  "platforms": ["macos"],
+  "permissions": ["view", "command"],
+  "capabilities": ["native_views", "gpu_surfaces"],
+  "shell": {
+    "windows": [{
+      "label": "main",
+      "title": "My App",
+      "width": 480,
+      "height": 320,
+      "views": [{
+        "label": "main-canvas",
+        "kind": "gpu_surface",
+        "fill": true,
+        "role": "Counter canvas",
+        "accessibility_label": "Counter",
+        "gpu_backend": "metal",
+        "gpu_pixel_format": "bgra8_unorm",
+        "gpu_present_mode": "timer",
+        "gpu_alpha_mode": "opaque",
+        "gpu_color_space": "srgb",
+        "gpu_vsync": true
+      }]
+    }]
+  },
+  "security": {
+    "navigation": {
+      "allowed_origins": ["zero://app", "zero://inline"],
+      "external_links": { "action": "deny" }
+    }
+  },
+  "web_engine": "system",
+  "cef": { "dir": "third_party/cef/macos", "auto_install": false }
 }
 ```
 
@@ -169,6 +176,10 @@ A fuller manifest for an app that also [embeds web content](/docs/frontend) and 
       <td>Engine-owned Model snapshot config: monotonic <code>version</code>, optional <code>debounce_ms</code>, and the <code>restore</code> Msg routes (<code>ok</code>/<code>none</code>/<code>err</code>). Requires <code>"persist"</code> in capabilities — see <a href="/docs/persistence">Model Persistence</a></td>
     </tr>
     <tr>
+      <td><code>images</code></td>
+      <td>Optional registered-image budget: <code>.images = .&#123; .max_image_pixel_bytes = 8_388_608 &#125;</code>. The default is 1 MiB and accepted values are 1–8 MiB. Encoded photos decode aspect-preservingly to fit; storage is lazy per used slot, but 16 fully used 8 MiB slots are a declared 128 MiB high-water. See <a href="/docs/dynamic-images">Dynamic Images</a>.</td>
+    </tr>
+    <tr>
       <td><code>bridge</code></td>
       <td>Bridge command policies (see <a href="/docs/bridge">Bridge</a>)</td>
     </tr>
@@ -281,7 +292,7 @@ For a scene-first app — a `UiApp` passing its Zig scene (`shell_scene`) to the
 },
 ```
 
-Each window takes a `label` plus optional `title`, `width`, `height`, `x`, `y`, `resizable`, `restore_state`, `restore_policy` (`clamp_to_visible_screen` or `center_on_primary`), `initially_hidden` (default false; create the native window ordered out until an explicit show/focus), `allows_fullscreen` (default true; false disables native fullscreen on macOS without disabling ordinary resizing), `min_width`/`min_height` (a content min-size floor the window itself enforces — macOS `contentMinSize`; the first shell window's declaration threads through the startup create like `titlebar`, negative values are a manifest error, 0 means no floor), and `titlebar` (`standard`, `hidden_inset`, `hidden_inset_tall` — the tall variant centers macOS's traffic lights in the 52pt unified band for toolbar-height headers — or `chromeless`, the fully-skinned opt-in that removes all OS chrome including the system buttons; only for apps that draw their own working window controls, see `examples/deck`). `titlebar = "hidden_inset"` hides the titlebar and extends content under it (macOS keeps the traffic lights) — the first shell window's declaration threads through the STARTUP window create, so the main window's chrome is right from the first frame; the app's own header then takes over dragging and inset padding through the `window-drag` attribute and the `on_chrome` hook (see <a href="/docs/native-ui">Native UI</a>). Platforms without the concept keep standard chrome. The same fields are accepted on top-level `windows` entries. `dock_visible` is top-level app policy, not a window field: setting it false removes the Dock/app-switcher presence but does not hide a window; pair it with `initially_hidden = true` when the app should launch behind its status item.
+Each window takes a `label` plus optional `title`, `width`, `height`, `x`, `y`, `resizable`, `restore_state`, `restore_policy` (`clamp_to_visible_screen` or `center_on_primary`), `initially_hidden` (default false; create the native window ordered out until an explicit show/focus), `allows_fullscreen` (default true; false disables native fullscreen on macOS without disabling ordinary resizing), `min_width`/`min_height` (a content min-size floor the window itself enforces — macOS `contentMinSize`; the first shell window's declaration threads through the startup create like `titlebar`, negative values are a manifest error, 0 means no floor), and `titlebar` (`standard`, `hidden_inset`, `hidden_inset_tall` — the tall variant centers macOS's traffic lights in the 52pt unified band for toolbar-height headers — or `chromeless`, the fully-skinned opt-in that removes all OS chrome including the system buttons; only for apps that draw their own working window controls, see `examples/deck`). `restore_state` defaults to true and controls only whether the state store is consulted: a store hit restores the saved frame, an authored `x` or `y` is explicit placement, and a fresh window with neither is default placement. On macOS the default `clamp_to_visible_screen` policy keeps restored and explicit frames on their matching or nearest display, centers the main fresh window, and cascades fresh secondary windows; `center_on_primary` centers restored and fresh default frames on the primary display. `titlebar = "hidden_inset"` hides the titlebar and extends content under it (macOS keeps the traffic lights) — the first shell window's declaration threads through the STARTUP window create, so the main window's chrome is right from the first frame; the app's own header then takes over dragging and inset padding through the `window-drag` attribute and the `on_chrome` hook (see <a href="/docs/native-ui">Native UI</a>). Platforms without the concept keep standard chrome. The same fields are accepted on top-level `windows` entries. `dock_visible` is top-level app policy, not a window field: setting it false removes the Dock/app-switcher presence but does not hide a window; pair it with `initially_hidden = true` when the app should launch behind its status item.
 
 Overlay presentation is also fixed at create time: `transparent` makes the top-level window alpha-capable, `always_on_top` selects its floating/topmost level, `click_through` passes pointer input to windows underneath, `activate_on_show = false` reveals it without activating the app or taking focus, and `allows_fullscreen = false` removes macOS fullscreen participation while keeping the window resizable. Canvas windows already use present-before-show, so these flags are applied while the window is hidden and its first alpha-correct frame becomes the first visible frame. `initially_hidden = true` is stronger: it suppresses that reveal until `Cmd.showWindow` or explicit focus. Pair `transparent = true` with a non-opaque `gpu_alpha_mode`; `UiApp.WindowDescriptor` makes that canvas-alpha choice and uses an alpha-zero clear automatically. See the <a href="/docs/windows#overlay-windows">overlay window recipe</a>. These fields are accepted on top-level `windows` and `shell.windows`. Runtime `WindowCreateOptions` exposes the same controls but spells the hidden mode `.show = .hidden`; `UiApp.WindowDescriptor` exposes the overlay controls but not the initially-hidden mode.
 
@@ -309,11 +320,11 @@ The optional `commands` list declares shared command metadata. The runtime still
 
 An app can define up to 256 commands. Command ids can be up to 128 bytes and titles can be up to 128 bytes.
 
-Generated runners load manifest commands into `RuntimeOptions.commands`. Native code can read the active catalog with `runtime.listCommands(...)`, and trusted WebView code can read it with `window.zero.commands.list()` when the built-in command bridge allows it. Use the catalog to keep menus, shortcuts, toolbar controls, tray items, and bridge callers aligned with the same command ids.
+Generated zero-config TypeScript and Zig-core runners load manifest commands into `RuntimeOptions.commands`; ejected runners use the same fallback. Native code can read the active catalog with `runtime.listCommands(...)`, and trusted WebView code can read it with `window.zero.commands.list()` when the built-in command bridge allows it. Use the catalog to keep menus, shortcuts, toolbar controls, tray items, and bridge callers aligned with the same command ids.
 
 ## `shortcuts`
 
-The optional `shortcuts` list defines app-level keyboard shortcuts. Generated runners load these automatically:
+The optional `shortcuts` list defines app-level keyboard shortcuts. Generated zero-config TypeScript and Zig-core runners load these automatically, as do ejected runners:
 
 ```zig
 .shortcuts = .{
@@ -332,7 +343,7 @@ Chromium builds are currently macOS-only; use the Linux system WebView backend w
 
 ## `menus`
 
-The optional `menus` list defines native app menus. Generated runners load these automatically:
+The optional `menus` list defines native app menus. Generated zero-config TypeScript and Zig-core runners load these automatically, as do ejected runners:
 
 ```zig
 .menus = .{
@@ -424,6 +435,6 @@ The optional `frontend.dev` block configures the managed dev server for `native 
 ## Validation
 
 ```bash
-native validate app.zon
-native doctor --manifest app.zon --strict
+native validate app.json
+native doctor --manifest app.json --strict
 ```

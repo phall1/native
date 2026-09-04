@@ -352,13 +352,15 @@ fn buildScriptScene(
     count += 1;
     for (0..message_count) |row| {
         const y: f32 = @as(f32, @floatFromInt(row)) * 28 + 12 - scroll_offset;
-        commands[count] = .{ .fill_rounded_rect = .{
-            .id = @intCast(1_000 + row),
-            .rect = geometry.RectF.init(8, y, patch_surface_width - 16, 24),
-            .radius = canvas.Radius.all(6),
-            // The "toggle": message 0's bubble flips color from step 1 on.
-            .fill = .{ .color = if (row == 0 and step >= 1) canvas.Color.rgb8(37, 99, 235) else canvas.Color.rgb8(30, 41, 59) },
-        } };
+        commands[count] = .{
+            .fill_rounded_rect = .{
+                .id = @intCast(1_000 + row),
+                .rect = geometry.RectF.init(8, y, patch_surface_width - 16, 24),
+                .radius = canvas.Radius.all(6),
+                // The "toggle": message 0's bubble flips color from step 1 on.
+                .fill = .{ .color = if (row == 0 and step >= 1) canvas.Color.rgb8(37, 99, 235) else canvas.Color.rgb8(30, 41, 59) },
+            },
+        };
         count += 1;
         const text = std.fmt.bufPrint(&text_storage[row], "message {d} body{s}", .{
             row,
@@ -1133,6 +1135,62 @@ test "command fingerprints cover every encoded field" {
     changed.effect = .{ .shadow = .{ .rect = geometry.RectF.init(0, 0, 4, 4), .blur = 3 } };
     try std.testing.expect(canvas.canvasGpuCommandFingerprint(changed) != base_fingerprint);
 
+    // PROBE (not upstream): `.cells` is an encoded field —
+    // serialization.zig writeBinaryCellGrid puts every cell's fg, bg,
+    // underline_color, flags and cluster text on the wire. A cell_grid
+    // command built the way gpu.zig builds it leaves shape/paint/text/
+    // image/effect at their empty defaults and its bounds are purely
+    // geometric (cell_grid.zig bounds()), so `.cells` is the ONLY field
+    // that varies when typed text changes.
+    const grid_cells = [_]canvas.Cell{
+        .{ .text_offset = 0, .text_len = 1, .fg = .{ .r = 244, .g = 247, .b = 251, .a = 255 } },
+        .{ .text_offset = 1, .text_len = 1, .fg = .{ .r = 244, .g = 247, .b = 251, .a = 255 } },
+    };
+    const grid_base = canvas.CanvasGpuCommand{
+        .command_index = 0,
+        .id = 0x61_0001,
+        .kind = .cell_grid,
+        .bounds = geometry.RectF.init(0, 0, 20, 10),
+        .cells = .{
+            .font_id = 1,
+            .font_size = 13,
+            .origin = geometry.PointF.init(0, 0),
+            .cell_width = 10,
+            .cell_height = 10,
+            .baseline = 8,
+            .cols = 2,
+            .rows = 1,
+            .cells = &grid_cells,
+            .text = "ab",
+        },
+    };
+    const grid_fingerprint = canvas.canvasGpuCommandFingerprint(grid_base);
+
+    // The user types: the cluster text changes "ab" -> "xb".
+    var typed = grid_base;
+    typed.cells.?.text = "xb";
+    try std.testing.expect(canvas.canvasGpuCommandFingerprint(typed) != grid_fingerprint);
+
+    // ...and a per-cell foreground changes to the background colour.
+    const recoloured_cells = [_]canvas.Cell{
+        .{ .text_offset = 0, .text_len = 1, .fg = .{ .r = 9, .g = 11, .b = 15, .a = 255 } },
+        .{ .text_offset = 1, .text_len = 1, .fg = .{ .r = 9, .g = 11, .b = 15, .a = 255 } },
+    };
+    var recoloured = grid_base;
+    recoloured.cells.?.cells = &recoloured_cells;
+    try std.testing.expect(canvas.canvasGpuCommandFingerprint(recoloured) != grid_fingerprint);
+
+    // A whole screenful of different text, different length, different
+    // colours -- still the same fingerprint.
+    const other_cells = [_]canvas.Cell{
+        .{ .text_offset = 0, .text_len = 1, .fg = .{ .r = 255, .g = 0, .b = 0, .a = 255 }, .flags = 1 },
+        .{ .text_offset = 1, .text_len = 1, .fg = .{ .r = 0, .g = 255, .b = 0, .a = 255 }, .flags = 2 },
+    };
+    var wholly_different = grid_base;
+    wholly_different.cells.?.cells = &other_cells;
+    wholly_different.cells.?.text = "ZQ";
+    try std.testing.expect(canvas.canvasGpuCommandFingerprint(wholly_different) != grid_fingerprint);
+
     // Keyed commands retain under their ObjectId; unkeyed commands get a
     // synthetic key that changes when their index or content moves.
     try std.testing.expectEqual(@as(u64, 41), canvas.canvasGpuPacketCommandKey(base, base_fingerprint));
@@ -1253,4 +1311,111 @@ test "pixel presents adopt a dirty-refinement baseline only for opted-in hosts a
     _ = try presentFrame(harness, &buffers, 73);
     try std.testing.expectEqual(canvas.binary_packet_load_action_patch, harness.null_platform.gpu_surface_packet_present_binary_load_action);
     try std.testing.expectEqual(platform.GpuPresentPacketMode.patch, harness.runtime.views[0].gpu_present_packet_mode);
+}
+
+test "widening a clip dirties the pixels it reveals" {
+    // The stale-column bug: a terminal pane narrows and widens again (a
+    // split collapsing back to full width), and the columns the narrow
+    // frame hid keep the glyphs the WIDE frame drew there.
+    //
+    // The render planner erases `push_clip`/`pop_clip` — they never
+    // become render commands, only a `clip` field on the commands inside
+    // them — so the retained packet baseline holds no key for a clip and
+    // the refined dirty rect derived from it names only what changed
+    // commands and evicted keys cover. Whenever a command's own bounds
+    // move with the clip, that covers the revealed pixels; a clip that
+    // moves over content whose bounds and fingerprints do NOT move has
+    // nothing naming them, and the host scissors to a region that never
+    // reaches them while its retained backing keeps whatever it last
+    // drew. This test pins the closed contract: the baseline carries its
+    // clip rects and the next frame adds the difference to the dirty
+    // region, in both directions.
+    //
+    // Frames that only change CONTENT under a stationary clip keep their
+    // region-scoped patches — that is the whole incremental path and it
+    // must survive.
+    var app_state: PatchHarnessApp = .{};
+    const harness = try createPatchHarness(&app_state);
+    defer harness.destroy(std.testing.allocator);
+    var buffers = try PresentBuffers.init(std.testing.allocator);
+    defer buffers.deinit(std.testing.allocator);
+    const view = &harness.runtime.views[0];
+
+    // A clipped "pane" of keyed rows, the terminal grid's shape: one
+    // clip around a column of rows. Only the row TINT changes with the
+    // pane width, so the narrow frame keeps every row's key and the
+    // revealed pixels can only come from the clip.
+    const row_count: usize = 24;
+    var commands: [row_count + 2]canvas.CanvasCommand = undefined;
+    const Pane = struct {
+        fn build(storage: *[row_count + 2]canvas.CanvasCommand, width: f32) []const canvas.CanvasCommand {
+            storage[0] = .{ .push_clip = .{
+                .id = 900,
+                .rect = geometry.RectF.init(0, 0, width, patch_surface_height),
+            } };
+            for (0..row_count) |row| {
+                storage[row + 1] = .{
+                    .fill_rect = .{
+                        .id = @intCast(1_000 + row),
+                        // Confined to the LEFT half in every frame, so no
+                        // command's bounds or fingerprint moves when the clip
+                        // does: the revealed pixels have nothing but the clip
+                        // difference naming them.
+                        .rect = geometry.RectF.init(0, @as(f32, @floatFromInt(row)) * 9, patch_surface_width / 2, 8),
+                        .fill = .{ .color = canvas.Color.rgb8(30, 41, 59) },
+                    },
+                };
+            }
+            storage[row_count + 1] = .pop_clip;
+            return storage[0 .. row_count + 2];
+        }
+    };
+
+    // Wide: the full-width pane, baselined with a keyed full present.
+    _ = try harness.runtime.setCanvasDisplayList(1, "canvas", .{
+        .commands = Pane.build(&commands, patch_surface_width),
+    });
+    _ = try presentFrame(harness, &buffers, 90);
+    try std.testing.expectEqual(platform.GpuPresentPacketMode.full, view.gpu_present_packet_mode);
+    try std.testing.expectEqual(@as(usize, 1), view.canvas_packet_baseline_clip_count);
+
+    // Content changes under the SAME clip still ride a region-scoped
+    // patch: carrying clips must cost the incremental path nothing on
+    // ordinary frames.
+    commands[5].fill_rect.fill = .{ .color = canvas.Color.rgb8(37, 99, 235) };
+    _ = try harness.runtime.setCanvasDisplayList(1, "canvas", .{ .commands = commands[0 .. row_count + 2] });
+    const toggled = try presentFrame(harness, &buffers, 91);
+    try std.testing.expectEqual(platform.GpuPresentPacketMode.patch, view.gpu_present_packet_mode);
+    const toggled_dirty = toggled.frame.dirty_bounds orelse return error.TestExpectedDirtyBounds;
+    try std.testing.expect(toggled_dirty.height < patch_surface_height);
+
+    // Narrow: the split opens and the pane's clip shrinks to half width.
+    _ = try harness.runtime.setCanvasDisplayList(1, "canvas", .{
+        .commands = Pane.build(&commands, patch_surface_width / 2),
+    });
+    _ = try presentFrame(harness, &buffers, 92);
+    try std.testing.expectEqual(patch_surface_width / 2, view.canvas_packet_baseline_clip_rects[0].width);
+
+    // Wide again: the split collapses. THIS is the frame that used to
+    // ship a dirty rect stopping at the narrow pane's right edge, so the
+    // revealed columns kept the glyphs the first wide frame drew there.
+    _ = try harness.runtime.setCanvasDisplayList(1, "canvas", .{
+        .commands = Pane.build(&commands, patch_surface_width),
+    });
+    const widened = try presentFrame(harness, &buffers, 93);
+    try std.testing.expectEqual(CanvasPresentationMode.gpu_packet, widened.mode);
+    const revealed = widened.frame.dirty_bounds orelse return error.TestExpectedDirtyBounds;
+    // Every column the narrow pane hid is inside the repaint, even
+    // though not one command changed.
+    try std.testing.expect(revealed.x <= patch_surface_width / 2);
+    try std.testing.expect(revealed.x + revealed.width >= patch_surface_width);
+    try std.testing.expectEqual(patch_surface_width, view.canvas_packet_baseline_clip_rects[0].width);
+
+    // ...and the incremental path resumes on the next content-only frame.
+    commands[7].fill_rect.fill = .{ .color = canvas.Color.rgb8(220, 38, 38) };
+    _ = try harness.runtime.setCanvasDisplayList(1, "canvas", .{ .commands = commands[0 .. row_count + 2] });
+    const resumed = try presentFrame(harness, &buffers, 94);
+    try std.testing.expectEqual(platform.GpuPresentPacketMode.patch, view.gpu_present_packet_mode);
+    const resumed_dirty = resumed.frame.dirty_bounds orelse return error.TestExpectedDirtyBounds;
+    try std.testing.expect(resumed_dirty.height < patch_surface_height);
 }

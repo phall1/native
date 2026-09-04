@@ -266,6 +266,10 @@ pub const max_tray_tooltip_bytes: usize = 256;
 pub const max_tray_item_label_bytes: usize = 256;
 pub const max_tray_item_command_bytes: usize = 128;
 pub const max_tray_item_detail_bytes: usize = 256;
+pub const max_tray_segment_options: usize = 8;
+pub const max_tray_segment_label_bytes: usize = 64;
+pub const max_tray_chart_values: usize = 32;
+pub const max_tray_chart_text_bytes: usize = 128;
 pub const max_drop_paths_bytes: usize = 8192;
 pub const max_drop_paths: usize = max_drop_paths_bytes / 2 + 1;
 pub const max_window_event_name_bytes: usize = 64;
@@ -303,14 +307,20 @@ pub const max_gpu_surface_packet_binary_bytes: usize = 512 * 1024;
 /// packet present falls back because a command is not representable
 /// (fits every `CanvasCommand` tag name).
 pub const max_gpu_present_fallback_detail_bytes: usize = 32;
+/// Longest decoded-image side accepted by the registered-image codec seam.
+/// Source metadata may exceed this: conforming platform codecs combine this
+/// axis ceiling with the caller's `max_pixels` area target and downsample
+/// during decode. Keeping the decoded side bounded protects codec and GPU
+/// upload paths from pathological panoramas without refusing them outright.
+pub const max_decoded_image_dimension: usize = 8192;
 /// Per-image bound for the binary gpu-surface image upload side-channel;
-/// matches the runtime registry's per-slot bound
-/// (`canvas_limits.max_registered_canvas_image_pixel_bytes`). Applies to
-/// ORDINARY registered-image ids only: the registry refuses anything
-/// larger at registration, so an over-bound upload of a registered image
-/// can only be an engine bug and is refused loudly here rather than
-/// copied into host allocations.
-pub const max_gpu_surface_image_pixel_bytes: usize = 1024 * 1024;
+/// matches the runtime registry's app-configurable ceiling
+/// (`canvas_limits.max_registered_canvas_image_pixel_bytes_ceiling`).
+/// Applies to ORDINARY registered-image ids only: the runtime's frozen
+/// app budget may be lower, but anything it accepts must remain uploadable
+/// on packet hosts. An upload past the SDK ceiling is still an engine bug
+/// and is refused loudly rather than copied into host allocations.
+pub const max_gpu_surface_image_pixel_bytes: usize = 8 * 1024 * 1024;
 /// Per-image bound for uploads in the media-surface texture namespace
 /// (ids with `canvas.media_surface_image_id_bit` set — producer-pushed
 /// dynamic textures, structurally disjoint from registered-image ids):
@@ -462,6 +472,16 @@ fn shortcutRequiresModifier(key: []const u8) bool {
 pub const WindowRestorePolicy = enum {
     clamp_to_visible_screen,
     center_on_primary,
+};
+
+/// Why the host is receiving the window's initial frame. Persistence policy
+/// (`restore_state`) is deliberately separate: only the state-store loader can
+/// say `.restored`, while an authored x/y origin says `.explicit`; every other
+/// fresh window uses `.default` platform placement.
+pub const WindowInitialPlacement = enum {
+    restored,
+    explicit,
+    default,
 };
 
 /// How the window draws its titlebar chrome.
@@ -621,6 +641,7 @@ pub const WindowOptions = struct {
     resizable: bool = true,
     restore_state: bool = true,
     restore_policy: WindowRestorePolicy = .clamp_to_visible_screen,
+    initial_placement: WindowInitialPlacement = .default,
     titlebar: WindowTitlebarStyle = .standard,
     show: WindowShowMode = .immediate,
     /// Make the top-level window and its rendering surface alpha-capable.
@@ -692,6 +713,16 @@ pub const WindowInfo = struct {
     focused: bool = false,
     /// Alive but policy-hidden — see `WindowState.hidden`.
     hidden: bool = false,
+    /// The window occupies its own fullscreen Space (macOS) or the
+    /// platform equivalent.
+    ///
+    /// The READ half of the fullscreen capability, and it reports
+    /// transitions the USER started from the green button exactly like
+    /// ones the app asked for via `set_window_fullscreen_fn`. Before
+    /// this the flag existed only on `WindowState` and nothing ever
+    /// filled it, so even the window-state store persisted a constant
+    /// false.
+    fullscreen: bool = false,
 
     pub fn state(self: WindowInfo) WindowState {
         return .{
@@ -703,6 +734,7 @@ pub const WindowInfo = struct {
             .open = self.open,
             .focused = self.focused,
             .hidden = self.hidden,
+            .fullscreen = self.fullscreen,
         };
     }
 };
@@ -715,6 +747,7 @@ pub const WindowCreateOptions = struct {
     resizable: bool = true,
     restore_state: bool = true,
     restore_policy: WindowRestorePolicy = .clamp_to_visible_screen,
+    initial_placement: WindowInitialPlacement = .default,
     titlebar: WindowTitlebarStyle = .standard,
     show: WindowShowMode = .immediate,
     transparent: bool = false,
@@ -739,6 +772,15 @@ pub const WindowCreateOptions = struct {
             .resizable = self.resizable,
             .restore_state = self.restore_state,
             .restore_policy = self.restore_policy,
+            // Preserve the historical direct-runtime shape where a non-zero
+            // `default_frame` origin meant explicit placement. Callers that
+            // intentionally need the visible-screen origin can state
+            // `.explicit`; optional-origin APIs already do so even at 0,0.
+            .initial_placement = if (self.initial_placement == .default and
+                (self.default_frame.x != 0 or self.default_frame.y != 0))
+                .explicit
+            else
+                self.initial_placement,
             .titlebar = self.titlebar,
             .show = self.show,
             .transparent = self.transparent,
@@ -983,6 +1025,7 @@ pub const Cursor = enum {
     pointing_hand,
     text,
     resize_horizontal,
+    resize_vertical,
 };
 
 pub const ViewInfo = struct {
@@ -1294,6 +1337,7 @@ pub const AppInfo = struct {
     pub fn resolvedMainWindow(self: AppInfo) WindowOptions {
         var window = self.main_window;
         if (window.title.len == 0) window.title = self.resolvedWindowTitle();
+        inferLegacyExplicitOrigin(&window);
         return window;
     }
 
@@ -1308,7 +1352,16 @@ pub const AppInfo = struct {
         }
         if (window.label.len == 0) window.label = if (index == 0) "main" else "window";
         if (window.title.len == 0) window.title = self.resolvedWindowTitle();
+        inferLegacyExplicitOrigin(&window);
         return window;
+    }
+
+    fn inferLegacyExplicitOrigin(window: *WindowOptions) void {
+        if (window.initial_placement == .default and
+            (window.default_frame.x != 0 or window.default_frame.y != 0))
+        {
+            window.initial_placement = .explicit;
+        }
     }
 };
 
@@ -1429,6 +1482,13 @@ pub const TrayTone = enum(u8) {
     critical,
 };
 
+pub const TrayFontWeight = enum(u8) {
+    regular,
+    medium,
+    semibold,
+    bold,
+};
+
 /// The model-derived part of a status item. Keeping this separate from
 /// icon/tooltip/activation options lets UiApp patch presentation without
 /// recreating the native item.
@@ -1440,6 +1500,9 @@ pub const TrayPresentation = struct {
     tone: TrayTone = .normal,
     icon_opacity: f32 = 1,
     monospaced: bool = false,
+    /// Explicit title size in points; zero keeps the host's menu-bar default.
+    font_size: f32 = 0,
+    font_weight: TrayFontWeight = .regular,
 };
 
 pub const TrayOptions = struct {
@@ -1494,6 +1557,45 @@ pub const TrayItemRole = enum(u8) {
     hero,
     agent,
     context,
+    segmented,
+    chart,
+};
+
+/// One choice inside a typed segmented tray row. Its stable id and command
+/// participate in the same namespace and dispatch route as an ordinary tray
+/// command row; the containing row itself is display structure, not an
+/// action. At most one option in a row may be selected.
+pub const TraySegmentOption = struct {
+    id: TrayItemId,
+    label: []const u8,
+    command: []const u8,
+    selected: bool = false,
+    enabled: bool = true,
+};
+
+pub const TraySegmentedRow = struct {
+    options: []const TraySegmentOption = &.{},
+};
+
+/// A prominent two-line metric block inside a tray menu. This is semantic
+/// dropdown content, distinct from the persistent menu-bar title.
+pub const TrayMetricRow = struct {
+    primary_text: []const u8,
+    secondary_text: []const u8 = "",
+    accessibility_label: []const u8,
+};
+
+/// A bounded bar-chart/sparkline readout. Values are finite and must fall in
+/// the explicit `min_value...max_value` domain. The text fields remain
+/// semantic data on every host; capable macOS hosts place them around a
+/// native AppKit-drawn bar chart.
+pub const TrayChartRow = struct {
+    values: []const f32 = &.{},
+    min_value: f32 = 0,
+    max_value: f32 = 1,
+    leading_caption: []const u8 = "",
+    trailing_summary: []const u8 = "",
+    accessibility_label: []const u8 = "",
 };
 
 pub const TrayMenuItem = struct {
@@ -1506,6 +1608,11 @@ pub const TrayMenuItem = struct {
     role: TrayItemRole = .command,
     key: []const u8 = "",
     modifiers: ShortcutModifiers = .{},
+    /// Typed rich-row payloads. Exactly one is present for its matching role;
+    /// both stay null for every existing command/readout row.
+    segmented: ?TraySegmentedRow = null,
+    metric: ?TrayMetricRow = null,
+    chart: ?TrayChartRow = null,
 };
 
 pub const NativeCommandEvent = struct {
@@ -2353,6 +2460,7 @@ pub const WidgetAccessibilityRole = enum(c_int) {
     slider = 18,
     progressbar = 19,
     radio = 20,
+    radiogroup = 21,
 };
 
 pub const WidgetAccessibilityActions = struct {
@@ -2588,6 +2696,21 @@ pub const PlatformServices = struct {
     /// `show_window_fn` is the inverse. Platforms without a reliable
     /// re-show path leave this null.
     hide_window_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId) anyerror!void = null,
+    /// The real OS fullscreen verb (macOS `toggleFullScreen:` into its
+    /// own Space, Windows/GTK their equivalents).
+    ///
+    /// SET, not toggle, so the call is idempotent and an app can drive
+    /// fullscreen from state it already owns — restoring a remembered
+    /// layout at launch, or binding its own shortcut — instead of having
+    /// to track parity against `WindowInfo.fullscreen`. A host whose
+    /// native verb is a toggle compares the window's current state and
+    /// only flips when it differs.
+    ///
+    /// The counterpart to the `WindowInfo.fullscreen` the platform
+    /// already REPORTS: without it an app could be told it was
+    /// fullscreen and never ask to be, which is the asymmetry this
+    /// closes. Platforms without the concept leave it null.
+    set_window_fullscreen_fn: ?*const fn (context: ?*anyopaque, window_id: WindowId, fullscreen: bool) anyerror!void = null,
     /// The real OS show verb: unhide + order front. It activates by
     /// default; windows created with `activate_on_show = false` use the
     /// platform's passive variant. This is the counterpart to a
@@ -2955,12 +3078,16 @@ pub const PlatformServices = struct {
     /// framework bundles no image decoders: macOS decodes through
     /// CGImageSource (ImageIO), GTK through gdk-pixbuf, Win32 through WIC.
     /// Implementations may use `buffer` as decode scratch, so callers size
-    /// it for their pixel bound, not the exact image. Errors:
+    /// it for their pixel bound, not the exact image. `max_pixels` is a
+    /// pixel-count cap, not a width/height box: codecs preserve aspect and
+    /// decode down when source pixels exceed it or either decoded side would
+    /// exceed `max_decoded_image_dimension`. Errors:
     /// `error.ImageDecodeFailed` for undecodable bytes,
-    /// `error.ImageTooLarge` when the decoded pixels do not fit `buffer`.
+    /// `error.ImageTooLarge` when the fitted pixels violate either bound or
+    /// do not fit `buffer`.
     /// Null on platforms without a codec (the null platform by default),
     /// which surfaces as `error.UnsupportedService`.
-    decode_image_fn: ?*const fn (context: ?*anyopaque, bytes: []const u8, buffer: []u8) anyerror!DecodedImage = null,
+    decode_image_fn: ?*const fn (context: ?*anyopaque, bytes: []const u8, buffer: []u8, max_pixels: usize) anyerror!DecodedImage = null,
 
     pub fn readClipboard(self: PlatformServices, buffer: []u8) anyerror![]const u8 {
         const read_fn = self.read_clipboard_fn orelse return error.UnsupportedService;
@@ -3037,6 +3164,11 @@ pub const PlatformServices = struct {
     pub fn hideWindow(self: PlatformServices, window_id: WindowId) anyerror!void {
         const hide_fn = self.hide_window_fn orelse return error.UnsupportedService;
         return hide_fn(self.context, window_id);
+    }
+
+    pub fn setWindowFullscreen(self: PlatformServices, window_id: WindowId, fullscreen: bool) anyerror!void {
+        const fullscreen_fn = self.set_window_fullscreen_fn orelse return error.UnsupportedService;
+        return fullscreen_fn(self.context, window_id, fullscreen);
     }
 
     pub fn showWindow(self: PlatformServices, window_id: WindowId) anyerror!void {
@@ -3546,11 +3678,10 @@ pub const PlatformServices = struct {
         // Two honest bounds, keyed by the id namespace: hosts copy every
         // upload into host-owned allocations (AppKit's NSData + NSImage
         // store), so each bound teaches the real cost of its id space.
-        // Ordinary registered images are avatar-scale by the registry's
-        // own slot bound; media-surface textures (the reserved high-bit
-        // namespace) are video-scale by the producer channel's frame
-        // budget — the bound the producer already enforced, so nothing a
-        // producer staged can fail here.
+        // Ordinary registered images use the registry's configurable
+        // ceiling; media-surface textures (the reserved high-bit namespace)
+        // use the producer channel's frame budget — the bound the producer
+        // already enforced, so nothing either source accepted can fail here.
         const bound = if ((image.id & canvas.media_surface_image_id_bit) != 0)
             max_gpu_surface_media_image_pixel_bytes
         else
@@ -3594,10 +3725,14 @@ pub const PlatformServices = struct {
 
     /// Decode encoded image bytes through the platform codec into
     /// straight-alpha RGBA8 (see `decode_image_fn`). Loop-thread only.
-    pub fn decodeImage(self: PlatformServices, bytes: []const u8, buffer: []u8) anyerror!DecodedImage {
+    pub fn decodeImage(self: PlatformServices, bytes: []const u8, buffer: []u8, max_pixels: usize) anyerror!DecodedImage {
         if (bytes.len == 0) return error.ImageDecodeFailed;
+        if (max_pixels == 0) return error.ImageTooLarge;
         const decode_fn = self.decode_image_fn orelse return error.UnsupportedService;
-        return decode_fn(self.context, bytes, buffer);
+        const decoded = try decode_fn(self.context, bytes, buffer, max_pixels);
+        const pixels = std.math.mul(usize, decoded.width, decoded.height) catch return error.ImageTooLarge;
+        if (decoded.width > max_decoded_image_dimension or decoded.height > max_decoded_image_dimension or pixels > max_pixels) return error.ImageTooLarge;
+        return decoded;
     }
 };
 

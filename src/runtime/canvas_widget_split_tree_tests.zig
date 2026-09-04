@@ -64,6 +64,17 @@ fn buildSplitTree(ui: *TestUi) TestUi.Node {
         ui.column(.{ .min_width = 60 }, .{}),
     });
 }
+fn buildVerticalSplitTree(ui: *TestUi) TestUi.Node {
+    return ui.split(.{
+        .split_axis = .vertical,
+        .value = 0.5,
+        .on_resize = TestUi.valueMsg(.resized),
+    }, .{
+        ui.column(.{ .min_height = 60 }, .{}),
+        ui.column(.{ .min_height = 60 }, .{}),
+    });
+}
+
 
 fn findNodeByKind(layout: canvas.WidgetLayoutTree, kind: canvas.WidgetKind) ?canvas.WidgetLayoutNode {
     for (layout.nodes) |node| {
@@ -251,6 +262,70 @@ test "keyboard adjusts the focused split divider through the resize event" {
     try std.testing.expectApproxEqAbs(@as(f32, 240.0 / 300.0), app_state.last_resize_fraction, 0.0001);
     try std.testing.expectEqual(@as(u32, 4), app_state.resize_count);
 }
+test "vertical split divider lays out, drags, keys, and adjusts accessibly on its axis" {
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: ObservingApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 100, 309),
+    });
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var ui = TestUi.init(arena.allocator());
+    const tree = try ui.finalize(buildVerticalSplitTree(&ui));
+    var nodes: [8]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(tree.root, geometry.RectF.init(0, 0, 100, 309), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+    const installed = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    const divider = findNodeByKind(installed, .split_divider) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(canvas.SplitAxis.vertical, divider.widget.runtime_flags.split_axis);
+    try std.testing.expectEqualDeep(geometry.RectF.init(0, 150, 100, 9), divider.frame);
+
+    // Pointer hover exposes the native north/south resize cursor, then a
+    // captured downward drag changes only the vertical fraction.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .pointer_move, .x = 50, .y = 154 } });
+    try std.testing.expectEqual(platform.Cursor.resize_vertical, harness.null_platform.view_cursor);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .pointer_down, .x = 50, .y = 154, .button = 0 } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .pointer_drag, .x = 50, .y = 214 } });
+    const dragged = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    const dragged_split = dragged.findById(tree.root.id) orelse return error.TestUnexpectedResult;
+    const expected_fraction: f32 = (214.0 - 4.5) / 300.0;
+    try std.testing.expectApproxEqAbs(expected_fraction, dragged_split.widget.value, 0.0001);
+    const dragged_divider = findNodeByKind(dragged, .split_divider) orelse return error.TestUnexpectedResult;
+    try std.testing.expectApproxEqAbs(expected_fraction * 300.0, dragged_divider.frame.y, 0.001);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .pointer_up, .x = 50, .y = 214, .button = 0 } });
+
+    // The press focused the separator. Cross-axis arrows do nothing;
+    // ArrowDown follows the divider down and emits the resize value.
+    try std.testing.expectEqual(divider.widget.id, harness.runtime.views[0].canvas_widget_focused_id);
+    const before_key = dragged_split.widget.value;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "arrowright" } });
+    try std.testing.expectApproxEqAbs(before_key, (try harness.runtime.canvasWidgetLayout(1, "canvas")).findById(tree.root.id).?.widget.value, 0.0001);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "arrowdown" } });
+    const after_key = (try harness.runtime.canvasWidgetLayout(1, "canvas")).findById(tree.root.id).?.widget.value;
+    try std.testing.expect(after_key > before_key);
+
+    // The separator's adjustable accessibility action travels through the
+    // same control intent and on_resize channel.
+    const resize_count_before_accessibility = app_state.resize_count;
+    _ = try harness.runtime.dispatchCanvasWidgetAccessibilityAction(app, 1, "canvas", .{
+        .id = divider.widget.id,
+        .action = .decrement,
+    });
+    const adjusted = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expect(adjusted.findById(tree.root.id).?.widget.value < after_key);
+    try std.testing.expectEqual(resize_count_before_accessibility + 1, app_state.resize_count);
+}
+
 
 fn treeRowPanel(id: canvas.ObjectId, y: f32, height: f32, expanded: ?bool, children: []const canvas.Widget) canvas.Widget {
     return .{
@@ -649,6 +724,61 @@ test "tree arrow navigation reveals and focuses rows below a scroll viewport" {
     try std.testing.expect(focused.y >= viewport.y);
     try std.testing.expect(focused.maxY() <= viewport.maxY());
     try std.testing.expect(scrolled.findById(10).?.widget.value > 0);
+}
+
+test "radio-group arrow navigation reveals selects and focuses an offscreen nested radio" {
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var app_state: ObservingApp = .{};
+    const app = app_state.app();
+    try harness.start(app);
+
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 240, 64),
+    });
+
+    const radios = [_]canvas.Widget{
+        .{ .id = 31, .kind = .radio, .frame = geometry.RectF.init(0, 0, 0, 28), .text = "One", .state = .{ .selected = true } },
+        .{ .id = 32, .kind = .radio, .frame = geometry.RectF.init(0, 0, 0, 28), .text = "Two" },
+        .{ .id = 33, .kind = .radio, .frame = geometry.RectF.init(0, 0, 0, 28), .text = "Three" },
+        .{ .id = 34, .kind = .radio, .frame = geometry.RectF.init(0, 0, 0, 28), .text = "Four" },
+    };
+    const nested = [_]canvas.Widget{.{
+        .kind = .column,
+        .layout = .{ .gap = 2 },
+        .children = &radios,
+    }};
+    const group = canvas.Widget{
+        .id = 30,
+        .kind = .radio_group,
+        .frame = geometry.RectF.init(0, 0, 0, 118),
+        .children = &nested,
+    };
+    const root = canvas.Widget{ .id = 20, .kind = .scroll_view, .children = &.{group} };
+    var nodes: [10]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(root, geometry.RectF.init(0, 0, 240, 64), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+    const view = &harness.runtime.views[0];
+    view.canvas_widget_focused_id = 31;
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "arrowdown" } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "arrowdown" } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = "canvas", .kind = .key_down, .key = "arrowdown" } });
+
+    try std.testing.expectEqual(@as(canvas.ObjectId, 34), view.canvas_widget_focused_id);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 34), app_state.last_keyboard_target_id);
+    try std.testing.expect(app_state.last_keyboard_focus_moved);
+    const scrolled = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    const viewport = scrolled.findById(20).?.frame.normalized();
+    const focused = scrolled.findById(34).?.frame.normalized();
+    try std.testing.expect(focused.y >= viewport.y);
+    try std.testing.expect(focused.maxY() <= viewport.maxY());
+    try std.testing.expect(!scrolled.findById(31).?.widget.state.selected);
+    try std.testing.expect(scrolled.findById(34).?.widget.state.selected);
 }
 
 test "list arrow navigation reveals and focuses rows below a scroll viewport" {

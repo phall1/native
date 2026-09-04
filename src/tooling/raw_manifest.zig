@@ -1,6 +1,10 @@
 const web_engine = @import("web_engine.zig");
 
 pub const RawManifest = struct {
+    /// Editor-only JSON Schema association. The manifest tooling ignores the
+    /// value after parsing; app.json scaffolds point it at the published SDK
+    /// schema so editors can complete and validate the full manifest surface.
+    @"$schema": ?[]const u8 = null,
     id: []const u8,
     name: []const u8,
     display_name: ?[]const u8 = null,
@@ -16,6 +20,7 @@ pub const RawManifest = struct {
     /// still promote or demote the app later.
     dock_visible: bool = true,
     persist: ?RawPersist = null,
+    images: RawImages = .{},
     service_packages: []const RawServicePackage = &.{},
     /// Which carrier runs src/services operations: "auto" (the default child
     /// carrier), "in_process", or "child".
@@ -44,6 +49,10 @@ pub const RawManifest = struct {
     file_associations: []const RawFileAssociation = &.{},
     url_schemes: []const RawUrlScheme = &.{},
     dmg: RawDmg = .{},
+};
+
+pub const RawImages = struct {
+    max_image_pixel_bytes: usize = 1024 * 1024,
 };
 
 pub const RawServicePackage = struct {

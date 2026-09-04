@@ -12,7 +12,8 @@
 //   T | null/undefined    -> ?T (R7)
 //   Uint8Array            -> []const u8 (R3)
 
-import { ts, TypedAst, hasExportModifier, exportListBindings, type PropInfo } from "./typed_ast.ts";
+import path from "node:path";
+import { ts, TypedAst, hasExportModifier, exportListBindings, sdkLibraryModules, type PropInfo } from "./typed_ast.ts";
 import { mutatingMethodNames } from "./ownership.ts";
 
 export type ZType =
@@ -265,14 +266,17 @@ export class TypeTable {
           this.declOrder.push(name);
           continue;
         }
-        if (ts.isTypeLiteralNode(stmt.type) && this.tast.propsOfTypeLiteral(stmt.type) !== null) {
+        const projectOptional = this.isCanonicalOptionalSdkRecord(stmt);
+        if (ts.isTypeLiteralNode(stmt.type) && this.tast.propsOfTypeLiteral(stmt.type, projectOptional) !== null) {
           // A plain-record object-literal alias is a struct exactly like
           // an interface; the alias FORM is how a contract projection
           // spells a value-stored record (interfaces spell node
           // storage), and the storage itself still comes from the
           // promotion walk. Shapes the plain-record walk cannot carry
           // whole (quoted or optional properties) stay unclassified and
-          // refuse at emission instead of losing fields silently.
+          // refuse at emission instead of losing fields silently. The
+          // A tiny closed set of SDK shell records may carry optional
+          // properties; authored records still spell absence as `| null`.
           this.structs.set(name, {
             name,
             decl: stmt,
@@ -319,18 +323,32 @@ export class TypeTable {
         }
         const structInfo = this.structs.get(stmt.name.text);
         if (structInfo && structInfo.decl === stmt && ts.isTypeLiteralNode(stmt.type)) {
-          const props = this.tast.propsOfTypeLiteral(stmt.type);
-          if (props) structInfo.fields = props.map((p) => this.fieldOf(p));
+          const projectOptional = this.isCanonicalOptionalSdkRecord(stmt);
+          const props = this.tast.propsOfTypeLiteral(stmt.type, projectOptional);
+          if (props) structInfo.fields = props.map((p) => this.fieldOf(p, projectOptional));
         }
       }
     }
   }
 
-  private fieldOf(p: PropInfo): ZField {
+  private isCanonicalOptionalSdkRecord(decl: ts.TypeAliasDeclaration): boolean {
+    const events = sdkLibraryModules.get("@native-sdk/core/events");
+    return (decl.name.text === "ThemeState" || decl.name.text === "StatusItemPresentation" || decl.name.text === "StatusItemMenuItem") && events !== undefined &&
+      path.resolve(decl.getSourceFile().fileName) === path.resolve(events);
+  }
+
+  private fieldOf(p: PropInfo, projectOptional = false): ZField {
+    const resolved = p.typeNode ? this.resolveTypeNode(p.typeNode) : { k: "void" } as ZType;
     return {
       tsName: p.name,
       zigName: zigDeclName(p.name),
-      type: p.typeNode ? this.resolveTypeNode(p.typeNode) : { k: "void" },
+      // Only canonical SDK shell records project JS `undefined` omission
+      // onto the contract's ordinary optional slot. Applying this globally would
+      // let service records acquire an absent state while their generated
+      // codecs still accept only explicit null.
+      type: projectOptional && p.optional && resolved.k !== "void" && resolved.k !== "optional"
+        ? { k: "optional", inner: resolved }
+        : resolved,
       decl: p.declaration,
     };
   }
@@ -748,7 +766,7 @@ export class TypeTable {
 }
 
 /// The canvas text-input event vocabulary — a union carrying exactly these
-/// eleven tags is the declared mirror the markup engines resolve `on-input`
+/// thirteen tags is the declared mirror the markup engines resolve `on-input`
 /// through (matched structurally on the Zig side; see
 /// ui_markup_reflect.declaredTextInputUnion).
 const textInputMirrorTags = [
@@ -757,6 +775,8 @@ const textInputMirrorTags = [
   "delete_forward",
   "delete_word_backward",
   "delete_word_forward",
+  "delete_to_start",
+  "delete_to_line_start",
   "clear",
   "move_caret",
   "set_selection",

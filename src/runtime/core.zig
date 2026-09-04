@@ -39,6 +39,7 @@ const bridge = @import("../bridge/root.zig");
 const extensions = @import("../extensions/root.zig");
 const app_manifest = @import("app_manifest");
 const platform = @import("../platform/root.zig");
+const window_state = @import("../window_state/root.zig");
 const runtime_effects = @import("effects.zig");
 const runtime_record_store = @import("record_store.zig");
 const runtime_relational_store = @import("relational_store.zig");
@@ -198,6 +199,10 @@ pub const Runtime = struct {
     /// frees, the `deinit` frees) goes through this field, never
     /// through `options.allocator`.
     owned_allocator: std.mem.Allocator,
+    /// Registered-image budget captured at init. Decode, registration,
+    /// replay validation, slot reuse, and deinit all observe this one
+    /// app-fixed limit even if public `options` is later mutated.
+    max_image_pixel_bytes: usize = canvas_limits.max_registered_canvas_image_pixel_bytes,
     surface: platform.Surface,
     appearance: platform.Appearance = .{},
     windows: [platform.max_windows]RuntimeWindow = undefined,
@@ -253,6 +258,11 @@ pub const Runtime = struct {
     video_height: u64 = 0,
     shell_layouts: [platform.max_windows]RuntimeShellLayout = undefined,
     shell_layout_count: usize = 0,
+    /// Reused by runtime-created window restoration. `Store.loadWindow`
+    /// needs the whole bounded state file plus decoded-string scratch; keep
+    /// that 64-KiB workspace on the already heap-owned Runtime instead of
+    /// placing it on the event-loop stack for every secondary-window create.
+    window_state_read_scratch: [window_state.max_serialized_bytes]u8 = undefined,
     next_window_id: platform.WindowId = 2,
     next_view_id: platform.ViewId = 1,
     invalidated: bool = true,
@@ -499,10 +509,16 @@ pub const Runtime = struct {
             }
         }
         self.options = options;
+        if (options.max_image_pixel_bytes < canvas_limits.max_registered_canvas_image_pixel_bytes or
+            options.max_image_pixel_bytes > canvas_limits.max_registered_canvas_image_pixel_bytes_ceiling)
+        {
+            @panic("max_image_pixel_bytes must be between 1 MiB and 8 MiB; declare app.zon .images.max_image_pixel_bytes within that range");
+        }
         // Freeze the ownership allocator now (see the field doc):
         // `options` stays publicly mutable, but the identity that owns
         // on-demand storage must not move under live allocations.
         self.owned_allocator = options.allocator;
+        self.max_image_pixel_bytes = options.max_image_pixel_bytes;
         self.surface = options.platform.surface();
         // The profile rings exceed the small-default copy bound above;
         // assign explicitly so the disabled state is never undefined.
@@ -676,6 +692,7 @@ pub const Runtime = struct {
     pub const closeWindow = WindowViewMethods.closeWindow;
     pub const minimizeWindow = WindowViewMethods.minimizeWindow;
     pub const hideWindow = WindowViewMethods.hideWindow;
+    pub const setWindowFullscreen = WindowViewMethods.setWindowFullscreen;
     pub const showWindow = WindowViewMethods.showWindow;
     pub const quitApp = WindowViewMethods.quitApp;
     pub const createShellWindow = WindowViewMethods.createShellWindow;
@@ -968,9 +985,16 @@ pub const Runtime = struct {
     const refreshCanvasWidgetDisplayListIfOwnedSkippingAccessibility = CanvasWidgetDisplayMethods.refreshCanvasWidgetDisplayListIfOwnedSkippingAccessibility;
     const refreshCanvasWidgetDisplayListIfOwnedWithAccessibility = CanvasWidgetDisplayMethods.refreshCanvasWidgetDisplayListIfOwnedWithAccessibility;
     const refreshCanvasWidgetDisplayListIfOwnedWithAccessibilityImmediate = CanvasWidgetDisplayMethods.refreshCanvasWidgetDisplayListIfOwnedWithAccessibilityImmediate;
-    const beginCanvasWidgetDisplayListRefreshBatch = CanvasWidgetDisplayMethods.beginCanvasWidgetDisplayListRefreshBatch;
-    const cancelCanvasWidgetDisplayListRefreshBatch = CanvasWidgetDisplayMethods.cancelCanvasWidgetDisplayListRefreshBatch;
-    const endCanvasWidgetDisplayListRefreshBatch = CanvasWidgetDisplayMethods.endCanvasWidgetDisplayListRefreshBatch;
+    /// Begin a scoped display-list refresh batch whose accessibility
+    /// publication is held until the responding frame's post-present flush.
+    /// Every begin must pair with end, or cancel while unwinding.
+    pub const beginCanvasWidgetDisplayListRefreshBatch = CanvasWidgetDisplayMethods.beginCanvasWidgetDisplayListRefreshBatch;
+    /// Abandon a begun batch without publishing its queued refreshes.
+    pub const cancelCanvasWidgetDisplayListRefreshBatch = CanvasWidgetDisplayMethods.cancelCanvasWidgetDisplayListRefreshBatch;
+    /// Flush queued display-list work while keeping accessibility deferred
+    /// until the responding frame presents (or synchronously when no frame is
+    /// in flight).
+    pub const endCanvasWidgetDisplayListRefreshBatch = CanvasWidgetDisplayMethods.endCanvasWidgetDisplayListRefreshBatch;
     const advanceCanvasWidgetKineticScrollForFrame = CanvasWidgetDisplayMethods.advanceCanvasWidgetKineticScrollForFrame;
     const scheduleCanvasWidgetToggleAnimation = CanvasWidgetDisplayMethods.scheduleCanvasWidgetToggleAnimation;
     const publishCanvasWidgetAccessibility = CanvasWidgetDisplayMethods.publishCanvasWidgetAccessibility;
@@ -1253,6 +1277,10 @@ pub const testing = struct {
         return runtime.canvasFrameScratchStorage();
     }
 
+    /// By POINTER, deliberately: a `RuntimeView` is multiple megabytes
+    /// of retained frame storage (a terminal's cell grid alone is 640
+    /// KB), so taking one by value copies the whole thing onto the
+    /// caller's stack and overflows a test thread.
     pub fn runtimeViewInfo(view: anytype) platform.ViewInfo {
         return view.info();
     }

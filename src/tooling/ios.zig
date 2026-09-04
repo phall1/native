@@ -31,9 +31,11 @@ const toolchain = @import("toolchain.zig");
 /// `ios_host` module (src/platform/ios/files.zig).
 pub const host_source = @import("ios_host").uikit_host_m;
 pub const host_header = @import("ios_host").native_sdk_app_h;
+pub const host_image_fit_header = @import("ios_host").apple_image_fit_h;
 
 pub const host_source_name = "uikit_host.m";
 pub const host_header_name = "native_sdk_app.h";
+pub const host_image_fit_header_name = "apple_image_fit.h";
 
 pub const deployment_target = "15.0";
 
@@ -54,6 +56,7 @@ pub fn writeHostSources(io: std.Io, dir_path: []const u8) !void {
     defer dir.close(io);
     try dir.writeFile(io, .{ .sub_path = host_source_name, .data = host_source });
     try dir.writeFile(io, .{ .sub_path = host_header_name, .data = host_header });
+    try dir.writeFile(io, .{ .sub_path = host_image_fit_header_name, .data = host_image_fit_header });
 }
 
 /// The iOS bundle identifier for an app.zon `id`: underscores map to
@@ -213,6 +216,7 @@ pub fn buildEmbedLib(allocator: std.mem.Allocator, io: std.Io, app_name: []const
         build_file = try buildgraph.ensureGeneratedBuild(allocator, io, ".", .{
             .app_name = app_name,
             .framework_root = framework_root,
+            .manifest_name = manifest_tool.defaultPath(io) orelse "app.json",
         });
         try argv.appendSlice(allocator, &.{ "--build-file", build_file.? });
     }
@@ -259,15 +263,15 @@ pub const DevOptions = struct {
 /// directory through an Io the desktop runner supplies, and the embed
 /// host supplies neither — edit + rerun is the loop today.
 pub fn runDev(allocator: std.mem.Allocator, io: std.Io, options: DevOptions) !void {
-    if (!buildgraph.fileExists(io, "app.zon")) {
+    const manifest_path = manifest_tool.defaultPath(io) orelse {
         std.debug.print(
-            \\no app.zon here — `native dev --target ios` runs inside an app directory
+            \\no app.json or app.zon here — `native dev --target ios` runs inside an app directory
             \\(or pass one: `native dev path/to/app --target ios`). Start one with `native init`.
             \\
         , .{});
         return error.MissingManifest;
-    }
-    const metadata = try manifest_tool.readMetadata(allocator, io, "app.zon");
+    };
+    const metadata = try manifest_tool.readMetadata(allocator, io, manifest_path);
     const bundle_id = try bundleIdAlloc(allocator, metadata.id);
     defer allocator.free(bundle_id);
 

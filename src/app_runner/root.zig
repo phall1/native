@@ -3,8 +3,17 @@ const build_options = @import("build_options");
 const native_sdk = @import("native_sdk");
 const app_manifest = @import("app_manifest_zon");
 const built_relational_migrations = @import("relational_migrations");
+const window_placement = @import("window_placement.zig");
+const manifest_commands = if (@hasField(@TypeOf(app_manifest), "commands")) app_manifest.commands else .{};
 const manifest_shortcuts = if (@hasField(@TypeOf(app_manifest), "shortcuts")) app_manifest.shortcuts else .{};
+const manifest_menus = if (@hasField(@TypeOf(app_manifest), "menus")) app_manifest.menus else .{};
 const manifest_windows = if (@hasField(@TypeOf(app_manifest), "windows")) app_manifest.windows else .{};
+
+fn manifestImagePixelBudget() usize {
+    if (comptime !@hasField(@TypeOf(app_manifest), "images")) return native_sdk.max_registered_canvas_image_pixel_bytes;
+    if (comptime !@hasField(@TypeOf(app_manifest.images), "max_image_pixel_bytes")) return native_sdk.max_registered_canvas_image_pixel_bytes;
+    return app_manifest.images.max_image_pixel_bytes;
+}
 
 pub const app_assets = @import("app_assets.zig");
 
@@ -49,11 +58,14 @@ pub const RunOptions = struct {
     icon_path: []const u8 = "assets/icon.png",
     default_frame: native_sdk.geometry.RectF = native_sdk.geometry.RectF.init(0, 0, 1100, 760),
     restore_state: bool = true,
+    restore_policy: native_sdk.WindowRestorePolicy = .clamp_to_visible_screen,
+    initial_placement: native_sdk.WindowInitialPlacement = .default,
     bridge: ?native_sdk.BridgeDispatcher = null,
     builtin_bridge: native_sdk.BridgePolicy = .{},
     js_window_api: bool = false,
     security: native_sdk.SecurityPolicy = .{},
-    menus: []const native_sdk.Menu = &.{},
+    commands: ?[]const native_sdk.Command = null,
+    menus: ?[]const native_sdk.Menu = null,
     shortcuts: ?[]const native_sdk.Shortcut = null,
     /// Filled by `runWithOptions` from the manifest capability. App entry
     /// points do not set this themselves; the field only carries the owned
@@ -89,6 +101,8 @@ pub const RunOptions = struct {
                 .title = self.window_title,
                 .default_frame = self.default_frame,
                 .restore_state = self.restore_state,
+                .restore_policy = self.restore_policy,
+                .initial_placement = self.initial_placement,
             },
         };
         const windows = manifestWindowOptions(buffers);
@@ -104,8 +118,12 @@ pub const RunOptions = struct {
             // a canvas-first startup window is created ordered-out and
             // shown after its first canvas frame presents, so launch
             // never flashes a blank window.
+            info.main_window.default_frame = manifestShellStartupFrame(info.main_window.default_frame);
+            info.main_window.restore_state = manifestShellStartupRestoreState(info.main_window.restore_state);
             info.main_window.titlebar = manifestShellStartupTitlebar();
             info.main_window.resizable = manifestShellStartupResizable();
+            info.main_window.restore_policy = manifestShellStartupRestorePolicy(info.main_window.restore_policy);
+            info.main_window.initial_placement = manifestShellStartupInitialPlacement(info.main_window.initial_placement);
             info.main_window.show = manifestShellStartupShowMode();
             info.main_window.transparent = manifestShellStartupBool("transparent", false);
             info.main_window.always_on_top = manifestShellStartupBool("always_on_top", false);
@@ -126,6 +144,72 @@ pub const RunOptions = struct {
 
     fn resolvedShortcuts(self: RunOptions, storage: *ShortcutStorage) []const native_sdk.Shortcut {
         return self.shortcuts orelse storage.fromManifest();
+    }
+
+    fn resolvedCommands(self: RunOptions, storage: *CommandStorage) []const native_sdk.Command {
+        return self.commands orelse storage.fromManifest();
+    }
+
+    fn resolvedMenus(self: RunOptions, storage: *MenuStorage) []const native_sdk.Menu {
+        return self.menus orelse storage.fromManifest();
+    }
+};
+
+const CommandStorage = struct {
+    commands: [native_sdk.app_manifest.max_commands]native_sdk.Command = undefined,
+
+    fn fromManifest(self: *CommandStorage) []const native_sdk.Command {
+        comptime {
+            if (manifest_commands.len > native_sdk.app_manifest.max_commands) {
+                @compileError("app.zon defines too many commands");
+            }
+        }
+
+        inline for (manifest_commands, 0..) |command, index| {
+            self.commands[index] = .{
+                .id = command.id,
+                .title = if (@hasField(@TypeOf(command), "title")) command.title else "",
+                .enabled = if (@hasField(@TypeOf(command), "enabled")) command.enabled else true,
+                .checked = if (@hasField(@TypeOf(command), "checked")) command.checked else false,
+            };
+        }
+        return self.commands[0..manifest_commands.len];
+    }
+};
+
+const MenuStorage = struct {
+    menus: [native_sdk.platform.max_menus]native_sdk.Menu = undefined,
+    items: [native_sdk.platform.max_menu_items]native_sdk.MenuItem = undefined,
+
+    fn fromManifest(self: *MenuStorage) []const native_sdk.Menu {
+        comptime {
+            if (manifest_menus.len > native_sdk.platform.max_menus) {
+                @compileError("app.zon defines too many menus");
+            }
+            var item_count: usize = 0;
+            for (manifest_menus) |menu| {
+                const items = if (@hasField(@TypeOf(menu), "items")) menu.items else .{};
+                item_count += items.len;
+            }
+            if (item_count > native_sdk.platform.max_menu_items) {
+                @compileError("app.zon defines too many menu items");
+            }
+        }
+
+        var item_index: usize = 0;
+        inline for (manifest_menus, 0..) |menu, menu_index| {
+            const items = if (@hasField(@TypeOf(menu), "items")) menu.items else .{};
+            const first_item = item_index;
+            inline for (items) |item| {
+                self.items[item_index] = menuItem(item);
+                item_index += 1;
+            }
+            self.menus[menu_index] = .{
+                .title = menu.title,
+                .items = self.items[first_item..item_index],
+            };
+        }
+        return self.menus[0..manifest_menus.len];
     }
 };
 
@@ -177,6 +261,7 @@ fn manifestWindow(comptime window: anytype, comptime index: usize) native_sdk.Wi
         .resizable = windowBool(window, "resizable", true),
         .restore_state = windowBool(window, "restore_state", true),
         .restore_policy = windowRestorePolicy(window),
+        .initial_placement = if (windowHasExplicitOrigin(window)) .explicit else .default,
         .titlebar = windowTitlebarStyle(window),
         .show = if (windowBool(window, "initially_hidden", false)) .hidden else .immediate,
         .transparent = windowBool(window, "transparent", false),
@@ -412,6 +497,60 @@ fn windowRestorePolicy(comptime window: anytype) native_sdk.WindowRestorePolicy 
     @compileError("unknown app.zon window restore_policy");
 }
 
+fn windowHasExplicitOrigin(comptime window: anytype) bool {
+    return @hasField(@TypeOf(window), "x") or @hasField(@TypeOf(window), "y");
+}
+
+/// The host creates the first scene window before the scene loads, so its
+/// authored frame must ride AppInfo with the other creation-time options.
+/// Omitted fields preserve RunOptions' direct-SDK fallback independently.
+fn manifestShellStartupFrame(fallback: native_sdk.geometry.RectF) native_sdk.geometry.RectF {
+    if (comptime !@hasField(@TypeOf(app_manifest), "shell")) return fallback;
+    const shell = app_manifest.shell;
+    if (comptime !@hasField(@TypeOf(shell), "windows")) return fallback;
+    if (comptime shell.windows.len == 0) return fallback;
+    const window = shell.windows[0];
+    return native_sdk.geometry.RectF.init(
+        windowFloatFallback(window, "x", fallback.x),
+        windowFloatFallback(window, "y", fallback.y),
+        windowFloatFallback(window, "width", fallback.width),
+        windowFloatFallback(window, "height", fallback.height),
+    );
+}
+
+fn windowFloatFallback(comptime window: anytype, comptime field: []const u8, fallback: f32) f32 {
+    if (comptime @hasField(@TypeOf(window), field)) return @field(window, field);
+    return fallback;
+}
+
+fn manifestShellStartupRestoreState(fallback: bool) bool {
+    if (comptime !@hasField(@TypeOf(app_manifest), "shell")) return fallback;
+    const shell = app_manifest.shell;
+    if (comptime !@hasField(@TypeOf(shell), "windows")) return fallback;
+    if (comptime shell.windows.len == 0) return fallback;
+    const window = shell.windows[0];
+    if (comptime @hasField(@TypeOf(window), "restore_state")) return window.restore_state;
+    return fallback;
+}
+
+fn manifestShellStartupRestorePolicy(fallback: native_sdk.WindowRestorePolicy) native_sdk.WindowRestorePolicy {
+    if (comptime !@hasField(@TypeOf(app_manifest), "shell")) return fallback;
+    const shell = app_manifest.shell;
+    if (comptime !@hasField(@TypeOf(shell), "windows")) return fallback;
+    if (comptime shell.windows.len == 0) return fallback;
+    const window = shell.windows[0];
+    const declared: ?native_sdk.WindowRestorePolicy = if (comptime @hasField(@TypeOf(window), "restore_policy")) windowRestorePolicy(window) else null;
+    return window_placement.applyShellRestorePolicy(fallback, declared);
+}
+
+fn manifestShellStartupInitialPlacement(fallback: native_sdk.WindowInitialPlacement) native_sdk.WindowInitialPlacement {
+    if (comptime !@hasField(@TypeOf(app_manifest), "shell")) return fallback;
+    const shell = app_manifest.shell;
+    if (comptime !@hasField(@TypeOf(shell), "windows")) return fallback;
+    if (comptime shell.windows.len == 0) return fallback;
+    return window_placement.applyShellInitialPlacement(fallback, windowHasExplicitOrigin(shell.windows[0]));
+}
+
 /// What the window's close affordance does, from app.zon. `.hide` is
 /// validated against the TARGET platform at comptime: a host with no
 /// affordance to bring a hidden window back (GTK has no status item;
@@ -486,6 +625,18 @@ fn manifestDeclaresCredentials() bool {
         if (comptime std.mem.eql(u8, name, "credentials")) return true;
     }
     return false;
+}
+
+fn menuItem(comptime item: anytype) native_sdk.MenuItem {
+    return .{
+        .label = if (@hasField(@TypeOf(item), "label")) item.label else "",
+        .command = if (@hasField(@TypeOf(item), "command")) item.command else "",
+        .key = if (@hasField(@TypeOf(item), "key")) item.key else "",
+        .modifiers = shortcutModifiers(item),
+        .separator = if (@hasField(@TypeOf(item), "separator")) item.separator else false,
+        .enabled = if (@hasField(@TypeOf(item), "enabled")) item.enabled else true,
+        .checked = if (@hasField(@TypeOf(item), "checked")) item.checked else false,
+    };
 }
 
 fn shortcutModifiers(comptime shortcut: anytype) native_sdk.ShortcutModifiers {
@@ -627,6 +778,10 @@ fn runNull(app: native_sdk.App, options: RunOptions, init: std.process.Init) !vo
     runtime_trace_sink = filtered_trace_sink.sink();
     var shortcut_storage: ShortcutStorage = .{};
     const shortcuts = options.resolvedShortcuts(&shortcut_storage);
+    var menu_storage: MenuStorage = .{};
+    const menus = options.resolvedMenus(&menu_storage);
+    var command_storage: CommandStorage = .{};
+    const commands = options.resolvedCommands(&command_storage);
     // The Runtime is multi-megabyte; Linux's default 8 MB main-thread
     // stack overflows on a stack instance, so construct it on the heap.
     const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
@@ -638,6 +793,7 @@ fn runNull(app: native_sdk.App, options: RunOptions, init: std.process.Init) !vo
     defer runtime.deinit();
     native_sdk.Runtime.initAt(runtime, .{
         .platform = null_platform.platform(),
+        .max_image_pixel_bytes = manifestImagePixelBudget(),
         .trace_sink = runtime_trace_sink,
         .log_path = if (log_setup) |setup| setup.paths.log_file else null,
         .bridge = options.bridge,
@@ -646,7 +802,8 @@ fn runNull(app: native_sdk.App, options: RunOptions, init: std.process.Init) !vo
         .web_layer = webLayerEnabled(),
         .gpu_surface_frame_diagnostics = false,
         .security = options.security,
-        .menus = options.menus,
+        .commands = commands,
+        .menus = menus,
         .shortcuts = shortcuts,
         .automation = if (build_options.automation) native_sdk.automation.Server.init(init.io, ".zig-cache/native-sdk-automation", app_info.resolvedWindowTitle()) else null,
         .window_state_store = store,
@@ -695,6 +852,10 @@ fn runMacos(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
     runtime_trace_sink = filtered_trace_sink.sink();
     var shortcut_storage: ShortcutStorage = .{};
     const shortcuts = options.resolvedShortcuts(&shortcut_storage);
+    var menu_storage: MenuStorage = .{};
+    const menus = options.resolvedMenus(&menu_storage);
+    var command_storage: CommandStorage = .{};
+    const commands = options.resolvedCommands(&command_storage);
     // The Runtime is multi-megabyte; Linux's default 8 MB main-thread
     // stack overflows on a stack instance, so construct it on the heap.
     const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
@@ -706,6 +867,7 @@ fn runMacos(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
     defer runtime.deinit();
     native_sdk.Runtime.initAt(runtime, .{
         .platform = mac_platform.platform(),
+        .max_image_pixel_bytes = manifestImagePixelBudget(),
         .trace_sink = runtime_trace_sink,
         .log_path = if (log_setup) |setup| setup.paths.log_file else null,
         .bridge = options.bridge,
@@ -714,7 +876,8 @@ fn runMacos(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
         .web_layer = webLayerEnabled(),
         .gpu_surface_frame_diagnostics = false,
         .security = options.security,
-        .menus = options.menus,
+        .commands = commands,
+        .menus = menus,
         .shortcuts = shortcuts,
         .automation = if (build_options.automation) native_sdk.automation.Server.init(init.io, ".zig-cache/native-sdk-automation", app_info.resolvedWindowTitle()) else null,
         .window_state_store = store,
@@ -760,6 +923,10 @@ fn runLinux(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
     runtime_trace_sink = filtered_trace_sink.sink();
     var shortcut_storage: ShortcutStorage = .{};
     const shortcuts = options.resolvedShortcuts(&shortcut_storage);
+    var menu_storage: MenuStorage = .{};
+    const menus = options.resolvedMenus(&menu_storage);
+    var command_storage: CommandStorage = .{};
+    const commands = options.resolvedCommands(&command_storage);
     // The Runtime is multi-megabyte; Linux's default 8 MB main-thread
     // stack overflows on a stack instance, so construct it on the heap.
     const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
@@ -771,6 +938,7 @@ fn runLinux(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
     defer runtime.deinit();
     native_sdk.Runtime.initAt(runtime, .{
         .platform = linux_platform.platform(),
+        .max_image_pixel_bytes = manifestImagePixelBudget(),
         .trace_sink = runtime_trace_sink,
         .log_path = if (log_setup) |setup| setup.paths.log_file else null,
         .bridge = options.bridge,
@@ -779,7 +947,8 @@ fn runLinux(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
         .web_layer = webLayerEnabled(),
         .gpu_surface_frame_diagnostics = false,
         .security = options.security,
-        .menus = options.menus,
+        .commands = commands,
+        .menus = menus,
         .shortcuts = shortcuts,
         .automation = if (build_options.automation) native_sdk.automation.Server.init(init.io, ".zig-cache/native-sdk-automation", app_info.resolvedWindowTitle()) else null,
         .window_state_store = store,
@@ -824,6 +993,10 @@ fn runWindows(app: native_sdk.App, options: RunOptions, init: std.process.Init) 
     runtime_trace_sink = filtered_trace_sink.sink();
     var shortcut_storage: ShortcutStorage = .{};
     const shortcuts = options.resolvedShortcuts(&shortcut_storage);
+    var menu_storage: MenuStorage = .{};
+    const menus = options.resolvedMenus(&menu_storage);
+    var command_storage: CommandStorage = .{};
+    const commands = options.resolvedCommands(&command_storage);
     // The Runtime is multi-megabyte; Linux's default 8 MB main-thread
     // stack overflows on a stack instance, so construct it on the heap.
     const runtime = try std.heap.page_allocator.create(native_sdk.Runtime);
@@ -835,6 +1008,7 @@ fn runWindows(app: native_sdk.App, options: RunOptions, init: std.process.Init) 
     defer runtime.deinit();
     native_sdk.Runtime.initAt(runtime, .{
         .platform = windows_platform.platform(),
+        .max_image_pixel_bytes = manifestImagePixelBudget(),
         .trace_sink = runtime_trace_sink,
         .log_path = if (log_setup) |setup| setup.paths.log_file else null,
         .bridge = options.bridge,
@@ -843,7 +1017,8 @@ fn runWindows(app: native_sdk.App, options: RunOptions, init: std.process.Init) 
         .web_layer = webLayerEnabled(),
         .gpu_surface_frame_diagnostics = false,
         .security = options.security,
-        .menus = options.menus,
+        .commands = commands,
+        .menus = menus,
         .shortcuts = shortcuts,
         .automation = if (build_options.automation) native_sdk.automation.Server.init(init.io, ".zig-cache/native-sdk-automation", app_info.resolvedWindowTitle()) else null,
         .window_state_store = store,
@@ -984,18 +1159,27 @@ fn runSessionReplay(app: native_sdk.App, options: RunOptions, init: std.process.
     // (and disarm the producer wake bindings) before the runtime
     // storage itself goes.
     defer runtime.deinit();
+    var shortcut_storage: ShortcutStorage = .{};
+    const shortcuts = options.resolvedShortcuts(&shortcut_storage);
+    var menu_storage: MenuStorage = .{};
+    const menus = options.resolvedMenus(&menu_storage);
+    var command_storage: CommandStorage = .{};
+    const commands = options.resolvedCommands(&command_storage);
     // Bridge policy and security must match what the recording ran
     // under (they gate replayed bridge_message dispatch); automation,
     // window-state restore, and tracing stay off — replay consumes only
     // the journal and restores nothing.
     native_sdk.Runtime.initAt(runtime, .{
         .platform = replay_platform,
+        .max_image_pixel_bytes = manifestImagePixelBudget(),
         .bridge = options.bridge,
         .builtin_bridge = options.builtin_bridge,
         .js_window_api = options.js_window_api,
         .web_layer = webLayerEnabled(),
         .security = options.security,
-        .menus = options.menus,
+        .commands = commands,
+        .menus = menus,
+        .shortcuts = shortcuts,
     });
 
     const verify = if (init.environ_map.get("NATIVE_SDK_SESSION_VERIFY")) |value|
@@ -1067,6 +1251,99 @@ fn webEngine() native_sdk.WebEngine {
     return .system;
 }
 
+test "RunOptions resolves manifest commands menus and shortcuts" {
+    const options: RunOptions = .{
+        .app_name = "runner-fixture",
+        .bundle_id = "dev.native_sdk.runner_fixture",
+    };
+
+    var command_storage: CommandStorage = .{};
+    const commands = options.resolvedCommands(&command_storage);
+    try std.testing.expectEqual(@as(usize, 2), commands.len);
+    try std.testing.expectEqualStrings("app.refresh", commands[0].id);
+    try std.testing.expectEqualStrings("Refresh", commands[0].title);
+    try std.testing.expect(!commands[0].enabled);
+    try std.testing.expect(commands[0].checked);
+    try std.testing.expectEqualStrings("app.defaults", commands[1].id);
+    try std.testing.expectEqualStrings("", commands[1].title);
+    try std.testing.expect(commands[1].enabled);
+    try std.testing.expect(!commands[1].checked);
+
+    var menu_storage: MenuStorage = .{};
+    const menus = options.resolvedMenus(&menu_storage);
+    try std.testing.expectEqual(@as(usize, 2), menus.len);
+    try std.testing.expectEqualStrings("View", menus[0].title);
+    try std.testing.expectEqual(@as(usize, 3), menus[0].items.len);
+    try std.testing.expectEqualStrings("Refresh", menus[0].items[0].label);
+    try std.testing.expectEqualStrings("app.refresh", menus[0].items[0].command);
+    try std.testing.expectEqualStrings("r", menus[0].items[0].key);
+    try std.testing.expect(menus[0].items[0].modifiers.option);
+    try std.testing.expect(menus[0].items[0].modifiers.shift);
+    try std.testing.expect(!menus[0].items[0].enabled);
+    try std.testing.expect(menus[0].items[0].checked);
+    try std.testing.expect(menus[0].items[1].separator);
+    try std.testing.expectEqualStrings("Defaults", menus[0].items[2].label);
+    try std.testing.expect(menus[0].items[2].enabled);
+    try std.testing.expect(!menus[0].items[2].checked);
+    try std.testing.expectEqualStrings("Help", menus[1].title);
+    try std.testing.expectEqual(@as(usize, 0), menus[1].items.len);
+
+    var shortcut_storage: ShortcutStorage = .{};
+    const shortcuts = options.resolvedShortcuts(&shortcut_storage);
+    try std.testing.expectEqual(@as(usize, 1), shortcuts.len);
+    try std.testing.expectEqualStrings("app.refresh", shortcuts[0].id);
+    try std.testing.expectEqualStrings("r", shortcuts[0].key);
+    try std.testing.expect(shortcuts[0].modifiers.primary);
+}
+
+test "RunOptions explicit command menu and shortcut slices override manifest values" {
+    const override_commands = [_]native_sdk.Command{
+        .{ .id = "override.command", .title = "Override Command" },
+    };
+    const override_items = [_]native_sdk.MenuItem{
+        .{ .label = "Override Item", .command = "override.command" },
+    };
+    const override_menus = [_]native_sdk.Menu{
+        .{ .title = "Override Menu", .items = &override_items },
+    };
+    const override_shortcuts = [_]native_sdk.Shortcut{
+        .{ .id = "override.command", .key = "o", .modifiers = .{ .primary = true } },
+    };
+    const options: RunOptions = .{
+        .app_name = "runner-fixture",
+        .bundle_id = "dev.native_sdk.runner_fixture",
+        .commands = &override_commands,
+        .menus = &override_menus,
+        .shortcuts = &override_shortcuts,
+    };
+
+    var command_storage: CommandStorage = .{};
+    const commands = options.resolvedCommands(&command_storage);
+    try std.testing.expectEqual(@as(usize, 1), commands.len);
+    try std.testing.expectEqualStrings("override.command", commands[0].id);
+
+    var menu_storage: MenuStorage = .{};
+    const menus = options.resolvedMenus(&menu_storage);
+    try std.testing.expectEqual(@as(usize, 1), menus.len);
+    try std.testing.expectEqualStrings("Override Menu", menus[0].title);
+
+    var shortcut_storage: ShortcutStorage = .{};
+    const shortcuts = options.resolvedShortcuts(&shortcut_storage);
+    try std.testing.expectEqual(@as(usize, 1), shortcuts.len);
+    try std.testing.expectEqualStrings("override.command", shortcuts[0].id);
+
+    const empty_options: RunOptions = .{
+        .app_name = "runner-fixture",
+        .bundle_id = "dev.native_sdk.runner_fixture",
+        .commands = &.{},
+        .menus = &.{},
+        .shortcuts = &.{},
+    };
+    try std.testing.expectEqual(@as(usize, 0), empty_options.resolvedCommands(&command_storage).len);
+    try std.testing.expectEqual(@as(usize, 0), empty_options.resolvedMenus(&menu_storage).len);
+    try std.testing.expectEqual(@as(usize, 0), empty_options.resolvedShortcuts(&shortcut_storage).len);
+}
+
 const StateBuffers = struct {
     state_dir: [1024]u8 = undefined,
     file_path: [1200]u8 = undefined,
@@ -1081,15 +1358,15 @@ fn prepareStateStore(io: std.Io, env_map: *std.process.Environ.Map, app_info: *n
         const restored_windows = buffers.restored_windows[0..app_info.windows.len];
         for (restored_windows, 0..) |*window, index| {
             if (!window.restore_state) continue;
-            if (store.loadWindow(window.label, &buffers.read) catch null) |saved| {
-                window.default_frame = saved.frame;
-                if (index == 0) app_info.main_window.default_frame = saved.frame;
+            if (window_placement.applySavedWindow(window, store.loadWindow(window.label, &buffers.read) catch null)) {
+                if (index == 0) {
+                    app_info.main_window.default_frame = window.default_frame;
+                    app_info.main_window.initial_placement = .restored;
+                }
             }
         }
     } else if (app_info.main_window.restore_state) {
-        if (store.loadWindow(app_info.main_window.label, &buffers.read) catch null) |saved| {
-            app_info.main_window.default_frame = saved.frame;
-        }
+        _ = window_placement.applySavedWindow(&app_info.main_window, store.loadWindow(app_info.main_window.label, &buffers.read) catch null);
     }
     return store;
 }

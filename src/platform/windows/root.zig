@@ -135,13 +135,13 @@ const shortcut_modifier_control: u32 = 1 << 2;
 const shortcut_modifier_option: u32 = 1 << 3;
 const shortcut_modifier_shift: u32 = 1 << 4;
 
-extern fn native_sdk_windows_create(app_name: [*]const u8, app_name_len: usize, window_title: [*]const u8, window_title_len: usize, bundle_id: [*]const u8, bundle_id_len: usize, icon_path: [*]const u8, icon_path_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int, resizable: c_int, titlebar_style: c_int, min_width: f64, min_height: f64, show_policy: c_int, window_flags: u32) ?*WindowsHost;
+extern fn native_sdk_windows_create(app_name: [*]const u8, app_name_len: usize, window_title: [*]const u8, window_title_len: usize, bundle_id: [*]const u8, bundle_id_len: usize, icon_path: [*]const u8, icon_path_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int, initial_placement: c_int, restore_policy: c_int, resizable: c_int, titlebar_style: c_int, min_width: f64, min_height: f64, show_policy: c_int, window_flags: u32) ?*WindowsHost;
 extern fn native_sdk_windows_destroy(host: *WindowsHost) void;
 extern fn native_sdk_windows_run(host: *WindowsHost, callback: WindowsCallback, context: ?*anyopaque) void;
 extern fn native_sdk_windows_stop(host: *WindowsHost) void;
 extern fn native_sdk_windows_wake(host: *WindowsHost) void;
 extern fn native_sdk_windows_request_frame(host: *WindowsHost) void;
-extern fn native_sdk_windows_decode_image(bytes: [*]const u8, bytes_len: usize, pixels: [*]u8, pixels_len: usize, out_width: *usize, out_height: *usize) c_int;
+extern fn native_sdk_windows_decode_image(bytes: [*]const u8, bytes_len: usize, pixels: [*]u8, pixels_len: usize, max_pixels: usize, out_width: *usize, out_height: *usize) c_int;
 extern fn native_sdk_windows_load_webview(host: *WindowsHost, source: [*]const u8, source_len: usize, source_kind: c_int, asset_root: [*]const u8, asset_root_len: usize, asset_entry: [*]const u8, asset_entry_len: usize, asset_origin: [*]const u8, asset_origin_len: usize, spa_fallback: c_int) void;
 extern fn native_sdk_windows_load_window_webview(host: *WindowsHost, window_id: u64, source: [*]const u8, source_len: usize, source_kind: c_int, asset_root: [*]const u8, asset_root_len: usize, asset_entry: [*]const u8, asset_entry_len: usize, asset_origin: [*]const u8, asset_origin_len: usize, spa_fallback: c_int) c_int;
 extern fn native_sdk_windows_set_bridge_callback(host: *WindowsHost, callback: WindowsBridgeCallback, context: ?*anyopaque) void;
@@ -152,7 +152,7 @@ extern fn native_sdk_windows_emit_window_event(host: *WindowsHost, window_id: u6
 extern fn native_sdk_windows_set_security_policy(host: *WindowsHost, allowed_origins: [*]const u8, allowed_origins_len: usize, external_urls: [*]const u8, external_urls_len: usize, external_action: c_int) void;
 extern fn native_sdk_windows_set_menus(host: *WindowsHost, menu_titles: [*]const [*]const u8, menu_title_lens: [*]const usize, menu_count: usize, item_menu_indices: [*]const u32, item_labels: [*]const [*]const u8, item_label_lens: [*]const usize, item_commands: [*]const [*]const u8, item_command_lens: [*]const usize, item_keys: [*]const [*]const u8, item_key_lens: [*]const usize, item_modifiers: [*]const u32, item_separators: [*]const c_int, item_enabled: [*]const c_int, item_checked: [*]const c_int, item_count: usize) c_int;
 extern fn native_sdk_windows_set_shortcuts(host: *WindowsHost, ids: [*]const [*]const u8, id_lens: [*]const usize, keys: [*]const [*]const u8, key_lens: [*]const usize, modifiers: [*]const u32, count: usize) void;
-extern fn native_sdk_windows_create_window(host: *WindowsHost, window_id: u64, window_title: [*]const u8, window_title_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int, resizable: c_int, titlebar_style: c_int, min_width: f64, min_height: f64, show_policy: c_int, window_flags: u32) c_int;
+extern fn native_sdk_windows_create_window(host: *WindowsHost, window_id: u64, window_title: [*]const u8, window_title_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int, initial_placement: c_int, restore_policy: c_int, resizable: c_int, titlebar_style: c_int, min_width: f64, min_height: f64, show_policy: c_int, window_flags: u32) c_int;
 extern fn native_sdk_windows_start_window_drag(host: *WindowsHost, window_id: u64) c_int;
 extern fn native_sdk_windows_set_window_drag_regions(host: *WindowsHost, window_id: u64, label: [*]const u8, label_len: usize, rects: [*]const f64, exclusions: [*]const c_int, count: usize) c_int;
 extern fn native_sdk_windows_window_chrome(host: *WindowsHost, window_id: u64, top: *f64, left: *f64, bottom: *f64, right: *f64, buttons_x: *f64, buttons_y: *f64, buttons_width: *f64, buttons_height: *f64) c_int;
@@ -344,7 +344,7 @@ pub const WindowsPlatform = struct {
         try refuseUnsupportedTransparentWindow(window_options, false);
         const window_title = window_options.resolvedTitle(app_info.app_name);
         const frame = window_options.default_frame;
-        const host = native_sdk_windows_create(app_info.app_name.ptr, app_info.app_name.len, window_title.ptr, window_title.len, app_info.bundle_id.ptr, app_info.bundle_id.len, app_info.icon_path.ptr, app_info.icon_path.len, window_options.label.ptr, window_options.label.len, frame.x, frame.y, frame.width, frame.height, if (window_options.restore_state) 1 else 0, if (window_options.resizable) 1 else 0, titlebarStyleInt(window_options.titlebar), minSizeFloor(window_options.min_width), minSizeFloor(window_options.min_height), showModeInt(window_options.show), windowFlags(window_options)) orelse return error.CreateFailed;
+        const host = native_sdk_windows_create(app_info.app_name.ptr, app_info.app_name.len, window_title.ptr, window_title.len, app_info.bundle_id.ptr, app_info.bundle_id.len, app_info.icon_path.ptr, app_info.icon_path.len, window_options.label.ptr, window_options.label.len, frame.x, frame.y, frame.width, frame.height, if (window_options.restore_state) 1 else 0, initialPlacementInt(window_options.initial_placement), restorePolicyInt(window_options.restore_policy), if (window_options.resizable) 1 else 0, titlebarStyleInt(window_options.titlebar), minSizeFloor(window_options.min_width), minSizeFloor(window_options.min_height), showModeInt(window_options.show), windowFlags(window_options)) orelse return error.CreateFailed;
         // Packet text must use the same Geist metrics the engine planned
         // against. Register both built-in faces directly from their
         // compile-time bytes; custom application fonts keep the public
@@ -923,11 +923,11 @@ pub fn installHeadlessImageCodec(services: *platform_mod.PlatformServices) void 
 
 /// WIC-backed image decoding (PNG, JPEG, ... — every codec the OS
 /// ships) into straight-alpha RGBA8.
-fn decodeImage(context: ?*anyopaque, bytes: []const u8, buffer: []u8) anyerror!platform_mod.DecodedImage {
+fn decodeImage(context: ?*anyopaque, bytes: []const u8, buffer: []u8, max_pixels: usize) anyerror!platform_mod.DecodedImage {
     _ = context;
     var width: usize = 0;
     var height: usize = 0;
-    return switch (native_sdk_windows_decode_image(bytes.ptr, bytes.len, buffer.ptr, buffer.len, &width, &height)) {
+    return switch (native_sdk_windows_decode_image(bytes.ptr, bytes.len, buffer.ptr, buffer.len, max_pixels, &width, &height)) {
         1 => .{ .width = width, .height = height, .rgba8 = buffer[0 .. width * height * 4] },
         -1 => error.ImageTooLarge,
         else => error.ImageDecodeFailed,
@@ -940,6 +940,21 @@ fn titlebarStyleInt(style: platform_mod.WindowTitlebarStyle) c_int {
         .hidden_inset => 1,
         .hidden_inset_tall => 2,
         .chromeless => 3,
+    };
+}
+
+fn initialPlacementInt(placement: platform_mod.WindowInitialPlacement) c_int {
+    return switch (placement) {
+        .restored => 0,
+        .explicit => 1,
+        .default => 2,
+    };
+}
+
+fn restorePolicyInt(policy: platform_mod.WindowRestorePolicy) c_int {
+    return switch (policy) {
+        .clamp_to_visible_screen => 0,
+        .center_on_primary => 1,
     };
 }
 
@@ -986,7 +1001,7 @@ fn createWindow(context: ?*anyopaque, options: platform_mod.WindowOptions) anyer
     try refuseUnsupportedTransparentWindow(options, self.menus_active);
     const title = options.resolvedTitle(self.app_info.app_name);
     const frame = options.default_frame;
-    if (native_sdk_windows_create_window(self.host, options.id, title.ptr, title.len, options.label.ptr, options.label.len, frame.x, frame.y, frame.width, frame.height, if (options.restore_state) 1 else 0, if (options.resizable) 1 else 0, titlebarStyleInt(options.titlebar), minSizeFloor(options.min_width), minSizeFloor(options.min_height), showModeInt(options.show), windowFlags(options)) == 0) return error.CreateFailed;
+    if (native_sdk_windows_create_window(self.host, options.id, title.ptr, title.len, options.label.ptr, options.label.len, frame.x, frame.y, frame.width, frame.height, if (options.restore_state) 1 else 0, initialPlacementInt(options.initial_placement), restorePolicyInt(options.restore_policy), if (options.resizable) 1 else 0, titlebarStyleInt(options.titlebar), minSizeFloor(options.min_width), minSizeFloor(options.min_height), showModeInt(options.show), windowFlags(options)) == 0) return error.CreateFailed;
     applyWindowClosePolicy(self.host, options.id, options.close_policy);
     return .{
         .id = options.id,
@@ -1504,6 +1519,34 @@ fn showNotification(context: ?*anyopaque, options: platform_mod.NotificationOpti
 
 const max_tray_items: usize = 32;
 
+const TrayFallbackText = struct {
+    label: []const u8,
+    detail: []const u8,
+};
+
+/// Project a rich row onto Win32's plain label/detail menu surface. Chart
+/// captions are optional, but the accessibility label is required, so a
+/// captionless chart must still remain visible instead of becoming a blank
+/// disabled row.
+fn trayFallbackText(item: platform_mod.TrayMenuItem) TrayFallbackText {
+    if (item.metric) |metric| return .{
+        .label = metric.primary_text,
+        .detail = metric.secondary_text,
+    };
+    if (item.chart) |chart| {
+        if (chart.leading_caption.len > 0) return .{
+            .label = chart.leading_caption,
+            .detail = chart.trailing_summary,
+        };
+        if (chart.trailing_summary.len > 0) return .{
+            .label = chart.trailing_summary,
+            .detail = "",
+        };
+        return .{ .label = chart.accessibility_label, .detail = "" };
+    }
+    return .{ .label = item.label, .detail = item.detail };
+}
+
 fn createTray(context: ?*anyopaque, status_item_id: platform_mod.StatusItemId, options: platform_mod.TrayOptions) anyerror!void {
     const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
     if (status_item_id != platform_mod.primary_status_item_id) return error.UnsupportedService;
@@ -1530,7 +1573,7 @@ fn updateTrayMenu(context: ?*anyopaque, status_item_id: platform_mod.StatusItemI
     const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
     if (status_item_id != platform_mod.primary_status_item_id) return error.UnsupportedService;
     if (self.web_engine != .system) return error.UnsupportedService;
-    const count = @min(items.len, max_tray_items);
+    var count: usize = 0;
     var ids: [max_tray_items]u32 = undefined;
     var labels: [max_tray_items][*]const u8 = undefined;
     var label_lens: [max_tray_items]usize = undefined;
@@ -1548,23 +1591,44 @@ fn updateTrayMenu(context: ?*anyopaque, status_item_id: platform_mod.StatusItemI
     // returning). Doubling covers the all-ampersands worst case.
     var label_pool: [max_tray_items * (platform_mod.max_tray_item_label_bytes + platform_mod.max_tray_item_detail_bytes) * 2]u8 = undefined;
     var pool_used: usize = 0;
-    for (items[0..count], 0..) |item, index| {
-        const label = escapeMenuLabelAmpersands(item.label, &label_pool, &pool_used);
-        const detail = escapeMenuLabelAmpersands(item.detail, &label_pool, &pool_used);
-        ids[index] = item.id;
-        labels[index] = label.ptr;
-        label_lens[index] = label.len;
-        separators[index] = if (item.separator) 1 else 0;
+    for (items) |item| {
+        if (item.segmented) |segmented| {
+            for (segmented.options) |option| {
+                const label = escapeMenuLabelAmpersands(option.label, &label_pool, &pool_used);
+                ids[count] = option.id;
+                labels[count] = label.ptr;
+                label_lens[count] = label.len;
+                separators[count] = 0;
+                enabled_flags[count] = if (option.enabled) 1 else 0;
+                const selected_detail = if (option.selected) "Selected" else "";
+                details[count] = selected_detail.ptr;
+                detail_lens[count] = selected_detail.len;
+                roles[count] = @intFromEnum(platform_mod.TrayItemRole.command);
+                keys[count] = "".ptr;
+                key_lens[count] = 0;
+                modifiers[count] = 0;
+                count += 1;
+            }
+            continue;
+        }
+        const fallback = trayFallbackText(item);
+        const label = escapeMenuLabelAmpersands(fallback.label, &label_pool, &pool_used);
+        const detail = escapeMenuLabelAmpersands(fallback.detail, &label_pool, &pool_used);
+        ids[count] = item.id;
+        labels[count] = label.ptr;
+        label_lens[count] = label.len;
+        separators[count] = if (item.separator) 1 else 0;
         // Windows has no custom status-menu row seam. Preserve semantic
         // readouts as visible detail text, while only command/agent rows can
         // become actions.
-        enabled_flags[index] = if (item.enabled and (item.role == .command or item.role == .agent)) 1 else 0;
-        details[index] = detail.ptr;
-        detail_lens[index] = detail.len;
-        roles[index] = @intFromEnum(item.role);
-        keys[index] = item.key.ptr;
-        key_lens[index] = item.key.len;
-        modifiers[index] = shortcutModifierFlags(item.modifiers);
+        enabled_flags[count] = if (item.enabled and (item.role == .command or item.role == .agent)) 1 else 0;
+        details[count] = detail.ptr;
+        detail_lens[count] = detail.len;
+        roles[count] = @intFromEnum(item.role);
+        keys[count] = item.key.ptr;
+        key_lens[count] = item.key.len;
+        modifiers[count] = shortcutModifierFlags(item.modifiers);
+        count += 1;
     }
     if (native_sdk_windows_update_tray_menu(self.host, &ids, &labels, &label_lens, &separators, &enabled_flags, &details, &detail_lens, &roles, &keys, &key_lens, &modifiers, count) == 0) return error.UnsupportedService;
 }
@@ -2166,6 +2230,30 @@ test "windows tray carries lifecycle commands rich rows and key equivalents into
     try std.testing.expect(std.mem.indexOf(u8, host_source, "emitTrayActionForCommandId(host, displayed_items, command_id);") != null);
     try std.testing.expect(std.mem.indexOf(u8, host_source, "return emitTrayActionForCommandId(host, host->tray_items, item.command_id);") != null);
     try std.testing.expect(std.mem.indexOf(u8, host_source, "tray_event == NIN_SELECT || tray_event == NIN_KEYSELECT || tray_event == WM_LBUTTONUP") != null);
+}
+
+test "windows chart fallback uses accessibility text when captions are absent" {
+    const values = [_]f32{0.5};
+    const fallback = trayFallbackText(.{
+        .role = .chart,
+        .chart = .{
+            .values = &values,
+            .accessibility_label = "CPU history, 50 percent",
+        },
+    });
+    try std.testing.expectEqualStrings("CPU history, 50 percent", fallback.label);
+    try std.testing.expectEqualStrings("", fallback.detail);
+
+    const summarized = trayFallbackText(.{
+        .role = .chart,
+        .chart = .{
+            .values = &values,
+            .trailing_summary = "50%",
+            .accessibility_label = "CPU history, 50 percent",
+        },
+    });
+    try std.testing.expectEqualStrings("50%", summarized.label);
+    try std.testing.expectEqualStrings("", summarized.detail);
 }
 
 test "windows refuses a tray-less .hide main window at platform init instead of stranding it hidden" {

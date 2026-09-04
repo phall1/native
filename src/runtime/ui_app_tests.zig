@@ -47,6 +47,18 @@ fn counterThemePack(model: *const CounterModel) canvas.ThemePack {
     return if (model.count == 0) .house else .geist;
 }
 
+fn counterThemeState(model: *const CounterModel) CounterApp.ThemeState {
+    return switch (model.count) {
+        0 => .{ .color_scheme = .dark },
+        1 => .{ .pack = .geist, .color_scheme = .system, .accent = canvas.Color.rgb8(0, 0x78, 0x6f) },
+        else => .{ .pack = .house, .color_scheme = .light, .accent = canvas.Color.rgb8(0xdf, 0x26, 0x70) },
+    };
+}
+
+fn invalidCounterThemeState(_: *const CounterModel) CounterApp.ThemeState {
+    return .{ .invalid_accent = "pink" };
+}
+
 const counter_views = [_]app_manifest.ShellView{
     .{ .label = canvas_label, .kind = .gpu_surface, .fill = true, .gpu_backend = .metal },
 };
@@ -67,6 +79,43 @@ fn counterOptions() CounterApp.Options {
         .update = counterUpdate,
         .view = counterView,
         .on_command = counterCommand,
+    };
+}
+
+const RadioModel = struct {
+    choice: u8 = 0,
+    change_count: u32 = 0,
+};
+
+const RadioMsg = union(enum) {
+    choose_first,
+    choose_second,
+};
+
+const RadioApp = ui_app_model.UiApp(RadioModel, RadioMsg);
+
+fn radioUpdate(model: *RadioModel, msg: RadioMsg) void {
+    model.choice = switch (msg) {
+        .choose_first => 0,
+        .choose_second => 1,
+    };
+    model.change_count += 1;
+}
+
+fn radioView(ui: *RadioApp.Ui, model: *const RadioModel) RadioApp.Ui.Node {
+    return ui.el(.radio_group, .{ .semantics = .{ .label = "Plan" } }, .{
+        ui.el(.radio, .{ .text = "Free", .checked = model.choice == 0, .on_change = .choose_first }, .{}),
+        ui.el(.radio, .{ .text = "Pro", .checked = model.choice == 1, .on_change = .choose_second }, .{}),
+    });
+}
+
+fn radioOptions() RadioApp.Options {
+    return .{
+        .name = "ui-app-radio",
+        .scene = counter_scene,
+        .canvas_label = canvas_label,
+        .update = radioUpdate,
+        .view = radioView,
     };
 }
 
@@ -772,13 +821,19 @@ test "a declared context menu presents as the anchored fallback surface on prese
     try std.testing.expect(app_state.tree.?.context_menu_fallback == null);
     try std.testing.expect(!try retainedWidgetKindExists(&harness.runtime, .dropdown_menu));
 
-    // Reopen and dismiss (Escape/outside-click/automation all land on
-    // the same dismissal machinery): the surface closes, no Msg fires.
+    // Reopen and click outside. The fallback was opened from a typically
+    // non-focusable secondary-click target, so no focused ancestry is
+    // available to find it; the whole-view anchored fallback must still
+    // dismiss it. Its internal open state closes and no app Msg fires.
     try harness.runtime.dispatchAutomationCommand(app, context_press);
-    const reopened = app_state.tree.?.context_menu_fallback orelse return error.TestUnexpectedResult;
-    var dismiss_buffer: [96]u8 = undefined;
-    const dismiss = try std.fmt.bufPrint(&dismiss_buffer, "widget-action {s} {d} dismiss", .{ canvas_label, reopened.surface_id });
-    try harness.runtime.dispatchAutomationCommand(app, dismiss);
+    _ = app_state.tree.?.context_menu_fallback orelse return error.TestUnexpectedResult;
+    harness.runtime.views[0].canvas_widget_focused_id = 0;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .label = canvas_label,
+        .kind = .pointer_down,
+        .x = 360,
+        .y = 280,
+    } });
     try std.testing.expect(app_state.tree.?.context_menu_fallback == null);
     try std.testing.expect(!try retainedWidgetKindExists(&harness.runtime, .dropdown_menu));
     try std.testing.expectEqual(@as(u32, 1), app_state.model.deleted);
@@ -1877,6 +1932,117 @@ test "model-derived theme packs retain live appearance, accent, and surface scal
     try std.testing.expectEqual(@as(f32, 2), actual.pixel_snap.scale);
 }
 
+test "model-derived theme state composes forced/system schemes and model accent over manifest defaults" {
+    var options = counterOptions();
+    options.theme = .house;
+    options.theme_accent = canvas.Color.rgb8(0x12, 0x34, 0x56);
+    options.theme_state_fn = counterThemeState;
+
+    const app_state = try std.testing.allocator.create(CounterApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = CounterApp.init(std.heap.page_allocator, .{}, options);
+    defer app_state.deinit();
+    app_state.system_appearance = .{ .color_scheme = .light };
+    app_state.pixel_snap_scale = 2;
+
+    // Model-forced dark wins over an OS-light appearance; omitted pack and
+    // accent inherit the manifest-backed options.
+    var expected = canvas.DesignTokens.theme(.{ .color_scheme = .dark, .pack = .house });
+    expected = expected.withOverrides(canvas.accentOverrides(options.theme_accent.?, .dark));
+    var actual = app_state.effectiveTokens();
+    try std.testing.expectEqualDeep(expected.colors.background, actual.colors.background);
+    try std.testing.expectEqualDeep(expected.colors.accent, actual.colors.accent);
+    try std.testing.expectEqual(@as(f32, 2), actual.pixel_snap.scale);
+
+    // `system` resumes live OS following while model pack/accent override the
+    // manifest values.
+    app_state.model.count = 1;
+    app_state.theme_state_known = false;
+    app_state.system_appearance = .{ .color_scheme = .dark };
+    const teal = canvas.Color.rgb8(0, 0x78, 0x6f);
+    expected = canvas.DesignTokens.theme(.{ .color_scheme = .dark, .pack = .geist });
+    expected = expected.withOverrides(canvas.accentOverrides(teal, .dark));
+    actual = app_state.effectiveTokens();
+    try std.testing.expectEqualDeep(expected.colors.background, actual.colors.background);
+    try std.testing.expectEqualDeep(teal, actual.colors.accent);
+    try std.testing.expectEqualDeep(canvas.accentFocusRing(teal, .dark), actual.colors.focus_ring);
+
+    // High contrast keeps the existing accessibility rule: neither the
+    // model nor manifest accent layers over the pack's loud register.
+    app_state.system_appearance.high_contrast = true;
+    actual = app_state.effectiveTokens();
+    const loud = canvas.DesignTokens.theme(.{ .color_scheme = .dark, .contrast = .high, .pack = .geist });
+    try std.testing.expectEqualDeep(loud.colors.accent, actual.colors.accent);
+    try std.testing.expect(!std.meta.eql(teal, actual.colors.accent));
+}
+
+test "malformed adapter theme accents reject the rebuild instead of inheriting silently" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var options = counterOptions();
+    options.theme_state_fn = invalidCounterThemeState;
+    const app_state = try std.testing.allocator.create(CounterApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = CounterApp.init(std.heap.page_allocator, .{}, options);
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try std.testing.expectError(error.InvalidThemeAccent, harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 1,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } }));
+    try std.testing.expect(!app_state.installed);
+}
+
+test "forced theme state still follows accessibility axes while scheme-only OS flips do not restyle" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    var options = counterOptions();
+    options.theme_state_fn = counterThemeState; // count 0 forces dark.
+    const app_state = try std.testing.allocator.create(CounterApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = CounterApp.init(std.heap.page_allocator, .{}, options);
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .appearance_changed = .{ .color_scheme = .light } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 1,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    var stored = try harness.runtime.canvasWidgetDesignTokens(1, canvas_label);
+    const dark = canvas.DesignTokens.theme(.{ .color_scheme = .dark });
+    try std.testing.expectEqualDeep(dark.colors.background, stored.colors.background);
+
+    // A scheme-only flip cannot override the forced state.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .appearance_changed = .{ .color_scheme = .dark } });
+    stored = try harness.runtime.canvasWidgetDesignTokens(1, canvas_label);
+    try std.testing.expectEqualDeep(dark.colors.background, stored.colors.background);
+
+    // Accessibility axes remain live even under a forced color scheme.
+    try harness.runtime.dispatchPlatformEvent(app, .{ .appearance_changed = .{
+        .color_scheme = .light,
+        .high_contrast = true,
+        .reduce_motion = true,
+    } });
+    stored = try harness.runtime.canvasWidgetDesignTokens(1, canvas_label);
+    const dark_loud = canvas.DesignTokens.theme(.{ .color_scheme = .dark, .contrast = .high, .reduce_motion = true });
+    try std.testing.expectEqualDeep(dark_loud.colors.background, stored.colors.background);
+    try std.testing.expectEqualDeep(dark_loud.colors.focus_ring, stored.colors.focus_ring);
+    try std.testing.expectEqual(@as(u32, 0), stored.motion.normal_ms);
+}
+
 test "static tokens carry the surface scale and re-snap on a scale change" {
     const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
     defer harness.destroy(std.testing.allocator);
@@ -2368,6 +2534,41 @@ fn installCounterApp(harness: anytype, app: core.App) !void {
         .timestamp_ns = 1_000_000,
         .nonblank = true,
     } });
+}
+
+test "radio accessibility selection dispatches change once per retained transition" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(RadioApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = RadioApp.init(std.heap.page_allocator, .{}, radioOptions());
+    defer app_state.deinit();
+    const app = app_state.app();
+    try installCounterApp(harness, app);
+
+    const pro_id = findWidgetIdByText(app_state.tree.?, .radio, "Pro").?;
+    _ = try harness.runtime.dispatchCanvasWidgetAccessibilityAction(app, 1, canvas_label, .{
+        .id = pro_id,
+        .action = .select,
+    });
+    try std.testing.expectEqual(@as(u8, 1), app_state.model.choice);
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.change_count);
+    try std.testing.expect((try harness.runtime.canvasWidgetLayout(1, canvas_label)).findById(pro_id).?.widget.state.selected);
+
+    // AX selection, pointer activation, and Space all still activate the
+    // radio, but an already-selected control has no new `on_change` edge.
+    _ = try harness.runtime.dispatchCanvasWidgetAccessibilityAction(app, 1, canvas_label, .{
+        .id = pro_id,
+        .action = .select,
+    });
+    var command_buffer: [96]u8 = undefined;
+    const click = try std.fmt.bufPrint(&command_buffer, "widget-click {s} {d}", .{ canvas_label, pro_id });
+    try harness.runtime.dispatchAutomationCommand(app, click);
+    try harness.runtime.dispatchAutomationCommand(app, "widget-key counter-canvas space");
+    try std.testing.expectEqual(@as(u8, 1), app_state.model.choice);
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.change_count);
 }
 
 test "the fragment watch reloads a compiled fragment embedded in a Zig view" {
@@ -3064,6 +3265,73 @@ test "automation composition and selection verbs keep the model mirror consisten
     try std.testing.expectEqualStrings("", canceled_layout.findById(field_id).?.widget.text);
 }
 
+test "macOS Command Backspace keeps the controlled TextBuffer mirror and history in lockstep" {
+    if (comptime @import("builtin").os.tag != .macos) return error.SkipZigTest;
+
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(SearchMirrorApp);
+    defer std.testing.allocator.destroy(app_state);
+    try startSearchMirror(harness, app_state);
+    defer app_state.deinit();
+    const app = app_state.app();
+    const field_id = findWidgetIdByKind(app_state.tree.?.root, .search_field).?;
+
+    try core.testing.dispatchAutomationWidgetAction(&harness.runtime, app, .{
+        .view_label = search_mirror_canvas_label,
+        .id = field_id,
+        .action = .set_text,
+        .value = "second line",
+    });
+    for (0..5) |_| {
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+            .window_id = 1,
+            .label = search_mirror_canvas_label,
+            .kind = .key_down,
+            .key = "arrowleft",
+        } });
+    }
+    try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(6), app_state.model.query.selection);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = search_mirror_canvas_label,
+        .kind = .key_down,
+        .key = "backspace",
+        .modifiers = .{ .primary = true, .command = true },
+    } });
+    try std.testing.expectEqualStrings(" line", app_state.model.query.text());
+    try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(0), app_state.model.query.selection);
+    var retained = try harness.runtime.canvasWidgetLayout(1, search_mirror_canvas_label);
+    try std.testing.expectEqualStrings(app_state.model.query.text(), retained.findById(field_id).?.widget.text);
+    try std.testing.expectEqualDeep(app_state.model.query.selection, retained.findById(field_id).?.widget.text_selection.?);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = search_mirror_canvas_label,
+        .kind = .key_down,
+        .key = "z",
+        .modifiers = .{ .primary = true, .command = true },
+    } });
+    try std.testing.expectEqualStrings("second line", app_state.model.query.text());
+    try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(6), app_state.model.query.selection);
+
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = search_mirror_canvas_label,
+        .kind = .key_down,
+        .key = "z",
+        .modifiers = .{ .primary = true, .command = true, .shift = true },
+    } });
+    try std.testing.expectEqualStrings(" line", app_state.model.query.text());
+    try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(0), app_state.model.query.selection);
+    retained = try harness.runtime.canvasWidgetLayout(1, search_mirror_canvas_label);
+    try std.testing.expectEqualStrings(app_state.model.query.text(), retained.findById(field_id).?.widget.text);
+    try std.testing.expectEqualDeep(app_state.model.query.selection, retained.findById(field_id).?.widget.text_selection.?);
+}
+
 // --------------------------------- combobox open-arrow (mirror invariant)
 
 const combo_mirror_canvas_label = "combo-mirror-canvas";
@@ -3073,12 +3341,16 @@ const ComboMirrorModel = struct {
     note: canvas.TextBuffer(64) = .{},
     open: bool = false,
     opens: u32 = 0,
+    submits: u32 = 0,
+    picks: u32 = 0,
     query_edits: u32 = 0,
 };
 
 const ComboMirrorMsg = union(enum) {
     open_picker,
     close_picker,
+    submit_query,
+    pick_query: []const u8,
     query_edit: canvas.TextInputEvent,
     note_edit: canvas.TextInputEvent,
 };
@@ -3092,6 +3364,16 @@ fn comboMirrorUpdate(model: *ComboMirrorModel, msg: ComboMirrorMsg) void {
             model.opens += 1;
         },
         .close_picker => model.open = false,
+        .submit_query => {
+            model.open = false;
+            model.submits += 1;
+        },
+        .pick_query => |query| {
+            model.query.clear();
+            model.query.apply(.{ .insert_text = query });
+            model.open = false;
+            model.picks += 1;
+        },
         .query_edit => |edit| {
             model.query.apply(edit);
             model.query_edits += 1;
@@ -3107,6 +3389,7 @@ fn comboMirrorView(ui: *ComboMirrorApp.Ui, model: *const ComboMirrorModel) Combo
         .width = 200,
         .expanded = model.open,
         .on_press = .open_picker,
+        .on_submit = .submit_query,
         .on_input = ComboMirrorApp.Ui.inputMsg(.query_edit),
     }, .{});
     const picker = if (model.open) ui.stack(.{ .height = 28 }, .{
@@ -3118,8 +3401,8 @@ fn comboMirrorView(ui: *ComboMirrorApp.Ui, model: *const ComboMirrorModel) Combo
             .height = 60,
             .on_dismiss = .close_picker,
         }, .{
-            ui.el(.menu_item, .{ .key = .{ .int = 0 }, .text = "glass bead", .height = 26, .on_press = .close_picker }, .{}),
-            ui.el(.menu_item, .{ .key = .{ .int = 1 }, .text = "glass jar", .height = 26, .on_press = .close_picker }, .{}),
+            ui.el(.menu_item, .{ .key = .{ .int = 0 }, .text = "glass bead", .height = 26, .on_press = ComboMirrorMsg{ .pick_query = "glass bead" } }, .{}),
+            ui.el(.menu_item, .{ .key = .{ .int = 1 }, .text = "glass jar", .height = 26, .on_press = ComboMirrorMsg{ .pick_query = "glass jar" } }, .{}),
         }),
     }) else ui.stack(.{ .height = 28 }, .{trigger});
     return ui.column(.{ .gap = 8, .padding = 12 }, .{
@@ -3159,7 +3442,7 @@ fn comboMirrorRetainedSelection(harness: *core.TestHarness(), id: canvas.ObjectI
     return layout.findById(id).?.widget.text_selection;
 }
 
-test "a closed combobox's open arrows move neither the retained caret nor the model mirror" {
+test "combobox submit precedence and open-menu selection keep the text mirror consistent" {
     // The split-brain escapee: a CLOSED combobox maps ArrowUp/Down to
     // BOTH its open press (`widgetKeyboardControlIntent`'s menu-open
     // keys) and — through the single-line caret derivation — a stamped
@@ -3214,6 +3497,19 @@ test "a closed combobox's open arrows move neither the retained caret nor the mo
     try std.testing.expectEqualStrings("glass", app_state.model.query.text());
     try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(3), app_state.model.query.selection);
 
+    // Enter resolves through on_submit BEFORE the trigger's open press.
+    // The closed picker stays closed and neither side of the text mirror
+    // changes while the submit message commits.
+    const edits_before_submit = app_state.model.query_edits;
+    try comboMirrorKey(harness, app, "enter");
+    try std.testing.expect(!app_state.model.open);
+    try std.testing.expectEqual(@as(u32, 0), app_state.model.opens);
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.submits);
+    try std.testing.expectEqual(edits_before_submit, app_state.model.query_edits);
+    try std.testing.expectEqualStrings("glass", app_state.model.query.text());
+    try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(3), app_state.model.query.selection);
+    try std.testing.expectEqualDeep(@as(?canvas.TextSelection, canvas.TextSelection.collapsed(3)), try comboMirrorRetainedSelection(harness, combo_id));
+
     // THE pin: ArrowDown on the closed trigger opens the picker and
     // both carets stay at 3 — no query edit is heard or applied.
     const edits_before_open = app_state.model.query_edits;
@@ -3224,9 +3520,10 @@ test "a closed combobox's open arrows move neither the retained caret nor the mo
     try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(3), app_state.model.query.selection);
     try std.testing.expectEqualDeep(@as(?canvas.TextSelection, canvas.TextSelection.collapsed(3)), try comboMirrorRetainedSelection(harness, combo_id));
 
-    // The OPEN-picker truth, pinned as-is: the next arrow walks the
-    // keyboard INTO the mounted menu (the focus step consumes it before
-    // routing reaches the trigger), so it is no caret edit either.
+    // The OPEN-picker truth: the next arrow walks the keyboard INTO the
+    // mounted menu (the focus step consumes it before routing reaches
+    // the trigger), so Enter selects that menu item instead of reaching
+    // the combobox submit handler again.
     const first_item_id = findWidgetIdByText(app_state.tree.?, .menu_item, "glass bead").?;
     try comboMirrorKey(harness, app, "arrowdown");
     try std.testing.expectEqual(first_item_id, harness.runtime.views[0].canvas_widget_focused_id);
@@ -3234,12 +3531,12 @@ test "a closed combobox's open arrows move neither the retained caret nor the mo
     try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(3), app_state.model.query.selection);
     try std.testing.expectEqualDeep(@as(?canvas.TextSelection, canvas.TextSelection.collapsed(3)), try comboMirrorRetainedSelection(harness, combo_id));
 
-    // Escape is consumed by the DISMISSAL pass while the menu floats:
-    // the picker closes through `on_dismiss` and the combobox's
-    // Escape-clear never runs — the query survives.
-    try comboMirrorKey(harness, app, "escape");
+    try comboMirrorKey(harness, app, "enter");
     try std.testing.expect(!app_state.model.open);
-    try std.testing.expectEqualStrings("glass", app_state.model.query.text());
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.submits);
+    try std.testing.expectEqual(@as(u32, 1), app_state.model.picks);
+    try std.testing.expectEqualStrings("glass bead", app_state.model.query.text());
+    try std.testing.expectEqualStrings("glass bead", (try harness.runtime.canvasWidgetLayout(1, combo_mirror_canvas_label)).findById(combo_id).?.widget.text);
     try std.testing.expectEqual(combo_id, harness.runtime.views[0].canvas_widget_focused_id);
 
     // ArrowUp on the closed trigger is the same open key: opens, and
@@ -3248,8 +3545,8 @@ test "a closed combobox's open arrows move neither the retained caret nor the mo
     try std.testing.expect(app_state.model.open);
     try std.testing.expectEqual(@as(u32, 2), app_state.model.opens);
     try std.testing.expectEqual(edits_before_open, app_state.model.query_edits);
-    try std.testing.expectEqualDeep(canvas.TextSelection.collapsed(3), app_state.model.query.selection);
-    try std.testing.expectEqualDeep(@as(?canvas.TextSelection, canvas.TextSelection.collapsed(3)), try comboMirrorRetainedSelection(harness, combo_id));
+    try std.testing.expectEqualDeep(canvas.TextSelection.collapsed("glass bead".len), app_state.model.query.selection);
+    try std.testing.expectEqualDeep(@as(?canvas.TextSelection, canvas.TextSelection.collapsed("glass bead".len)), try comboMirrorRetainedSelection(harness, combo_id));
     try comboMirrorKey(harness, app, "escape");
     try std.testing.expect(!app_state.model.open);
 
@@ -3310,17 +3607,23 @@ fn autofocusUpdate(model: *AutofocusModel, msg: AutofocusMsg) void {
 /// must receive the keyboard without a click.
 fn autofocusView(ui: *AutofocusApp.Ui, model: *const AutofocusModel) AutofocusApp.Ui.Node {
     if (!model.editing) {
-        return ui.column(.{ .gap = 8, .padding = 12 }, .{
-            ui.button(.{ .on_press = AutofocusMsg.begin_edit }, "New note"),
+        return ui.column(.{ .padding = 12 }, .{
+            ui.scroll(.{ .height = 96 }, ui.column(.{ .gap = 8 }, .{
+                ui.button(.{ .on_press = AutofocusMsg.begin_edit }, "New note"),
+                ui.text(.{ .height = 120 }, "Recent notes"),
+            })),
         });
     }
-    return ui.column(.{ .gap = 8, .padding = 12 }, .{
-        ui.button(.{ .on_press = AutofocusMsg.begin_edit }, "New note"),
-        ui.textField(.{
-            .autofocus = true,
-            .text = model.draft.text(),
-            .on_input = AutofocusApp.Ui.inputMsg(.draft_edit),
-        }),
+    return ui.column(.{ .padding = 12 }, .{
+        ui.scroll(.{ .height = 96 }, ui.column(.{ .gap = 8 }, .{
+            ui.button(.{ .on_press = AutofocusMsg.begin_edit }, "New note"),
+            ui.text(.{ .height = 120 }, "Recent notes"),
+            ui.textField(.{
+                .autofocus = true,
+                .text = model.draft.text(),
+                .on_input = AutofocusApp.Ui.inputMsg(.draft_edit),
+            }),
+        })),
     });
 }
 
@@ -3375,12 +3678,20 @@ test "ui app autofocus moves the keyboard to a freshly mounted editor through th
     }
     try std.testing.expectEqual(@as(canvas.ObjectId, 0), harness.runtime.views[view_index].canvas_widget_focused_id);
 
-    // The Cmd-N-shaped command mounts the editor; the rebuild's
-    // autofocus edge moves keyboard focus to it — no click.
+    // The Cmd-N-shaped command mounts the editor BELOW the scroll
+    // viewport; the rebuild's autofocus edge reveals it and moves
+    // keyboard focus to it — no click.
     try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "note.new", .window_id = 1 } });
     try std.testing.expect(app_state.model.editing);
     const field_id = findWidgetIdByKind(app_state.tree.?.root, .text_field).?;
+    const scroll_id = findWidgetIdByKind(app_state.tree.?.root, .scroll_view).?;
     try std.testing.expectEqual(field_id, harness.runtime.views[view_index].canvas_widget_focused_id);
+    var retained = try harness.runtime.canvasWidgetLayout(1, autofocus_canvas_label);
+    const scroll = retained.findById(scroll_id).?;
+    const field = retained.findById(field_id).?;
+    try std.testing.expect(scroll.widget.value > 0);
+    try std.testing.expect(field.frame.y >= scroll.frame.y);
+    try std.testing.expect(field.frame.maxY() <= scroll.frame.maxY());
 
     // Typing lands in the model through the ordinary input path.
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
@@ -3392,10 +3703,18 @@ test "ui app autofocus moves the keyboard to a freshly mounted editor through th
     try std.testing.expectEqualStrings("Groceries", app_state.model.draft.text());
     try std.testing.expect(app_state.model.edit_count > 0);
 
-    // A later rebuild with the flag still true never re-steals focus:
-    // click the button (its press dispatches begin_edit and rebuilds).
+    // A later rebuild with the flag still true never re-steals focus.
+    // Programmatically focusing the now-offscreen button first also proves
+    // the shared automation focus verb reveals logical targets; its real
+    // click then dispatches begin_edit and rebuilds.
     const button_id = findWidgetIdByKind(app_state.tree.?.root, .button).?;
     var command_buffer: [96]u8 = undefined;
+    const focus_command = try std.fmt.bufPrint(&command_buffer, "widget-action {s} {d} focus", .{ autofocus_canvas_label, button_id });
+    try harness.runtime.dispatchAutomationCommand(app, focus_command);
+    try std.testing.expectEqual(button_id, harness.runtime.views[view_index].canvas_widget_focused_id);
+    retained = try harness.runtime.canvasWidgetLayout(1, autofocus_canvas_label);
+    try std.testing.expectEqual(@as(f32, 0), retained.findById(scroll_id).?.widget.value);
+
     const click_command = try std.fmt.bufPrint(&command_buffer, "widget-click {s} {d}", .{ autofocus_canvas_label, button_id });
     try harness.runtime.dispatchAutomationCommand(app, click_command);
     try std.testing.expectEqual(button_id, harness.runtime.views[view_index].canvas_widget_focused_id);
@@ -3671,7 +3990,10 @@ fn previewView(ui: *PreviewApp.Ui, model: *const PreviewModel) PreviewApp.Ui.Nod
     });
 }
 
-fn previewPanes(model: *const PreviewModel, out: []PreviewApp.WebViewPane) usize {
+fn previewPanes(model: *const PreviewModel, context: PreviewApp.ChromeContext, out: []PreviewApp.WebViewPane) usize {
+    // The preview webview lives in the main window; other windows own
+    // no pane and say so.
+    if (!context.is_main) return 0;
     out[0] = .{
         .label = "preview",
         .anchor = preview_pane_anchor,
@@ -4221,9 +4543,72 @@ test "ui app tray state rides automation snapshots and tray-action drives a row"
 
     // Unknown or malformed item ids are loud driver misuse, never a
     // silent no-op or a fallback command dispatch.
+    try std.testing.expectError(error.InvalidCommand, harness.runtime.dispatchAutomationCommand(app, "tray-action 11"));
     try std.testing.expectError(error.InvalidCommand, harness.runtime.dispatchAutomationCommand(app, "tray-action 99"));
     try std.testing.expectError(error.InvalidCommand, harness.runtime.dispatchAutomationCommand(app, "tray-action open"));
     try std.testing.expectEqual(@as(u32, 1), app_state.model.selected_issue);
+}
+
+const SegmentedAutomationModel = struct { selected: bool = true };
+const SegmentedAutomationMsg = union(enum) { enable, disable };
+const SegmentedAutomationApp = ui_app_model.UiApp(SegmentedAutomationModel, SegmentedAutomationMsg);
+
+fn segmentedAutomationUpdate(model: *SegmentedAutomationModel, msg: SegmentedAutomationMsg) void {
+    switch (msg) {
+        .enable => model.selected = true,
+        .disable => model.selected = false,
+    }
+}
+
+fn segmentedAutomationView(ui: *SegmentedAutomationApp.Ui, _: *const SegmentedAutomationModel) SegmentedAutomationApp.Ui.Node {
+    return ui.text(.{}, "Segments");
+}
+
+fn segmentedAutomationCommand(name: []const u8) ?SegmentedAutomationMsg {
+    if (std.mem.eql(u8, name, "segment.enable")) return .enable;
+    if (std.mem.eql(u8, name, "segment.disable")) return .disable;
+    return null;
+}
+
+fn segmentedAutomationStatusItem(model: *const SegmentedAutomationModel, scratch: *SegmentedAutomationApp.StatusItemScratch) SegmentedAutomationApp.StatusItemState {
+    scratch.segment_options[0] = .{ .id = 20, .label = "On", .command = "segment.enable", .selected = model.selected, .enabled = false };
+    scratch.segment_options[1] = .{ .id = 21, .label = "Off", .command = "segment.disable", .selected = !model.selected };
+    scratch.items[0] = .{ .role = .segmented, .segmented = .{ .options = scratch.segment_options[0..2] } };
+    return .{ .items = scratch.items[0..1] };
+}
+
+test "automation tray-action rejects disabled segmented options" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(SegmentedAutomationApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = SegmentedAutomationApp.init(std.heap.page_allocator, .{}, .{
+        .name = "ui-app-tray-segmented-automation",
+        .scene = counter_scene,
+        .canvas_label = canvas_label,
+        .update = segmentedAutomationUpdate,
+        .view = segmentedAutomationView,
+        .on_command = segmentedAutomationCommand,
+        .status_item_fn = segmentedAutomationStatusItem,
+    });
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 1,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+
+    try std.testing.expectError(error.InvalidCommand, harness.runtime.dispatchAutomationCommand(app, "tray-action 20"));
+    try std.testing.expect(app_state.model.selected);
+    try harness.runtime.dispatchAutomationCommand(app, "tray-action 21");
+    try std.testing.expect(!app_state.model.selected);
 }
 
 const TaskModel = struct {

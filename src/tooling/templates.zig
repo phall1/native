@@ -54,7 +54,7 @@ pub const Frontend = enum {
 };
 
 /// Scaffold shape for the native frontend. `slim` is the zero-config
-/// default: app.zon + src/ + assets + README only — the `native` CLI owns
+/// default: app.json + src/ + assets + README only — the `native` CLI owns
 /// the build graph (`native dev|build|test`) and `native eject` writes an
 /// owned build.zig later. `full` keeps the pre-zero-config shape
 /// (build.zig, build.zig.zon, .vscode, CI workflow) for users who want to
@@ -132,8 +132,8 @@ pub fn writeDefaultApp(allocator: std.mem.Allocator, io: std.Io, destination: []
     defer allocator.free(build_zon);
     const main_zig = try mainZig(allocator, names, options.frontend);
     defer allocator.free(main_zig);
-    const app_zon = try appZon(allocator, names, options.frontend);
-    defer allocator.free(app_zon);
+    const app_json = try appJson(allocator, names, options.frontend);
+    defer allocator.free(app_json);
     const readme_md = try readme(allocator, names, framework_path, options.frontend);
     defer allocator.free(readme_md);
     const ci_yaml = try frontendCiYaml(allocator, names);
@@ -144,7 +144,7 @@ pub fn writeDefaultApp(allocator: std.mem.Allocator, io: std.Io, destination: []
     try writeFile(app_dir, io, "build.zig.zon", build_zon);
     try writeFile(app_dir, io, "src/main.zig", main_zig);
     try writeFile(app_dir, io, "src/runner.zig", runnerZig());
-    try writeFile(app_dir, io, "app.zon", app_zon);
+    try writeFile(app_dir, io, "app.json", app_json);
     try writeFile(app_dir, io, "assets/icon.png", default_icon_png);
     try writeFile(app_dir, io, ".github/workflows/ci.yml", ci_yaml);
     try writeFile(app_dir, io, "README.md", readme_md);
@@ -159,15 +159,15 @@ fn writeNativeAppSlim(allocator: std.mem.Allocator, io: std.Io, app_dir: std.Io.
     defer allocator.free(main_zig);
     const tests_zig = try nativeTestsZig(allocator, names);
     defer allocator.free(tests_zig);
-    const app_zon = try nativeAppZon(allocator, names);
-    defer allocator.free(app_zon);
+    const app_json = try nativeAppJson(allocator, names);
+    defer allocator.free(app_json);
     const readme_md = try slimNativeReadme(allocator, names);
     defer allocator.free(readme_md);
 
     try writeFile(app_dir, io, "src/main.zig", main_zig);
     try writeFile(app_dir, io, "src/app.native", nativeAppMarkup());
     try writeFile(app_dir, io, "src/tests.zig", tests_zig);
-    try writeFile(app_dir, io, "app.zon", app_zon);
+    try writeFile(app_dir, io, "app.json", app_json);
     try writeFile(app_dir, io, "assets/icon.png", default_icon_png);
     try writeFile(app_dir, io, ".gitignore", slimGitignore());
     try writeFile(app_dir, io, "README.md", readme_md);
@@ -183,7 +183,7 @@ fn slimGitignore() []const u8 {
 }
 
 /// The TypeScript-core zero-config scaffold - the `native init` default:
-/// core.ts (logic), app.native (view), app.zon (manifest). ZERO Zig in the
+/// core.ts (logic), app.native (view), app.json (manifest). ZERO Zig in the
 /// tree; the build graph detects src/core.ts, compiles it through the
 /// external core compiler, and stages the generated wiring outside the app
 /// on every build.
@@ -195,14 +195,14 @@ fn slimGitignore() []const u8 {
 /// detection above keys on src/core.ts alone, and every `native` verb
 /// works with node_modules deleted.
 fn writeTsAppSlim(allocator: std.mem.Allocator, io: std.Io, app_dir: std.Io.Dir, names: TemplateNames, destination: []const u8, sdk_source: []const u8) !void {
-    const app_zon = try nativeAppZon(allocator, names);
-    defer allocator.free(app_zon);
+    const app_json = try nativeAppJson(allocator, names);
+    defer allocator.free(app_json);
     const readme_md = try tsSlimReadme(allocator, names);
     defer allocator.free(readme_md);
 
     try writeFile(app_dir, io, "src/core.ts", tsCoreStarter());
     try writeFile(app_dir, io, "src/app.native", tsAppMarkup());
-    try writeFile(app_dir, io, "app.zon", app_zon);
+    try writeFile(app_dir, io, "app.json", app_json);
     try writeFile(app_dir, io, "assets/icon.png", default_icon_png);
     try writeFile(app_dir, io, ".gitignore", tsGitignore());
     try writeFile(app_dir, io, "README.md", readme_md);
@@ -218,8 +218,8 @@ fn writeTsApp(allocator: std.mem.Allocator, io: std.Io, app_dir: std.Io.Dir, nam
     defer allocator.free(build_zig);
     const build_zon = try nativeBuildZon(allocator, names, framework_path);
     defer allocator.free(build_zon);
-    const app_zon = try nativeAppZon(allocator, names);
-    defer allocator.free(app_zon);
+    const app_json = try nativeAppJson(allocator, names);
+    defer allocator.free(app_json);
     const readme_md = try tsSlimReadme(allocator, names);
     defer allocator.free(readme_md);
     const ci_yaml = try nativeCiYaml(allocator, names, framework_path, .ts);
@@ -231,7 +231,7 @@ fn writeTsApp(allocator: std.mem.Allocator, io: std.Io, app_dir: std.Io.Dir, nam
     try writeFile(app_dir, io, "build.zig.zon", build_zon);
     try writeFile(app_dir, io, "src/core.ts", tsCoreStarter());
     try writeFile(app_dir, io, "src/app.native", tsAppMarkup());
-    try writeFile(app_dir, io, "app.zon", app_zon);
+    try writeFile(app_dir, io, "app.json", app_json);
     try writeFile(app_dir, io, "assets/icon.png", default_icon_png);
     try writeFile(app_dir, io, ".gitignore", tsGitignore());
     try writeFile(app_dir, io, "README.md", readme_md);
@@ -472,13 +472,13 @@ fn tsSlimReadme(allocator: std.mem.Allocator, names: TemplateNames) ![]const u8 
         \\                    # dispatch messages as JSON lines, watch the model
         \\                    # and effect transcript (not a renderer)
         \\native dev          # build and run the real app (markup hot reload)
-        \\native check        # verify core.ts (subset checker) + markup + app.zon
+        \\native check        # verify core.ts (subset checker) + markup + app.json
         \\native build        # ReleaseFast binary in zig-out/bin/
         \\native test         # the app's test suite
         \\```
         \\
         \\Edit `src/core.ts` for behavior, `src/app.native` for the view, and
-        \\`app.zon` for windows/identity/permissions. Markup binds the model's
+        \\`app.json` for windows/identity/permissions. Markup binds the model's
         \\field names exactly as core.ts wrote them (`tickCount` -> `{tickCount}`),
         \\and exported single-model helpers bind as derived values (`{total}`).
         \\
@@ -503,7 +503,7 @@ fn tsSlimReadme(allocator: std.mem.Allocator, names: TemplateNames) ![]const u8 
         \\
         \\## Requirements
         \\
-        \\Node.js 22.15+ (on the 23 line: 23.5+) on PATH (the TypeScript frontend
+        \\Node.js 24+ on PATH (the TypeScript frontend
         \\and the core compiler run at build time; your shipped binary carries
         \\none of it).
         \\
@@ -530,7 +530,7 @@ fn slimNativeReadme(allocator: std.mem.Allocator, names: TemplateNames) ![]const
         \\native dev     # build and run the app with hot reload
         \\native test    # run the app's test suite
         \\native build   # produce a ReleaseFast binary in zig-out/bin/
-        \\native check   # validate src/*.native markup and app.zon
+        \\native check   # validate src/*.native markup and app.json
         \\```
         \\
         \\## Hot reload
@@ -561,8 +561,8 @@ fn writeNativeApp(allocator: std.mem.Allocator, io: std.Io, app_dir: std.Io.Dir,
     defer allocator.free(main_zig);
     const tests_zig = try nativeTestsZig(allocator, names);
     defer allocator.free(tests_zig);
-    const app_zon = try nativeAppZon(allocator, names);
-    defer allocator.free(app_zon);
+    const app_json = try nativeAppJson(allocator, names);
+    defer allocator.free(app_json);
     const readme_md = try nativeReadme(allocator, names, framework_path);
     defer allocator.free(readme_md);
     const ci_yaml = try nativeCiYaml(allocator, names, framework_path, .zig);
@@ -573,7 +573,7 @@ fn writeNativeApp(allocator: std.mem.Allocator, io: std.Io, app_dir: std.Io.Dir,
     try writeFile(app_dir, io, "src/main.zig", main_zig);
     try writeFile(app_dir, io, "src/app.native", nativeAppMarkup());
     try writeFile(app_dir, io, "src/tests.zig", tests_zig);
-    try writeFile(app_dir, io, "app.zon", app_zon);
+    try writeFile(app_dir, io, "app.json", app_json);
     try writeFile(app_dir, io, "assets/icon.png", default_icon_png);
     try writeFile(app_dir, io, ".vscode/settings.json", nativeVscodeSettings());
     try writeFile(app_dir, io, ".github/workflows/ci.yml", ci_yaml);
@@ -594,7 +594,7 @@ fn nativeBuildZig(allocator: std.mem.Allocator, names: TemplateNames) ![]const u
     try out.appendSlice(allocator, " ");
     try appendZigString(&out, allocator, names.package_name);
     try out.appendSlice(allocator,
-        \\ });
+        \\, .manifest = "app.json" });
         \\}
         \\
     );
@@ -626,7 +626,7 @@ fn nativeBuildZon(allocator: std.mem.Allocator, names: TemplateNames, framework_
     try appendZigString(&out, allocator, framework_path);
     try out.appendSlice(allocator,
         \\ } },
-        \\    .paths = .{ "build.zig", "build.zig.zon", "src", "assets", "app.zon", "README.md" },
+        \\    .paths = .{ "build.zig", "build.zig.zon", "src", "assets", "app.json", "README.md" },
         \\}
         \\
     );
@@ -670,7 +670,6 @@ fn nativeMainZig(allocator: std.mem.Allocator, names: TemplateNames) ![]const u8
         \\,
         \\    .width = window_width,
         \\    .height = window_height,
-        \\    .restore_state = false,
         \\    .views = &shell_views,
         \\}};
         \\const shell_scene: native_sdk.ShellConfig = .{ .windows = &shell_windows };
@@ -798,7 +797,6 @@ fn nativeMainZig(allocator: std.mem.Allocator, names: TemplateNames) ![]const u8
         \\,
         \\        .icon_path = "assets/icon.png",
         \\        .default_frame = geometry.RectF.init(0, 0, window_width, window_height),
-        \\        .restore_state = false,
         \\        .js_window_api = false,
         \\        .security = .{
         \\            .permissions = &app_permissions,
@@ -1025,63 +1023,62 @@ fn nativeTestsZig(allocator: std.mem.Allocator, names: TemplateNames) ![]const u
     return out.toOwnedSlice(allocator);
 }
 
-fn nativeAppZon(allocator: std.mem.Allocator, names: TemplateNames) ![]const u8 {
+fn nativeAppJson(allocator: std.mem.Allocator, names: TemplateNames) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
     try out.appendSlice(allocator,
-        \\.{
-        \\    .id =
+        \\{
+        \\    "$schema": "https://schema.native-sdk.dev/app/v1.json",
+        \\    "id":
     );
     try out.appendSlice(allocator, " ");
-    try appendZigString(&out, allocator, names.app_id);
+    try appendJsonString(&out, allocator, names.app_id);
     try out.appendSlice(allocator,
         \\,
-        \\    .name =
+        \\    "name":
     );
     try out.appendSlice(allocator, " ");
-    try appendZigString(&out, allocator, names.package_name);
+    try appendJsonString(&out, allocator, names.package_name);
     try out.appendSlice(allocator,
         \\,
-        \\    .display_name =
+        \\    "display_name":
     );
     try out.appendSlice(allocator, " ");
-    try appendZigString(&out, allocator, names.display_name);
+    try appendJsonString(&out, allocator, names.display_name);
     try out.appendSlice(allocator,
         \\,
-        \\    .description = "A counter that lives in one native window.",
-        \\    .version = "0.1.0",
-        \\    .icons = .{"assets/icon.png"},
-        \\    .platforms = .{"macos"},
-        \\    .permissions = .{ "view", "command" },
-        \\    .capabilities = .{ "native_views", "gpu_surfaces" },
-        \\    .shell = .{
-        \\        .windows = .{
-        \\            .{
-        \\                .label = "main",
-        \\                .title =
+        \\    "description": "A counter that lives in one native window.",
+        \\    "version": "0.1.0",
+        \\    "icons": ["assets/icon.png"],
+        \\    "platforms": ["macos"],
+        \\    "permissions": ["view", "command"],
+        \\    "capabilities": ["native_views", "gpu_surfaces"],
+        \\    "shell": {
+        \\        "windows": [
+        \\            {
+        \\                "label": "main",
+        \\                "title":
     );
     try out.appendSlice(allocator, " ");
-    try appendZigString(&out, allocator, names.display_name);
+    try appendJsonString(&out, allocator, names.display_name);
     try out.appendSlice(allocator,
         \\,
-        \\                .width = 480,
-        \\                .height = 320,
-        \\                .restore_state = false,
-        \\                .restore_policy = "center_on_primary",
-        \\                .views = .{
-        \\                    .{ .label = "main-canvas", .kind = "gpu_surface", .fill = true, .role = "Counter canvas", .accessibility_label = "Counter", .gpu_backend = "metal", .gpu_pixel_format = "bgra8_unorm", .gpu_present_mode = "timer", .gpu_alpha_mode = "opaque", .gpu_color_space = "srgb", .gpu_vsync = true },
-        \\                },
-        \\            },
-        \\        },
+        \\                "width": 480,
+        \\                "height": 320,
+        \\                "views": [
+        \\                    { "label": "main-canvas", "kind": "gpu_surface", "fill": true, "role": "Counter canvas", "accessibility_label": "Counter", "gpu_backend": "metal", "gpu_pixel_format": "bgra8_unorm", "gpu_present_mode": "timer", "gpu_alpha_mode": "opaque", "gpu_color_space": "srgb", "gpu_vsync": true }
+        \\                ]
+        \\            }
+        \\        ]
         \\    },
-        \\    .security = .{
-        \\        .navigation = .{
-        \\            .allowed_origins = .{ "zero://app", "zero://inline" },
-        \\            .external_links = .{ .action = "deny" },
-        \\        },
+        \\    "security": {
+        \\        "navigation": {
+        \\            "allowed_origins": ["zero://app", "zero://inline"],
+        \\            "external_links": { "action": "deny" }
+        \\        }
         \\    },
-        \\    .web_engine = "system",
-        \\    .cef = .{ .dir = "third_party/cef/macos", .auto_install = false },
+        \\    "web_engine": "system",
+        \\    "cef": { "dir": "third_party/cef/macos", "auto_install": false }
         \\}
         \\
     );
@@ -1162,7 +1159,7 @@ fn nativeCiYaml(allocator: std.mem.Allocator, names: TemplateNames, framework_pa
     const node_setup =
         \\      - uses: actions/setup-node@v4
         \\        with:
-        \\          node-version: 22
+        \\          node-version: 24
         \\
     ;
     const compiler_install =
@@ -1467,7 +1464,7 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\    const runner_mod = localModule(b, target, optimize, "src/runner.zig");
         \\    runner_mod.addImport("native_sdk", native_sdk_mod);
         \\    runner_mod.addImport("build_options", options_mod);
-        \\    runner_mod.addImport("app_manifest_zon", b.createModule(.{ .root_source_file = b.path("app.zon") }));
+        \\    runner_mod.addImport("app_manifest_zon", appManifestModule(b));
         \\    const migrations_mod = b.createModule(.{ .root_source_file = relational_migrations_source, .target = target, .optimize = optimize });
         \\    migrations_mod.addImport("native_sdk", native_sdk_mod);
         \\    runner_mod.addImport("relational_migrations", migrations_mod);
@@ -1516,7 +1513,7 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\    const run_step = b.step("run", "Run the app");
         \\    run_step.dependOn(&run.step);
         \\
-        \\    const dev = b.addSystemCommand(&.{ "native", "dev", "--manifest", "app.zon", "--binary" });
+        \\    const dev = b.addSystemCommand(&.{ "native", "dev", "--manifest", "app.json", "--binary" });
         \\    dev.addFileArg(exe.getEmittedBin());
         \\    addWebView2RuntimeRunFiles(b, target, dev, web_engine, web_layer, native_sdk_path);
         \\    dev.step.dependOn(&exe.step);
@@ -1534,7 +1531,7 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\        const package_runner_mod = localModule(b, target, package_optimize, "src/runner.zig");
         \\        package_runner_mod.addImport("native_sdk", package_sdk_mod);
         \\        package_runner_mod.addImport("build_options", options_mod);
-        \\        package_runner_mod.addImport("app_manifest_zon", b.createModule(.{ .root_source_file = b.path("app.zon") }));
+        \\        package_runner_mod.addImport("app_manifest_zon", appManifestModule(b));
         \\        const package_migrations_mod = b.createModule(.{ .root_source_file = relational_migrations_source, .target = target, .optimize = package_optimize });
         \\        package_migrations_mod.addImport("native_sdk", package_sdk_mod);
         \\        package_runner_mod.addImport("relational_migrations", package_migrations_mod);
@@ -1565,7 +1562,7 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\        "--target",
         \\        @tagName(package_target),
         \\        "--manifest",
-        \\        "app.zon",
+        \\        "app.json",
         \\        "--assets",
     );
     try appendZigString(&out, allocator, frontend.distDir());
@@ -2093,10 +2090,10 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\    // The fallback for a manifest this lenient parse cannot read
         \\    // keeps the web layer (see AppManifestBuildConfig): a shape
         \\    // mismatch here is not proof the app declares no web use.
-        \\    const fallback: AppManifestBuildConfig = .{ .web_declaration = "an app.zon this build graph could not parse" };
-        \\    const source: [:0]const u8 = @embedFile("app.zon");
+        \\    const fallback: AppManifestBuildConfig = .{ .web_declaration = "an app.json this build graph could not parse" };
+        \\    const source = @embedFile("app.json");
         \\    @setEvalBranchQuota(4000);
-        \\    const raw = std.zon.parse.fromSliceAlloc(InferenceManifest, b.allocator, source, null, .{ .ignore_unknown_fields = true }) catch return fallback;
+        \\    const raw = std.json.parseFromSliceLeaky(InferenceManifest, b.allocator, source, .{ .ignore_unknown_fields = true }) catch return fallback;
         \\    var config: AppManifestBuildConfig = .{
         \\        .web_engine = parseWebEngine(raw.web_engine) orelse .system,
         \\        .cef_dir = raw.cef.dir,
@@ -2121,6 +2118,49 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\        break :blk null;
         \\    };
         \\    return config;
+        \\}
+        \\
+        \\fn appManifestModule(b: *std.Build) *std.Build.Module {
+        \\    const root = std.json.parseFromSliceLeaky(std.json.Value, b.allocator, @embedFile("app.json"), .{ .parse_numbers = false }) catch
+        \\        @panic("cannot parse app.json; run `native check` for a precise diagnostic");
+        \\    if (root != .object) @panic("app.json must contain one object");
+        \\    var out = std.Io.Writer.Allocating.init(b.allocator);
+        \\    writeManifestValue(&out.writer, root, 0) catch |err| switch (err) {
+        \\        error.NullNotAllowed => @panic("app.json cannot contain null values; omit optional fields instead"),
+        \\        else => @panic("out of memory converting app.json"),
+        \\    };
+        \\    const generated = b.addWriteFiles().add("app_manifest.zon", out.written());
+        \\    return b.createModule(.{ .root_source_file = generated });
+        \\}
+        \\
+        \\fn writeManifestValue(writer: *std.Io.Writer, value: std.json.Value, depth: usize) !void {
+        \\    switch (value) {
+        \\        .null => return error.NullNotAllowed,
+        \\        .bool => |v| try writer.writeAll(if (v) "true" else "false"),
+        \\        .integer => |v| try writer.print("{d}", .{v}),
+        \\        .float => |v| try writer.print("{d}", .{v}),
+        \\        .number_string => |v| try writer.writeAll(v),
+        \\        .string => |v| try writer.print("\"{f}\"", .{std.zig.fmtString(v)}),
+        \\        .array => |array| {
+        \\            try writer.writeAll(".{");
+        \\            for (array.items) |item| {
+        \\                try writeManifestValue(writer, item, depth + 1);
+        \\                try writer.writeByte(',');
+        \\            }
+        \\            try writer.writeByte('}');
+        \\        },
+        \\        .object => |object| {
+        \\            try writer.writeAll(".{");
+        \\            var iterator = object.iterator();
+        \\            while (iterator.next()) |entry| {
+        \\                if (depth == 0 and std.mem.eql(u8, entry.key_ptr.*, "$schema")) continue;
+        \\                try writer.print(".{f}=", .{std.zig.fmtId(entry.key_ptr.*)});
+        \\                try writeManifestValue(writer, entry.value_ptr.*, depth + 1);
+        \\                try writer.writeByte(',');
+        \\            }
+        \\            try writer.writeByte('}');
+        \\        },
+        \\    }
         \\}
         \\
         \\fn hasManifestPermission(permissions: []const []const u8, name: []const u8) bool {
@@ -2203,7 +2243,7 @@ fn buildZon(allocator: std.mem.Allocator, names: TemplateNames) ![]const u8 {
         \\    .version = "0.1.0",
         \\    .minimum_zig_version = "0.16.0",
         \\    .dependencies = .{},
-        \\    .paths = .{ "build.zig", "build.zig.zon", "src", "assets", "frontend", "app.zon", "README.md" },
+        \\    .paths = .{ "build.zig", "build.zig.zon", "src", "assets", "frontend", "app.json", "README.md" },
         \\}
         \\
     );
@@ -2315,6 +2355,12 @@ fn runnerZig() []const u8 {
     \\const manifest_menus = if (@hasField(@TypeOf(app_manifest), "menus")) app_manifest.menus else .{};
     \\const manifest_windows = if (@hasField(@TypeOf(app_manifest), "windows")) app_manifest.windows else .{};
     \\
+    \\fn manifestImagePixelBudget() usize {
+    \\    if (comptime !@hasField(@TypeOf(app_manifest), "images")) return native_sdk.max_registered_canvas_image_pixel_bytes;
+    \\    if (comptime !@hasField(@TypeOf(app_manifest.images), "max_image_pixel_bytes")) return native_sdk.max_registered_canvas_image_pixel_bytes;
+    \\    return app_manifest.images.max_image_pixel_bytes;
+    \\}
+    \\
     \\pub const StdoutTraceSink = struct {
     \\    pub fn sink(self: *StdoutTraceSink) native_sdk.trace.Sink {
     \\        return .{ .context = self, .write_fn = write };
@@ -2371,8 +2417,12 @@ fn runnerZig() []const u8 {
     \\            // a canvas-first startup window is created ordered-out and
     \\            // shown after its first canvas frame presents, so launch
     \\            // never flashes a blank window.
+    \\            info.main_window.default_frame = manifestShellStartupFrame(info.main_window.default_frame);
+    \\            info.main_window.restore_state = manifestShellStartupRestoreState(info.main_window.restore_state);
     \\            info.main_window.titlebar = manifestShellStartupTitlebar();
     \\            info.main_window.resizable = manifestShellStartupResizable();
+    \\            info.main_window.restore_policy = manifestShellStartupRestorePolicy(info.main_window.restore_policy);
+    \\            info.main_window.initial_placement = manifestShellStartupInitialPlacement(info.main_window.initial_placement);
     \\            info.main_window.show = manifestShellStartupShowMode();
     \\            info.main_window.transparent = manifestShellStartupBool("transparent", false);
     \\            info.main_window.always_on_top = manifestShellStartupBool("always_on_top", false);
@@ -2510,6 +2560,7 @@ fn runnerZig() []const u8 {
     \\        .resizable = windowBool(window, "resizable", true),
     \\        .restore_state = windowBool(window, "restore_state", true),
     \\        .restore_policy = windowRestorePolicy(window),
+    \\        .initial_placement = if (windowHasExplicitOrigin(window)) .explicit else .default,
     \\        .titlebar = windowTitlebarStyle(window),
     \\        .show = if (windowBool(window, "initially_hidden", false)) .hidden else .immediate,
     \\        .transparent = windowBool(window, "transparent", false),
@@ -2551,6 +2602,60 @@ fn runnerZig() []const u8 {
     \\    if (comptime std.mem.eql(u8, value, "clamp_to_visible_screen")) return .clamp_to_visible_screen;
     \\    if (comptime std.mem.eql(u8, value, "center_on_primary")) return .center_on_primary;
     \\    @compileError("unknown app.zon window restore_policy");
+    \\}
+    \\
+    \\fn windowHasExplicitOrigin(comptime window: anytype) bool {
+    \\    return @hasField(@TypeOf(window), "x") or @hasField(@TypeOf(window), "y");
+    \\}
+    \\
+    \\/// The host creates the first scene window before the scene loads, so its
+    \\/// authored frame must ride AppInfo with the other creation-time options.
+    \\/// Omitted fields preserve the direct runner fallback independently.
+    \\fn manifestShellStartupFrame(fallback: native_sdk.geometry.RectF) native_sdk.geometry.RectF {
+    \\    if (comptime !@hasField(@TypeOf(app_manifest), "shell")) return fallback;
+    \\    const shell = app_manifest.shell;
+    \\    if (comptime !@hasField(@TypeOf(shell), "windows")) return fallback;
+    \\    if (comptime shell.windows.len == 0) return fallback;
+    \\    const window = shell.windows[0];
+    \\    return native_sdk.geometry.RectF.init(
+    \\        windowFloatFallback(window, "x", fallback.x),
+    \\        windowFloatFallback(window, "y", fallback.y),
+    \\        windowFloatFallback(window, "width", fallback.width),
+    \\        windowFloatFallback(window, "height", fallback.height),
+    \\    );
+    \\}
+    \\
+    \\fn windowFloatFallback(comptime window: anytype, comptime field: []const u8, fallback: f32) f32 {
+    \\    if (comptime @hasField(@TypeOf(window), field)) return @field(window, field);
+    \\    return fallback;
+    \\}
+    \\
+    \\fn manifestShellStartupRestoreState(fallback: bool) bool {
+    \\    if (comptime !@hasField(@TypeOf(app_manifest), "shell")) return fallback;
+    \\    const shell = app_manifest.shell;
+    \\    if (comptime !@hasField(@TypeOf(shell), "windows")) return fallback;
+    \\    if (comptime shell.windows.len == 0) return fallback;
+    \\    const window = shell.windows[0];
+    \\    if (comptime @hasField(@TypeOf(window), "restore_state")) return window.restore_state;
+    \\    return fallback;
+    \\}
+    \\
+    \\fn manifestShellStartupRestorePolicy(fallback: native_sdk.WindowRestorePolicy) native_sdk.WindowRestorePolicy {
+    \\    if (comptime !@hasField(@TypeOf(app_manifest), "shell")) return fallback;
+    \\    const shell = app_manifest.shell;
+    \\    if (comptime !@hasField(@TypeOf(shell), "windows")) return fallback;
+    \\    if (comptime shell.windows.len == 0) return fallback;
+    \\    const window = shell.windows[0];
+    \\    if (comptime !@hasField(@TypeOf(window), "restore_policy")) return fallback;
+    \\    return windowRestorePolicy(window);
+    \\}
+    \\
+    \\fn manifestShellStartupInitialPlacement(fallback: native_sdk.WindowInitialPlacement) native_sdk.WindowInitialPlacement {
+    \\    if (comptime !@hasField(@TypeOf(app_manifest), "shell")) return fallback;
+    \\    const shell = app_manifest.shell;
+    \\    if (comptime !@hasField(@TypeOf(shell), "windows")) return fallback;
+    \\    if (comptime shell.windows.len == 0) return fallback;
+    \\    return if (windowHasExplicitOrigin(shell.windows[0])) .explicit else fallback;
     \\}
     \\
     \\/// Window-enforced content min-size floor from app.zon. Validated at
@@ -2857,6 +2962,7 @@ fn runnerZig() []const u8 {
     \\    defer std.heap.page_allocator.destroy(runtime);
     \\    native_sdk.Runtime.initAt(runtime, .{
     \\        .platform = null_platform.platform(),
+    \\        .max_image_pixel_bytes = manifestImagePixelBudget(),
     \\        .trace_sink = runtime_trace_sink,
     \\        .log_path = if (log_setup) |setup| setup.paths.log_file else null,
     \\        .bridge = options.bridge,
@@ -2914,6 +3020,7 @@ fn runnerZig() []const u8 {
     \\    defer std.heap.page_allocator.destroy(runtime);
     \\    native_sdk.Runtime.initAt(runtime, .{
     \\        .platform = mac_platform.platform(),
+    \\        .max_image_pixel_bytes = manifestImagePixelBudget(),
     \\        .trace_sink = runtime_trace_sink,
     \\        .log_path = if (log_setup) |setup| setup.paths.log_file else null,
     \\        .bridge = options.bridge,
@@ -2971,6 +3078,7 @@ fn runnerZig() []const u8 {
     \\    defer std.heap.page_allocator.destroy(runtime);
     \\    native_sdk.Runtime.initAt(runtime, .{
     \\        .platform = linux_platform.platform(),
+    \\        .max_image_pixel_bytes = manifestImagePixelBudget(),
     \\        .trace_sink = runtime_trace_sink,
     \\        .log_path = if (log_setup) |setup| setup.paths.log_file else null,
     \\        .bridge = options.bridge,
@@ -3028,6 +3136,7 @@ fn runnerZig() []const u8 {
     \\    defer std.heap.page_allocator.destroy(runtime);
     \\    native_sdk.Runtime.initAt(runtime, .{
     \\        .platform = windows_platform.platform(),
+    \\        .max_image_pixel_bytes = manifestImagePixelBudget(),
     \\        .trace_sink = runtime_trace_sink,
     \\        .log_path = if (log_setup) |setup| setup.paths.log_file else null,
     \\        .bridge = options.bridge,
@@ -3119,12 +3228,17 @@ fn runnerZig() []const u8 {
     \\            if (!window.restore_state) continue;
     \\            if (store.loadWindow(window.label, &buffers.read) catch null) |saved| {
     \\                window.default_frame = saved.frame;
-    \\                if (index == 0) app_info.main_window.default_frame = saved.frame;
+    \\                window.initial_placement = .restored;
+    \\                if (index == 0) {
+    \\                    app_info.main_window.default_frame = saved.frame;
+    \\                    app_info.main_window.initial_placement = .restored;
+    \\                }
     \\            }
     \\        }
     \\    } else if (app_info.main_window.restore_state) {
     \\        if (store.loadWindow(app_info.main_window.label, &buffers.read) catch null) |saved| {
     \\            app_info.main_window.default_frame = saved.frame;
+    \\            app_info.main_window.initial_placement = .restored;
     \\        }
     \\    }
     \\    return store;
@@ -3133,46 +3247,47 @@ fn runnerZig() []const u8 {
     ;
 }
 
-fn appZon(allocator: std.mem.Allocator, names: TemplateNames, frontend: Frontend) ![]const u8 {
+fn appJson(allocator: std.mem.Allocator, names: TemplateNames, frontend: Frontend) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
     try out.appendSlice(allocator,
-        \\.{
-        \\    .id =
+        \\{
+        \\    "$schema": "https://schema.native-sdk.dev/app/v1.json",
+        \\    "id":
     );
-    try appendZigString(&out, allocator, names.app_id);
+    try appendJsonString(&out, allocator, names.app_id);
     try out.appendSlice(allocator,
         \\,
-        \\    .name =
+        \\    "name":
     );
-    try appendZigString(&out, allocator, names.package_name);
+    try appendJsonString(&out, allocator, names.package_name);
     try out.appendSlice(allocator,
         \\,
-        \\    .display_name =
+        \\    "display_name":
     );
-    try appendZigString(&out, allocator, names.display_name);
+    try appendJsonString(&out, allocator, names.display_name);
     try out.appendSlice(allocator,
         \\,
-        \\    .version = "0.1.0",
-        \\    .icons = .{ "assets/icon.png" },
-        \\    .platforms = .{ "macos", "linux" },
-        \\    .permissions = .{},
-        \\    .capabilities = .{ "webview" },
-        \\    .frontend = .{
-        \\        .dist =
+        \\    "version": "0.1.0",
+        \\    "icons": ["assets/icon.png"],
+        \\    "platforms": ["macos", "linux"],
+        \\    "permissions": [],
+        \\    "capabilities": ["webview"],
+        \\    "frontend": {
+        \\        "dist":
     );
-    try appendZigString(&out, allocator, frontend.distDir());
+    try appendJsonString(&out, allocator, frontend.distDir());
     try out.appendSlice(allocator,
         \\,
-        \\        .entry = "index.html",
-        \\        .spa_fallback = true,
-        \\        .dev = .{
-        \\            .url =
+        \\        "entry": "index.html",
+        \\        "spa_fallback": true,
+        \\        "dev": {
+        \\            "url":
     );
-    try appendZigString(&out, allocator, frontend.devUrl());
+    try appendJsonString(&out, allocator, frontend.devUrl());
     try out.appendSlice(allocator,
         \\,
-        \\            .command = .{ "npm", "--prefix", "frontend", "run", "dev"
+        \\            "command": ["npm", "--prefix", "frontend", "run", "dev"
     );
     if (frontend != .next) {
         try out.appendSlice(allocator,
@@ -3180,33 +3295,33 @@ fn appZon(allocator: std.mem.Allocator, names: TemplateNames, frontend: Frontend
         );
     }
     try out.appendSlice(allocator,
-        \\ },
-        \\            .ready_path = "/",
-        \\            .timeout_ms = 30000,
-        \\        },
+        \\],
+        \\            "ready_path": "/",
+        \\            "timeout_ms": 30000
+        \\        }
         \\    },
-        \\    .security = .{
-        \\        .navigation = .{
-        \\            .allowed_origins = .{ "zero://app", "zero://inline",
+        \\    "security": {
+        \\        "navigation": {
+        \\            "allowed_origins": ["zero://app", "zero://inline",
     );
     try out.appendSlice(allocator, " ");
     const dev_origin = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{s}", .{frontend.devPort()});
     defer allocator.free(dev_origin);
-    try appendZigString(&out, allocator, dev_origin);
+    try appendJsonString(&out, allocator, dev_origin);
     try out.appendSlice(allocator,
-        \\ },
-        \\            .external_links = .{ .action = "deny" },
-        \\        },
+        \\],
+        \\            "external_links": { "action": "deny" }
+        \\        }
         \\    },
-        \\    .web_engine = "system",
-        \\    .cef = .{ .dir = "third_party/cef/macos", .auto_install = false },
-        \\    .windows = .{
-        \\        .{ .label = "main", .title =
+        \\    "web_engine": "system",
+        \\    "cef": { "dir": "third_party/cef/macos", "auto_install": false },
+        \\    "windows": [
+        \\        { "label": "main", "title":
     );
-    try appendZigString(&out, allocator, names.display_name);
+    try appendJsonString(&out, allocator, names.display_name);
     try out.appendSlice(allocator,
-        \\, .width = 720, .height = 480, .restore_state = true },
-        \\    },
+        \\, "width": 720, "height": 480, "restore_state": true }
+        \\    ]
         \\}
         \\
     );
@@ -3934,10 +4049,10 @@ fn readme(allocator: std.mem.Allocator, names: TemplateNames, framework_path: []
         \\zig build run
         \\zig build test
         \\zig build package
-        \\native doctor --manifest app.zon
+        \\native doctor --manifest app.json
         \\```
         \\
-        \\`zig build dev` starts the frontend dev server from `app.zon`, waits for it, and launches the native shell with `NATIVE_SDK_FRONTEND_URL`.
+        \\`zig build dev` starts the frontend dev server from `app.json`, waits for it, and launches the native shell with `NATIVE_SDK_FRONTEND_URL`.
         \\
         \\Frontend:
         \\
@@ -4019,7 +4134,7 @@ test "writeDefaultApp emits Vite project files" {
     const destination = ".zig-cache/test-vite-init-template";
     try writeDefaultApp(std.testing.allocator, std.testing.io, destination, .{ .app_name = "My App", .framework_path = ".", .frontend = .vite });
 
-    const app_zon_text = try readTestFile(std.testing.allocator, std.testing.io, destination, "app.zon");
+    const app_zon_text = try readTestFile(std.testing.allocator, std.testing.io, destination, "app.json");
     defer std.testing.allocator.free(app_zon_text);
     const build_zig_text = try readTestFile(std.testing.allocator, std.testing.io, destination, "build.zig");
     defer std.testing.allocator.free(build_zig_text);
@@ -4032,10 +4147,11 @@ test "writeDefaultApp emits Vite project files" {
     const main_js_text = try readTestFile(std.testing.allocator, std.testing.io, destination, "frontend/src/main.js");
     defer std.testing.allocator.free(main_js_text);
 
-    try std.testing.expect(std.mem.indexOf(u8, app_zon_text, ".frontend") != null);
+    try std.testing.expect(std.mem.indexOf(u8, app_zon_text, "\"frontend\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, app_zon_text, "frontend/dist") != null);
     try std.testing.expect(std.mem.indexOf(u8, app_zon_text, "npm") != null);
-    try std.testing.expect(std.mem.indexOf(u8, app_zon_text, ".windows") != null);
+    try std.testing.expect(std.mem.indexOf(u8, app_zon_text, "\"windows\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, app_zon_text, "\"$schema\": \"https://schema.native-sdk.dev/app/v1.json\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "frontend-install") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "\"npm\", \"install\", \"--prefix\", \"frontend\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "frontend-build") != null);
@@ -4078,7 +4194,10 @@ test "writeDefaultApp emits Vite project files" {
     // the packaged artifact structurally agrees with the compiled exe.
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "package.addArgs(&.{ \"--web-layer\", if (web_layer) \"include\" else \"exclude\" })") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "options.addOption(bool, \"web_layer\", web_layer)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "std.zon.parse.fromSliceAlloc(InferenceManifest") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "std.json.parseFromSliceLeaky(InferenceManifest") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "fn appManifestModule") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, ".{ .parse_numbers = false }") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, ".null => return error.NullNotAllowed") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "the web layer is excluded ({s}) but the app declares web use ({s})") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, ".system => if (web_layer) {") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "\"-DNATIVE_SDK_ALLOW_WEBVIEW2_STUB\"") != null);
@@ -4135,6 +4254,8 @@ test "writeDefaultApp emits Vite project files" {
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "fn manifestWindowOptions") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "info.windows = windows") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "for (restored_windows, 0..)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "window.initial_placement = .restored") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "app_info.main_window.initial_placement = .restored") != null);
     // The generated manifestWindow must thread every declarable window
     // option into WindowOptions — a dropped field is a silent no-op for
     // every `native create` app (the manifest accepts the declaration,
@@ -4143,6 +4264,7 @@ test "writeDefaultApp emits Vite project files" {
     // .hide window with no tray to bring it back must fail the build,
     // not strand a hidden window at runtime).
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, ".restore_policy = windowRestorePolicy(window)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, ".initial_placement = if (windowHasExplicitOrigin(window)) .explicit else .default") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, ".titlebar = windowTitlebarStyle(window)") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, ".min_width = windowMinSize(window, \"min_width\")") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, ".min_height = windowMinSize(window, \"min_height\")") != null);
@@ -4170,6 +4292,14 @@ test "writeDefaultApp emits Vite project files" {
     // shell path carries the same Linux comptime refusal pinned above.
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "info.main_window.titlebar = manifestShellStartupTitlebar()") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "info.main_window.resizable = manifestShellStartupResizable()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "info.main_window.default_frame = manifestShellStartupFrame(info.main_window.default_frame)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "windowFloatFallback(window, \"x\", fallback.x)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "info.main_window.restore_state = manifestShellStartupRestoreState(info.main_window.restore_state)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "if (comptime @hasField(@TypeOf(window), \"restore_state\")) return window.restore_state") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "info.main_window.restore_policy = manifestShellStartupRestorePolicy(info.main_window.restore_policy)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "info.main_window.initial_placement = manifestShellStartupInitialPlacement(info.main_window.initial_placement)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "if (comptime !@hasField(@TypeOf(window), \"restore_policy\")) return fallback") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "return if (windowHasExplicitOrigin(shell.windows[0])) .explicit else fallback") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "info.main_window.show = manifestShellStartupShowMode()") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "info.main_window.min_width = manifestShellStartupMinSize(\"min_width\")") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "info.main_window.min_height = manifestShellStartupMinSize(\"min_height\")") != null);
@@ -4181,6 +4311,12 @@ test "writeDefaultApp emits Vite project files" {
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "defer std.heap.page_allocator.destroy(runtime)") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "native_sdk.Runtime.initAt(runtime, .{") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "Runtime.init(.{") == null);
+    // Every generated desktop runner freezes the app.zon registered-image
+    // budget into Runtime options, with a compatibility fallback for
+    // manifests generated before the images block existed.
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "fn manifestImagePixelBudget() usize") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "@hasField(@TypeOf(app_manifest), \"images\")") != null);
+    try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, runner_zig_text, ".max_image_pixel_bytes = manifestImagePixelBudget(),"));
     // The generated runner consumes the same web-layer contract: the
     // shared inference for honest menus, the build option threaded into
     // every runtime init, and the comptime conflict guard.
@@ -4205,7 +4341,7 @@ test "writeDefaultApp emits frontend-specific Next paths" {
     const destination = ".zig-cache/test-next-init-template";
     try writeDefaultApp(std.testing.allocator, std.testing.io, destination, .{ .app_name = "Next App", .framework_path = ".", .frontend = .next });
 
-    const app_zon_text = try readTestFile(std.testing.allocator, std.testing.io, destination, "app.zon");
+    const app_zon_text = try readTestFile(std.testing.allocator, std.testing.io, destination, "app.json");
     defer std.testing.allocator.free(app_zon_text);
     const build_zig_text = try readTestFile(std.testing.allocator, std.testing.io, destination, "build.zig");
     defer std.testing.allocator.free(build_zig_text);
@@ -4230,7 +4366,7 @@ test "writeDefaultApp emits the TS-core scaffold by default: three files of trut
     defer std.testing.allocator.free(core_text);
     const markup_text = try readTestFile(std.testing.allocator, std.testing.io, destination, "src/app.native");
     defer std.testing.allocator.free(markup_text);
-    const ts_app_zon = try readTestFile(std.testing.allocator, std.testing.io, destination, "app.zon");
+    const ts_app_zon = try readTestFile(std.testing.allocator, std.testing.io, destination, "app.json");
     defer std.testing.allocator.free(ts_app_zon);
     const ts_readme = try readTestFile(std.testing.allocator, std.testing.io, destination, "README.md");
     defer std.testing.allocator.free(ts_readme);
@@ -4323,7 +4459,7 @@ test "writeDefaultApp --template zig-core emits the slim Zig scaffold at ts-core
     const destination = ".zig-cache/test-native-slim-template";
     try writeDefaultApp(std.testing.allocator, std.testing.io, destination, .{ .app_name = "My App", .framework_path = ".", .frontend = .native, .core = .zig });
 
-    const app_zon_text = try readTestFile(std.testing.allocator, std.testing.io, destination, "app.zon");
+    const app_zon_text = try readTestFile(std.testing.allocator, std.testing.io, destination, "app.json");
     defer std.testing.allocator.free(app_zon_text);
     const main_zig_text = try readTestFile(std.testing.allocator, std.testing.io, destination, "src/main.zig");
     defer std.testing.allocator.free(main_zig_text);
@@ -4380,7 +4516,7 @@ test "writeDefaultApp emits native project files" {
     const destination = ".zig-cache/test-native-init-template";
     try writeDefaultApp(std.testing.allocator, std.testing.io, destination, .{ .app_name = "My App", .framework_path = ".", .frontend = .native, .shape = .full, .core = .zig });
 
-    const app_zon_text = try readTestFile(std.testing.allocator, std.testing.io, destination, "app.zon");
+    const app_zon_text = try readTestFile(std.testing.allocator, std.testing.io, destination, "app.json");
     defer std.testing.allocator.free(app_zon_text);
     const build_zig_text = try readTestFile(std.testing.allocator, std.testing.io, destination, "build.zig");
     defer std.testing.allocator.free(build_zig_text);
@@ -4406,8 +4542,8 @@ test "writeDefaultApp emits native project files" {
     try std.testing.expect(std.mem.indexOf(u8, app_zon_text, "gpu_surface") != null);
     try std.testing.expect(std.mem.indexOf(u8, app_zon_text, "\"native_views\", \"gpu_surfaces\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, app_zon_text, "dev.native_sdk.my-app") != null);
-    try std.testing.expect(std.mem.indexOf(u8, app_zon_text, ".frontend") == null);
-    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "native_sdk.addApp(b, b.dependency(\"native_sdk\", .{}), .{ .name = \"my-app\" })") != null);
+    try std.testing.expect(std.mem.indexOf(u8, app_zon_text, "\"frontend\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "native_sdk.addApp(b, b.dependency(\"native_sdk\", .{}), .{ .name = \"my-app\", .manifest = \"app.json\" })") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zon_text, ".native_sdk = .{ .path = ") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zon_text, ".name = .my_app") != null);
     try std.testing.expect(std.mem.indexOf(u8, main_zig_text, "native_sdk.UiApp(Model, Msg)") != null);
@@ -4444,6 +4580,10 @@ test "writeDefaultApp --full ts-core emits a CI workflow with the node tier" {
     // frontend + compiler install inside the fetched SDK's packages/core,
     // in BOTH jobs (each builds the app, so each compiles the core).
     try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "actions/setup-node@v4") != null);
+    const node_24 = "node-version: 24";
+    const first_node = std.mem.indexOf(u8, ci_yaml_text, node_24).?;
+    try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text[first_node + node_24.len ..], node_24) != null);
+    try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text, "node-version: 22") == null);
     const npm_ci = "npm ci --prefix \"$NATIVE_SDK_PATH/packages/core\"";
     const first = std.mem.indexOf(u8, ci_yaml_text, npm_ci).?;
     try std.testing.expect(std.mem.indexOf(u8, ci_yaml_text[first + npm_ci.len ..], npm_ci) != null);

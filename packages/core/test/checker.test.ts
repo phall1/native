@@ -1093,7 +1093,7 @@ export function update(model: Model, msg: Msg): Model {
   assert.ok(d, `expected NS1032, got ${ruleIds(result)}`);
   assert.ok(d.message.includes('"nope"'), d.message);
   // The two valid entries alone are clean.
-  const clean = checkOnly(`
+  const clean = check(`
 export interface Model { readonly count: number; }
 export type Msg = { readonly kind: "add" } | { readonly kind: "tick"; readonly at: number };
 export const viewUnbound = ["count", "tick"] as const;
@@ -1139,6 +1139,70 @@ export function update(model: Model, msg: Msg): Model { return model; }
   assert.ok(ruleIds(wrongShape).includes("NS1033"), `got ${ruleIds(wrongShape)}`);
 });
 
+test("NS1033 themeState is the exact model-derived appearance record and excludes themePack", () => {
+  const clean = check(`
+import { type ThemeState } from "@native-sdk/core/events";
+export type Scheme = "light" | "dark" | "system";
+export interface Model { readonly scheme: Scheme; readonly branded: boolean; }
+export type Msg = { readonly kind: "toggle" } | { readonly kind: "noop" };
+export function initialModel(): Model { return { scheme: "system", branded: false }; }
+export function themeState(model: Model): ThemeState {
+  return model.branded
+    ? { pack: "geist", colorScheme: model.scheme, accent: "#df2670" }
+    : { colorScheme: model.scheme };
+}
+export function update(model: Model, msg: Msg): Model { return model; }
+`);
+  assert.equal(clean.ok, true, clean.diagnostics.map((d) => d.message).join("\n"));
+  assert.ok(!ruleIds(clean).includes("NS1033"), `got ${ruleIds(clean)}`);
+
+  const lookalike = checkOnly(`
+export type ThemeState = {
+  readonly pack?: "house" | "geist";
+  readonly colorScheme?: "light" | "dark" | "system";
+  readonly accent?: string;
+};
+export interface Model { readonly enabled: boolean; }
+export type Msg = { readonly kind: "tick" };
+export function initialModel(): Model { return { enabled: false }; }
+export function themeState(model: Model): ThemeState { return {}; }
+export function update(model: Model, msg: Msg): Model { return model; }
+`);
+  assert.ok(ruleIds(lookalike).includes("NS1033"), `got ${ruleIds(lookalike)}`);
+
+  const wrongRecord = checkOnly(`
+export interface WrongThemeState { readonly pack: "house" | "geist"; readonly accent: Uint8Array; }
+export interface Model { readonly enabled: boolean; }
+export type Msg = { readonly kind: "tick" };
+export function initialModel(): Model { return { enabled: false }; }
+export function themeState(model: Model): WrongThemeState { return { pack: "house", accent: new Uint8Array(0) }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+`);
+  assert.ok(ruleIds(wrongRecord).includes("NS1033"), `got ${ruleIds(wrongRecord)}`);
+
+  const wrongShape = checkOnly(`
+import { type ThemeState } from "@native-sdk/core/events";
+export interface Model { readonly enabled: boolean; }
+export type Msg = { readonly kind: "tick" };
+export function initialModel(): Model { return { enabled: false }; }
+export function themeState(): ThemeState { return {}; }
+export function update(model: Model, msg: Msg): Model { return model; }
+`);
+  assert.ok(ruleIds(wrongShape).includes("NS1033"), `got ${ruleIds(wrongShape)}`);
+
+  const both = checkOnly(`
+import { type ThemeState } from "@native-sdk/core/events";
+export type ThemePack = "house" | "geist";
+export interface Model { readonly pack: ThemePack; }
+export type Msg = { readonly kind: "tick" };
+export function initialModel(): Model { return { pack: "house" }; }
+export function themePack(model: Model): ThemePack { return model.pack; }
+export function themeState(model: Model): ThemeState { return { pack: model.pack }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+`);
+  assert.ok(ruleIds(both).includes("NS1033"), `got ${ruleIds(both)}`);
+});
+
 test("NS1033 validates migrate hooks exported through an export list", () => {
   const valid = checkOnly(`
 export interface Model { readonly count: number; }
@@ -1178,6 +1242,9 @@ export function statusItem(model: Model): StatusItemState {
     openCommand: asciiBytes("refresh"),
     presentation: { title: asciiBytes(model.playing ? "MB on" : "MB"), width: 52, tone: "normal", iconOpacity: 1, monospaced: true },
     items: [
+      { id: 0, label: asciiBytes(""), command: asciiBytes(""), separator: false, enabled: false, detail: asciiBytes(""), role: "hero", key: asciiBytes(""), modifiers: { primary: false, command: false, control: false, option: false, shift: false }, metric: { primaryText: asciiBytes("2,494 requests"), secondaryText: asciiBytes("Today"), accessibilityLabel: asciiBytes("2,494 requests today") } },
+      { id: 0, label: asciiBytes(""), command: asciiBytes(""), separator: false, enabled: true, detail: asciiBytes(""), role: "segmented", key: asciiBytes(""), modifiers: { primary: false, command: false, control: false, option: false, shift: false }, segmented: { options: [{ id: 11, label: asciiBytes("On"), command: asciiBytes("enable"), selected: model.playing, enabled: true }] } },
+      { id: 0, label: asciiBytes(""), command: asciiBytes(""), separator: false, enabled: false, detail: asciiBytes(""), role: "chart", key: asciiBytes(""), modifiers: { primary: false, command: false, control: false, option: false, shift: false }, chart: { values: [0.25, 0.5, 1], minValue: 0, maxValue: 1, leadingCaption: asciiBytes("Load"), trailingSummary: asciiBytes("50%"), accessibilityLabel: asciiBytes("Load history, 50 percent") } },
       { id: 1, label: asciiBytes(model.playing ? "Pause" : "Play"), command: asciiBytes("toggle"), separator: false, enabled: true, detail: asciiBytes("configured"), role: "agent", key: asciiBytes(""), modifiers: { primary: false, command: false, control: false, option: false, shift: false } },
       { id: 0, label: asciiBytes(""), command: asciiBytes(""), separator: true, enabled: false, detail: asciiBytes(""), role: "command", key: asciiBytes(""), modifiers: { primary: false, command: false, control: false, option: false, shift: false } },
     ],
@@ -1277,7 +1344,7 @@ export function initialModel(): Model { return { settingsOpen: false }; }
 export function update(model: Model, msg: Msg): Model { return model; }
 export function windows(model: Model): readonly WindowDescriptor[] {
   if (!model.settingsOpen) return [];
-  return [windowDescriptor({ label: asciiBytes("settings"), canvasLabel: asciiBytes("settings-canvas"), titlebar: "chromeless", transparent: true, closePolicy: "hide", onCloseCommand: asciiBytes("settings.closed") })];
+  return [windowDescriptor({ label: asciiBytes("settings"), canvasLabel: asciiBytes("settings-canvas"), restorePolicy: "center_on_primary", titlebar: "chromeless", transparent: true, closePolicy: "hide", onCloseCommand: asciiBytes("settings.closed") })];
 }
 `;
   const clean = check(cleanSource, { windowViews: ["settings"] });

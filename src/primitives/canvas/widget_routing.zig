@@ -55,13 +55,14 @@ pub fn hitTestWidgetLayout(layout: anytype, point: geometry.PointF, tokens: Desi
 }
 
 pub fn hitTestWidgetLayoutWithPolicy(layout: anytype, point: geometry.PointF, tokens: DesignTokens, comptime policy: HitTestPolicy) ?WidgetHit {
-    // Anchored floating surfaces paint in the late z-pass — topmost — so
-    // they hit-test FIRST, in reverse tree order (a nested anchored
-    // submenu has a higher node index than the surface it hangs from).
-    var index = layout.nodes.len;
-    while (index > 0) {
-        index -= 1;
-        if (!widget_tree.widgetIsAnchored(layout.nodes[index].widget)) continue;
+    // Window-level surfaces paint in the late z-pass — topmost — so they
+    // hit-test FIRST, in reverse window-surface paint order.
+    const surface_count = widget_tree.widgetLayoutWindowSurfaceCount(layout);
+    var tested: usize = 0;
+    var previous: ?widget_tree.WidgetPaintOrder = null;
+    while (tested < surface_count) : (tested += 1) {
+        const index = widget_tree.previousWidgetLayoutWindowSurface(layout, tokens, previous) orelse break;
+        previous = widget_tree.widgetLayoutWindowSurfaceOrder(layout, index, tokens);
         if (isWidgetHiddenInAncestors(layout, index)) continue;
         if (widget_tree.isWidgetConcealedByDisclosure(layout, index)) continue;
         if (hitTestWidgetLayoutNode(layout, index, point, tokens, policy)) |hit| return hit;
@@ -75,9 +76,9 @@ fn hitTestWidgetLayoutChildren(layout: anytype, parent_index: ?usize, point: geo
     var previous: ?widget_tree.WidgetPaintOrder = null;
     while (tested < child_count) : (tested += 1) {
         const child_index = widget_tree.previousWidgetLayoutPaintChild(layout, parent_index, tokens, previous) orelse return null;
-        // Anchored floating children live in the hoisted pre-pass above,
-        // never at their tree position.
-        if (!widget_tree.widgetIsAnchored(layout.nodes[child_index].widget)) {
+        // Window-level surfaces live in the hoisted pre-pass above, never
+        // at their tree position.
+        if (!widget_tree.widgetEscapesAncestorClips(layout.nodes[child_index].widget)) {
             if (hitTestWidgetLayoutNode(layout, child_index, point, tokens, policy)) |hit| return hit;
         }
         previous = .{ .layer = widget_tree.widgetPaintLayer(layout.nodes[child_index].widget, tokens), .index = child_index };
@@ -122,6 +123,7 @@ fn widgetHitFromNode(node: WidgetLayoutNode, index: usize) WidgetHit {
         .depth = node.depth,
         .index = index,
         .state = node.widget.state,
+        .split_axis = node.widget.runtime_flags.split_axis,
         .role = node.widget.semantics.role,
     };
 }
@@ -131,7 +133,7 @@ fn widgetHitFromNode(node: WidgetLayoutNode, index: usize) WidgetHit {
 /// claims presses (`widgetClaimsPress`). Plain text, icons, decorations,
 /// and layout containers let the press fall through; interactive kinds,
 /// editable text, scroll containers, overlay surfaces, and any widget
-/// with a bound press/toggle handler stop the walk. Returns null when
+/// with a bound press/toggle/drag handler stop the walk. Returns null when
 /// nothing on the path claims — the press dispatches to no one, exactly
 /// like a click on dead space.
 pub fn widgetPressTargetIndexFromNode(layout: anytype, node_index: usize) ?usize {
@@ -234,9 +236,9 @@ pub fn widgetWindowDragTargetIndexFromNode(layout: anytype, node_index: usize) ?
 fn isPointVisibleInWidgetAncestors(layout: anytype, node_index: usize, point: geometry.PointF) bool {
     var current: usize = node_index;
     while (true) {
-        // An anchored floating widget escapes its ancestors' clip regions
-        // (window-clipped, not parent-clipped), so the walk stops here.
-        if (widget_tree.widgetIsAnchored(layout.nodes[current].widget)) return true;
+        // A window-level surface escapes its ancestors' clip regions, so
+        // the walk stops here.
+        if (widget_tree.widgetEscapesAncestorClips(layout.nodes[current].widget)) return true;
         const parent_index = layout.nodes[current].parent_index orelse return true;
         if (parent_index >= layout.nodes.len) return true;
         const parent = layout.nodes[parent_index];
@@ -251,10 +253,9 @@ fn isWidgetFrameVisibleInWidgetAncestors(layout: anytype, node_index: usize) boo
     if (frame.isEmpty()) return false;
     var current: usize = node_index;
     while (true) {
-        // Anchored floating widgets escape ancestor clips — focus targets
-        // inside an open overlay stay live outside the scroll ancestor's
-        // bounds.
-        if (widget_tree.widgetIsAnchored(layout.nodes[current].widget)) return true;
+        // Window-level surfaces escape ancestor clips, keeping their focus
+        // targets live outside the authored container's bounds.
+        if (widget_tree.widgetEscapesAncestorClips(layout.nodes[current].widget)) return true;
         const parent_index = layout.nodes[current].parent_index orelse return true;
         if (parent_index >= layout.nodes.len) return true;
         const parent = layout.nodes[parent_index];
@@ -413,6 +414,26 @@ pub fn focusWidgetTargetById(layout: anytype, id: ObjectId, scroll_semantics_fn:
     return focusTargetFromLayoutNode(layout, index, scroll_semantics_fn);
 }
 
+/// Resolve every ordinary focus gate except ancestor geometry. Runtime
+/// reveal paths use this to name a clipped target before scrolling it, while
+/// keeping the exact same hidden, disclosure, disabled, and scroll-semantic
+/// eligibility as `focusWidgetTargetById`.
+pub fn logicalFocusWidgetTargetAtIndex(layout: anytype, index: usize, scroll_semantics_fn: anytype) ?WidgetFocusTarget {
+    if (index >= layout.nodes.len) return null;
+    if (isWidgetHiddenInAncestors(layout, index)) return null;
+    if (widget_tree.isWidgetConcealedByDisclosure(layout, index)) return null;
+    const node = layout.nodes[index];
+    if (node.widget.id == 0) return null;
+    if (!widget_access.isFocusable(node.widget) and (node.widget.state.disabled or !scroll_semantics_fn(layout, index).scrollable)) return null;
+    return .{
+        .id = node.widget.id,
+        .kind = node.widget.kind,
+        .bounds = node.frame,
+        .index = index,
+        .state = node.widget.state,
+    };
+}
+
 fn focusForward(layout: anytype, current_index: ?usize, scroll_semantics_fn: anytype) ?WidgetFocusTarget {
     var index: usize = if (current_index) |value| value + 1 else 0;
     while (index < layout.nodes.len) : (index += 1) {
@@ -466,23 +487,9 @@ fn focusSpatial(layout: anytype, current_index: usize, direction: WidgetFocusDir
 }
 
 fn focusTargetFromLayoutNode(layout: anytype, index: usize, scroll_semantics_fn: anytype) ?WidgetFocusTarget {
-    if (index >= layout.nodes.len) return null;
-    if (isWidgetHiddenInAncestors(layout, index)) return null;
-    // Concealed disclosure content never joins the focus order: a
-    // closed section's controls are unreachable by tab or arrows, and
-    // mid-reveal content stays unreachable until the reveal settles.
-    if (widget_tree.isWidgetConcealedByDisclosure(layout, index)) return null;
+    const target = logicalFocusWidgetTargetAtIndex(layout, index, scroll_semantics_fn) orelse return null;
     if (!isWidgetFrameVisibleInWidgetAncestors(layout, index)) return null;
-    const node = layout.nodes[index];
-    if (node.widget.id == 0) return null;
-    if (!widget_access.isFocusable(node.widget) and (node.widget.state.disabled or !scroll_semantics_fn(layout, index).scrollable)) return null;
-    return .{
-        .id = node.widget.id,
-        .kind = node.widget.kind,
-        .bounds = node.frame,
-        .index = index,
-        .state = node.widget.state,
-    };
+    return target;
 }
 
 fn spatialFocusCandidate(

@@ -474,7 +474,7 @@ test "a dead handler on a non-hit-target element reports the attribute position"
     try testing.expectEqual(@as(?markup.MarkupErrorInfo, null), markup.validate(try fixed_parser.parse()));
 }
 
-test "the a11y lint: unnamed controls, icon-only controls, and unnamed text entry are errors" {
+test "the a11y lint: unnamed controls, radiogroups, and text entry are errors" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -490,6 +490,11 @@ test "the a11y lint: unnamed controls, icon-only controls, and unnamed text entr
         // not a name (hearing the content does not say what to type).
         .{ .source = "<row>\n  <text-field on-input=\"draft\" />\n</row>", .message = markup.a11y_unlabeled_editable_message },
         .{ .source = "<row>\n  <input text=\"{query}\" on-input=\"draft\" />\n</row>", .message = markup.a11y_unlabeled_editable_message },
+        // A radio group's individually named choices do not name their
+        // shared question. The built-in element and a literal role
+        // override both require their own label.
+        .{ .source = "<radio-group>\n  <radio label=\"Default\" />\n</radio-group>", .message = markup.a11y_unlabeled_radiogroup_message },
+        .{ .source = "<row role=\"radiogroup\">\n  <radio label=\"Default\" />\n</row>", .message = markup.a11y_unlabeled_radiogroup_message },
         // A blank label is not a name on a control (unlike an image,
         // where the empty label is the decorative opt-out).
         .{ .source = "<row>\n  <checkbox label=\" \" on-toggle=\"select\" />\n</row>", .message = markup.a11y_unlabeled_control_message },
@@ -505,6 +510,7 @@ test "the a11y lint: unnamed controls, icon-only controls, and unnamed text entr
     // select's face content.
     const clean = [_][]const u8{
         "<row>\n  <checkbox on-toggle=\"select\">Done</checkbox>\n</row>",
+        "<radio-group label=\"Density\">\n  <radio checked=\"true\">Default</radio>\n</radio-group>",
         "<row>\n  <checkbox text=\"Done\" on-toggle=\"select\" />\n</row>",
         "<row>\n  <checkbox label=\"Done\" on-toggle=\"select\" />\n</row>",
         "<row>\n  <button icon=\"trash\" label=\"Delete\" on-press=\"remove\"></button>\n</row>",
@@ -514,6 +520,8 @@ test "the a11y lint: unnamed controls, icon-only controls, and unnamed text entr
         "<row>\n  <textarea label=\"Body\" on-input=\"draft\" />\n</row>",
         "<row>\n  <select on-press=\"open\">Newest first</select>\n</row>",
         "<row>\n  <select text=\"{choice}\" on-press=\"open\"/>\n</row>",
+        "<radio-group label=\"Density\">\n  <radio label=\"Default\" />\n</radio-group>",
+        "<row role=\"radiogroup\" label=\"{question}\">\n  <radio label=\"Default\" />\n</row>",
     };
     for (clean) |source| {
         var parser = markup.Parser.init(arena, source);
@@ -632,7 +640,7 @@ test "collectA11yErrors reports every a11y error in one pass with validate's pos
     try testing.expectEqual(@as(usize, 0), markup.collectA11yErrors(try clean_parser.parse(), &storage).len);
 }
 
-test "press and toggle handlers are legal on layout elements (press fall-through makes them pressable)" {
+test "press toggle and drag handlers are legal on layout elements (press fall-through makes them interactive)" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
 
@@ -644,6 +652,7 @@ test "press and toggle handlers are legal on layout elements (press fall-through
         "<column>\n  <row on-press=\"select\" gap=\"8\">\n    <text>press me</text>\n  </row>\n</column>",
         "<column on-press=\"add\">\n  <text>x</text>\n</column>",
         "<column>\n  <stack on-toggle=\"flip\">\n    <text>x</text>\n  </stack>\n</column>",
+        "<column>\n  <row on-drag=\"drag:{open_count}\" label=\"Draggable\">\n    <text>x</text>\n  </row>\n</column>",
         "<row>\n  <icon name=\"search\" on-press=\"go\" />\n</row>",
         "<row>\n  <badge on-press=\"open\">3</badge>\n</row>",
     };
@@ -687,6 +696,7 @@ test "the image attribute validates as one binding on avatar and image" {
     const valid = [_][]const u8{
         "<row>\n  <avatar image=\"{user_image}\">CT</avatar>\n</row>",
         "<row>\n  <image image=\"{cover}\" width=\"120\" height=\"80\" label=\"Cover art\" />\n</row>",
+        "<row>\n  <image image=\"{atlas}\" source-x=\"0\" source-y=\"32\" source-width=\"16\" source-height=\"16\" label=\"Atlas tile\" />\n</row>",
     };
     for (valid) |source| {
         var parser = markup.Parser.init(arena, source);
@@ -702,6 +712,11 @@ test "the image attribute validates as one binding on avatar and image" {
         // attribute would be silently inert.
         .{ .source = "<row>\n  <badge image=\"{user_image}\">3</badge>\n</row>", .message = markup.image_binding_element_message },
         .{ .source = "<column>\n  <panel image=\"{user_image}\" />\n</column>", .message = markup.image_binding_element_message },
+        // Source rectangles are image/avatar-only, require an image, and
+        // are atomic so a missing coordinate never defaults silently.
+        .{ .source = "<row>\n  <badge source-x=\"0\" source-y=\"0\" source-width=\"16\" source-height=\"16\">3</badge>\n</row>", .message = markup.image_source_element_message },
+        .{ .source = "<row>\n  <avatar source-x=\"0\" source-y=\"0\" source-width=\"16\" source-height=\"16\">CT</avatar>\n</row>", .message = markup.image_source_binding_message },
+        .{ .source = "<row>\n  <image image=\"{atlas}\" source-x=\"0\" source-y=\"0\" source-width=\"16\" label=\"Tile\" />\n</row>", .message = markup.image_source_complete_message },
         // ...and required on the leaf: an unbound image is statically
         // dead markup (avatar keeps its initials fallback instead).
         .{ .source = "<row>\n  <image label=\"Art\" />\n</row>", .message = markup.image_missing_image_message },

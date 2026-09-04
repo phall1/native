@@ -28,6 +28,7 @@ pub const MobileWidgetRole = enum(c_int) {
     slider = 18,
     progressbar = 19,
     radio = 20,
+    radiogroup = 21,
 };
 
 pub const MobileWidgetFlag = enum(u32) {
@@ -345,6 +346,7 @@ pub const MobileImageDecodeFn = *const fn (
     bytes_len: usize,
     pixels: ?[*]u8,
     pixels_len: usize,
+    max_pixels: usize,
     out_width: ?*usize,
     out_height: ?*usize,
 ) callconv(.c) c_int;

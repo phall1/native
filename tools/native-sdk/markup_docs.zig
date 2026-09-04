@@ -31,8 +31,8 @@ pub const element_docs = [_]Doc{
     .{ .name = "text", .doc = "Text leaf; content supports {} interpolation. Line policy via wrap: wrap=\"true\" word-wraps, wrap=\"false\" clips to one honest line. size takes the typography rungs heading|display for section headings and hero stats." },
     .{ .name = "badge", .doc = "Text leaf badge; content supports {} interpolation." },
     .{ .name = "button", .doc = "Text-bearing control; the label is the text content. Dispatch with on-press. icon draws a vector icon inline before the label (icon-only when the content is empty; give it a label) — one hit target, one enabled/disabled tint." },
-    .{ .name = "checkbox", .doc = "Value control; bind checked, dispatch with on-toggle." },
-    .{ .name = "radio", .doc = "Value control; bind checked or selected, dispatch with on-toggle." },
+    .{ .name = "checkbox", .doc = "Text-bearing value control; the visible label is text content (or text=), bind checked, dispatch with on-toggle." },
+    .{ .name = "radio", .doc = "Text-bearing single-choice value control; the visible label is text content (or text=), bind checked or selected. Selection dispatches on-change when bound, then on-toggle, then on-press for compatibility." },
     .{ .name = "toggle", .doc = "Text-bearing toggle control; the label is the text content." },
     .{ .name = "slider", .doc = "Value control; bind value, dispatch with on-change." },
     .{ .name = "progress", .doc = "Value control; bind value." },
@@ -47,7 +47,7 @@ pub const element_docs = [_]Doc{
     .{ .name = "breadcrumb", .doc = "Row container for a breadcrumb trail; children flow horizontally." },
     .{ .name = "button-group", .doc = "Row container grouping buttons; children flow horizontally." },
     .{ .name = "pagination", .doc = "Row container for pagination controls; children flow horizontally." },
-    .{ .name = "radio-group", .doc = "Row container grouping radio controls; children flow horizontally." },
+    .{ .name = "radio-group", .doc = "Logical radiogroup: descendant radios at any nesting depth share one Tab stop and selection; arrows plus Home/End move focus and selection across the scope." },
     .{ .name = "tabs", .doc = "Row container for a tab strip; children (buttons with selected) flow horizontally." },
     .{ .name = "toggle-group", .doc = "Row container grouping toggle-buttons; children flow horizontally." },
     .{ .name = "table", .doc = "Vertical table container; children are table-row elements." },
@@ -57,9 +57,9 @@ pub const element_docs = [_]Doc{
     .{ .name = "accordion", .doc = "Surface with a header (text attribute); children show when selected, dispatch with on-toggle." },
     .{ .name = "alert", .doc = "Alert surface; title via the text attribute, children stack inside." },
     .{ .name = "bubble", .doc = "Bubble surface (chat message); children stack inside. Hugs its message up to 80% of the thread's width (ghost is exempt; an explicit width wins). A <reactions> child docks the reaction pill on its bottom edge; text does nothing here (that channel belongs to the pill — use label for an accessible name)." },
-    .{ .name = "dialog", .doc = "Modal dialog surface rendered in place; title via text, wrap in an if to show conditionally." },
-    .{ .name = "drawer", .doc = "Drawer surface rendered in place; title via text, wrap in an if to show conditionally." },
-    .{ .name = "sheet", .doc = "Sheet surface rendered in place; title via text, wrap in an if to show conditionally." },
+    .{ .name = "dialog", .doc = "Root-relative modal centered in the viewport and unaffected by ancestor scroll or clipping; title via text, wrap in an if to show conditionally." },
+    .{ .name = "drawer", .doc = "Root-relative modal spanning the viewport width and docked to its bottom; title via text, wrap in an if to show conditionally." },
+    .{ .name = "sheet", .doc = "Root-relative modal spanning the viewport height and docked to its right edge; title via text, wrap in an if to show conditionally." },
     .{ .name = "resizable", .doc = "Resizable panel with an engine-managed drag handle; width sets the initial width." },
     .{ .name = "avatar", .doc = "Avatar leaf; the text content renders as initials, image takes one {binding} to a runtime-registered ImageId (0 keeps the initials)." },
     .{ .name = "select", .doc = "Select trigger only (no options attribute): content is the current value, placeholder while empty, on-press opens. Compose the options as an ANCHORED dropdown-menu of menu-items under an if, beside the trigger in a stack (anchor=\"below\" + on-dismiss; model-owned open state)." },
@@ -85,7 +85,7 @@ pub const element_docs = [_]Doc{
     .{ .name = "span", .doc = "Inline styled run inside a <text> paragraph: mixed-weight, mono, italic, scaled, underlined, and token-colored runs word-wrap as ONE paragraph and announce as one text run. Takes weight (regular|medium|bold), mono, italic, scale (a positive multiplier on the paragraph's base size), underline, foreground; content is one run of text ({bindings} work). Whitespace between runs collapses to a single space; runs written with no whitespace between them abut. Spans do not nest; layout, events, and identity stay on the enclosing text." },
     .{ .name = "reactions", .doc = "The bubble's reaction pill (only inside bubble, at most one): a small muted capsule straddling the bubble's bottom edge, holding one run of text ({bindings} work). Takes text-alignment naming the dock — start, center, or end (the default trailing dock). Consumes no layout space (it overlaps like the reference); give the next turn breathing room with the thread's own spacing. Draws on the page plane, so a primary bubble's knockout ink never applies." },
     .{ .name = "media-surface", .doc = "The media surface leaf: composites a texture produced OUTSIDE the widget tree (a video decoder, a camera pipeline, an external renderer) into the layout like any widget — clipped, z-ordered, transformed. surface is one {binding} to the model-owned u64 surface id a Zig-tier producer targets (runtime.acquireMediaSurfaceProducer pushes RGBA8 frames, latest-wins, paced by the presented-frame clock). Until the first frame arrives it shows a deterministic id-derived placeholder — which is also all that goldens, screenshots, and session replay ever show: texture contents are presentation chrome. Display-only (presses fall through); size it like an image (width/height or grow); label it for screen readers." },
-    .{ .name = "image", .doc = "The image leaf: draws a RUNTIME-REGISTERED image by its model-owned u64 ImageId — the id Cmd.imageLoad (TS) or fx.loadImage/fx.registerImageBytes (Zig) registered pixels under. image is one required {binding}; ids are model data, never markup literals, and 0 draws nothing (store the id in the model only when the load reports loaded). Display-only (presses fall through); size it with width/height or grow (no intrinsic size); label it for screen readers." },
+    .{ .name = "image", .doc = "The image leaf: draws a RUNTIME-REGISTERED image by its model-owned u64 ImageId — the id Cmd.imageLoad (TS) or fx.loadImage/fx.registerImageBytes (Zig) registered pixels under. Photo-size encoded sources decode aspect-preservingly to the app's fixed pixel budget (1 MiB default; app.zon images may raise it through 8 MiB), and load results report the registered dimensions. image is one required {binding}; ids are model data, never markup literals, and 0 draws nothing (store the id in the model only when the load reports loaded). source-x/source-y/source-width/source-height optionally select one atlas region in decoded-image pixel coordinates. Display-only; size it with width/height or grow; label it." },
     .{ .name = "video", .doc = "The video leaf: plays the app's single platform-decoded video into the framework-owned media-surface (macOS decodes with AVFoundation; hosts without a decoder deliver one explicit failed event). src declares the source — an app-assets path or an http(s) URL, resolved local-first exactly like audio; autoplay (default true), loop, and muted shape the fresh playback; controls composes the house transport chrome (play/pause, scrub bar, time readout) under the picture, and without it the element is the surface alone — compose your own controls from the video command vocabulary. Until a decoded frame arrives (and in every golden, screenshot, and replay) the surface shows its deterministic placeholder: pixels are presentation chrome, transport is the journaled truth. Size it with width/height or grow (no intrinsic size); label it for screen readers." },
     .{ .name = "terminal", .doc = "The terminal leaf: renders the framework-owned emulator session behind a model-owned pty effect key — the grid as real text with geometric box drawing, a theme-derived ANSI palette, selection, cursor, and scrollback — and routes keys, IME text, and wheel scrollback to it when focused. pty is one {binding} to the u64 key the app's ptySpawn named (required; keys are model data, never markup literals; 0 renders the empty surface); scrollback echoes the app-visible offset back under the scroll value source-wins rule, and on-terminal delivers the post-change view state. The grid derives its cols/rows from the frame the layout resolves (the runtime pushes them to the pty), so size it like a leaf: grow or a definite width/height. An interactive control: give it a label." },
 };
@@ -130,7 +130,7 @@ pub const attribute_docs = [_]Doc{
     .{ .name = "expanded", .doc = "Tree rows (role=\"treeitem\"): disclosure state (true/false or a {binding}). Omit on leaves; expanded rows collapse on Left, collapsed ones expand on Right, both through on-toggle - the model owns the state." },
     .{ .name = "tree-level", .doc = "Flat sibling rows with role=\"treeitem\": one-based logical depth used by Left/Right to resolve parents and first children. Omit it when tree rows are structurally nested." },
     .{ .name = "label", .doc = "Accessible name; when set it REPLACES the element's text as the announced name - screen readers and automation snapshots see the label, never the text it shadows." },
-    .{ .name = "autofocus", .doc = "Focusable controls only: moves keyboard focus to the element when it mounts or when the value turns on (edge-triggered - holding it true never re-steals focus). The TEA way to focus an editor on create." },
+    .{ .name = "autofocus", .doc = "Focusable controls only: moves keyboard focus to the element when it mounts or when the value turns on (edge-triggered - holding it true never re-steals focus), revealing it through ancestor scroll regions first. For editable text, an absent selection becomes a caret collapsed at the end of the text and the editor scrolls to reveal it; an existing selection is preserved. The TEA way to focus an editor on create." },
     .{ .name = "submit-on-enter", .doc = "textarea only: true makes plain Enter dispatch on-submit while Shift+Enter inserts a newline; Cmd/Ctrl+Enter still submits. False or absent keeps the multiline default where Enter inserts and submission uses the primary chord." },
     .{ .name = "icon", .doc = "button, toggle-button, list-item, menu-item: vector icon drawn inline (buttons/toggle-buttons before the label, list/menu items as a leading slot): a built-in name (comptime-validated against canvas.icons.known_icon_names, e.g. save, plus, refresh-cw), an app-registered app:<name>, or one {binding} resolving to such a name. Icon-only buttons when the content is empty — add a label. One hit target, one enabled/disabled tint." },
     .{ .name = "icon-placement", .doc = "Icon slot side on label-bearing buttons/toggle-buttons: leading (default) draws the icon before the label, trailing after it — the next-page chevron. Icon-only buttons center the glyph regardless." },
@@ -200,7 +200,7 @@ pub const stepper_attr_docs = [_]Doc{
     .{ .name = "key", .doc = "Sibling-scoped identity key." },
     .{ .name = "global-key", .doc = "Parent-independent identity: ids survive reparenting between containers." },
     .{ .name = "label", .doc = "Accessible name; when set it REPLACES the element's text as the announced name - screen readers and automation snapshots see the label, never the text it shadows." },
-    .{ .name = "autofocus", .doc = "Focusable controls only: moves keyboard focus to the element when it mounts or when the value turns on (edge-triggered - holding it true never re-steals focus). The TEA way to focus an editor on create." },
+    .{ .name = "autofocus", .doc = "Focusable controls only: moves keyboard focus to the element when it mounts or when the value turns on (edge-triggered - holding it true never re-steals focus), revealing it through ancestor scroll regions first. For editable text, an absent selection becomes a caret collapsed at the end of the text and the editor scrolls to reveal it; an existing selection is preserved. The TEA way to focus an editor on create." },
 };
 
 pub const timeline_attr_docs = [_]Doc{
@@ -209,7 +209,7 @@ pub const timeline_attr_docs = [_]Doc{
     .{ .name = "key", .doc = "Sibling-scoped identity key." },
     .{ .name = "global-key", .doc = "Parent-independent identity: ids survive reparenting between containers." },
     .{ .name = "label", .doc = "Accessible name; when set it REPLACES the element's text as the announced name - screen readers and automation snapshots see the label, never the text it shadows." },
-    .{ .name = "autofocus", .doc = "Focusable controls only: moves keyboard focus to the element when it mounts or when the value turns on (edge-triggered - holding it true never re-steals focus). The TEA way to focus an editor on create." },
+    .{ .name = "autofocus", .doc = "Focusable controls only: moves keyboard focus to the element when it mounts or when the value turns on (edge-triggered - holding it true never re-steals focus), revealing it through ancestor scroll regions first. For editable text, an absent selection becomes a caret collapsed at the end of the text and the editor scrolls to reveal it; an existing selection is preserved. The TEA way to focus an editor on create." },
 };
 
 pub const timeline_item_attr_docs = [_]Doc{
@@ -226,7 +226,11 @@ pub const timeline_item_attr_docs = [_]Doc{
 };
 
 pub const avatar_attr_docs = [_]Doc{
-    .{ .name = "image", .doc = "avatar and image: one {binding} to a u64 ImageId the app registered at runtime (Cmd.imageLoad, fx.loadImage, fx.registerImageBytes); 0 draws nothing (an avatar falls back to its initials). Required on the image leaf." },
+    .{ .name = "image", .doc = "avatar and image: one {binding} to a u64 ImageId the app registered at runtime (Cmd.imageLoad, fx.loadImage, fx.registerImageBytes); encoded photos decode-to-fit the app's pixel budget and results carry the registered dimensions. 0 draws nothing (an avatar falls back to its initials). Required on the image leaf." },
+    .{ .name = "source-x", .doc = "avatar and image: left edge of an optional source crop, in decoded-image pixels. Declare all four source-* attributes together beside image." },
+    .{ .name = "source-y", .doc = "avatar and image: top edge of an optional source crop, in decoded-image pixels. Declare all four source-* attributes together beside image." },
+    .{ .name = "source-width", .doc = "avatar and image: width of an optional source crop, in decoded-image pixels. Declare all four source-* attributes together beside image." },
+    .{ .name = "source-height", .doc = "avatar and image: height of an optional source crop, in decoded-image pixels. Declare all four source-* attributes together beside image." },
 };
 
 pub const media_surface_attr_docs = [_]Doc{

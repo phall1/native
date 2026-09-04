@@ -214,6 +214,22 @@ pub const DiffKind = command_model.DiffKind;
 pub const DiffChange = command_model.DiffChange;
 pub const Builder = command_model.Builder;
 pub const max_display_list_text_bytes = command_model.max_display_list_text_bytes;
+pub const max_display_list_commands = command_model.max_display_list_commands;
+pub const max_display_list_cells = command_model.max_display_list_cells;
+
+// The packed terminal cell grid (cell_grid.zig): one command for a
+// whole screen, expanded by every renderer.
+pub const cell_grid = @import("cell_grid.zig");
+pub const CellGrid = cell_grid.CellGrid;
+pub const Cell = cell_grid.Cell;
+pub const CellColor = cell_grid.CellColor;
+pub const CellFlags = cell_grid.CellFlags;
+pub const CellUnderline = cell_grid.CellUnderline;
+pub const CellWidth = cell_grid.CellWidth;
+pub const CellDecoration = cell_grid.CellDecoration;
+pub const cellGridFingerprint = @import("render_fingerprints.zig").cellGridFingerprint;
+pub const DisplayListStore = command_model.DisplayListStore;
+pub const DisplayListDegradation = command_model.DisplayListDegradation;
 
 // Canvas render data and cache plans live in `render.zig`; root keeps the public API stable.
 pub const max_render_state_stack = render_model.max_render_state_stack;
@@ -424,6 +440,7 @@ pub const DesignTokens = token_model.DesignTokens;
 
 // Canvas widget model and built-in factories live in `widgets.zig`; root keeps the public API stable.
 pub const WidgetKind = widget_model.WidgetKind;
+pub const SplitAxis = widget_model.SplitAxis;
 pub const WidgetCursor = widget_model.WidgetCursor;
 pub const WidgetState = widget_model.WidgetState;
 pub const WidgetRuntimeFlags = widget_model.WidgetRuntimeFlags;
@@ -454,6 +471,7 @@ pub const WidgetActions = widget_model.WidgetActions;
 pub const WidgetSemantics = widget_model.WidgetSemantics;
 pub const WidgetContextMenuItem = widget_model.WidgetContextMenuItem;
 pub const CodeDiffLines = widget_model.CodeDiffLines;
+pub const WidgetContextMenuPolicy = widget_model.WidgetContextMenuPolicy;
 pub const Widget = widget_model.Widget;
 pub const BuiltinComponentOptions = widget_model.BuiltinComponentOptions;
 pub const WidgetCommandPart = widget_model.WidgetCommandPart;
@@ -645,6 +663,7 @@ pub const WidgetClipboardAction = event_model.WidgetClipboardAction;
 pub const widgetKeyboardClipboardAction = event_model.widgetKeyboardClipboardAction;
 pub const widgetKeyboardNewlineTextEditEvent = event_model.widgetKeyboardNewlineTextEditEvent;
 pub const widgetCodeTabTextEditEvent = event_model.widgetCodeTabTextEditEvent;
+pub const widgetKeyboardTextEditEventForWidget = event_model.widgetKeyboardTextEditEventForWidget;
 pub const widgetKindSingleLineTextEntry = event_model.widgetKindSingleLineTextEntry;
 pub const sanitizedSingleLineTextInputEvent = event_model.sanitizedSingleLineTextInputEvent;
 pub const widgetKeyboardControlIntent = event_model.widgetKeyboardControlIntent;
@@ -736,11 +755,12 @@ pub const textInputCaretVisibleScrollOffsetForWidget = widget_runtime.textInputC
 pub const intrinsicWidgetSize = widget_runtime.intrinsicWidgetSize;
 pub const cursorForWidgetHit = widget_runtime.cursorForWidgetHit;
 pub const cursorForWidgetTarget = widget_runtime.cursorForWidgetTarget;
+pub const cursorForWidgetTargetOnAxis = widget_runtime.cursorForWidgetTargetOnAxis;
 /// Whether the engine hit-tests widgets of this kind (widget_access.zig —
 /// the single source of truth the runtime, both markup engines, and the
 /// markup validator's element list all derive from). Kind-level only: the
 /// widget-level predicate is `widgetIsHitTarget`, which also admits any
-/// widget carrying a bound press/toggle handler.
+/// widget carrying a bound press/toggle/drag handler.
 pub const widgetKindHitTarget = @import("widget_access.zig").widgetKindHitTarget;
 /// Widget-level keyboard focusability without geometry/ancestor-clip
 /// filtering. Runtime roving-focus groups use this to identify a logical
@@ -749,7 +769,7 @@ pub const widgetKindHitTarget = @import("widget_access.zig").widgetKindHitTarget
 /// rejects clipped targets.
 pub const widgetIsFocusable = @import("widget_access.zig").isFocusable;
 /// Widget-level hit-target-ness: kind-level `widgetKindHitTarget` plus
-/// any widget with a bound press/toggle handler (stamped into
+/// any widget with a bound press/toggle/drag handler (stamped into
 /// `semantics.actions` by the builder and both markup engines).
 pub const widgetIsHitTarget = @import("widget_access.zig").isHitTarget;
 pub const widgetIsHoverMsgHitTarget = @import("widget_access.zig").isHoverMsgHitTarget;
@@ -780,6 +800,11 @@ pub const widgetWindowDragTargetIndexFromNode = @import("widget_routing.zig").wi
 /// stack-container list all derive from).
 pub const widgetKindStacksChildren = @import("widget_layout.zig").widgetKindStacksChildren;
 pub const widgetIsAnchored = @import("widget_tree.zig").widgetIsAnchored;
+pub const widgetIsRootRelativeModal = @import("widget_tree.zig").widgetIsRootRelativeModal;
+pub const widgetEscapesAncestorClips = @import("widget_tree.zig").widgetEscapesAncestorClips;
+pub const WidgetPaintOrder = @import("widget_tree.zig").WidgetPaintOrder;
+pub const widgetLayoutWindowSurfaceOrder = @import("widget_tree.zig").widgetLayoutWindowSurfaceOrder;
+pub const widgetPaintOrderLess = @import("widget_tree.zig").widgetPaintOrderLess;
 /// The runtime-scrolled virtual list predicate (widget_tree.zig): a
 /// virtualized scroll_view with a DECLARED total item count, whose
 /// scroll offset the runtime owns (engine scrolling + native drivers)
@@ -798,6 +823,12 @@ pub const disclosureSettledOpen = @import("widget_tree.zig").disclosureSettledOp
 pub const disclosureContentBottom = @import("widget_tree.zig").disclosureContentBottom;
 pub const isWidgetConcealedByDisclosure = @import("widget_tree.zig").isWidgetConcealedByDisclosure;
 pub const anchoredWidgetFrame = @import("widget_layout.zig").anchoredWidgetFrame;
+pub const relayoutAnchoredChildren = @import("widget_layout.zig").relayoutAnchoredChildren;
+pub const relayoutAnchoredChildrenWithRootBounds = @import("widget_layout.zig").relayoutAnchoredChildrenWithRootBounds;
+pub const relayoutAnchoredChildrenAtDepth = @import("widget_layout.zig").relayoutAnchoredChildrenAtDepth;
+pub const anchoredNestingDepth = @import("widget_layout.zig").anchoredNestingDepth;
+pub const maxAnchoredNestingDepth = @import("widget_layout.zig").maxAnchoredNestingDepth;
+pub const widgetLayoutRootBounds = @import("widget_render.zig").widgetLayoutRootBounds;
 /// Window-control reservation trigger (widget_layout.zig): true when a
 /// laid-out tree left drag-header CONTENT under the OS window-control
 /// cluster, so runtimes know to stamp `DesignTokens.window_controls`

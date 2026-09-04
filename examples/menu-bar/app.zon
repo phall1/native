@@ -4,7 +4,7 @@
     .display_name = "Menu Bar",
     .version = "0.1.0",
     .platforms = .{"macos"},
-    .capabilities = .{ "native_views", "gpu_surfaces", "tray", "persist" },
+    .capabilities = .{ "native_views", "gpu_surfaces", "tray", "persist", "menus", "shortcuts" },
     // Launch as an Accessory app. The activation policy is selected before
     // the startup window exists, so no Dock tile or cmd+Tab entry flashes.
     .dock_visible = false,
@@ -16,6 +16,32 @@
             .err = "restore_failed",
         },
     },
+    // The zero-config framework runner reads all three declarations and
+    // routes them through core.ts's commandMsg mapper. No runner.zig is
+    // needed in the app tree.
+    .commands = .{
+        .{ .id = "app.open", .title = "Open Player" },
+        .{ .id = "player.toggle", .title = "Toggle Playback" },
+        .{ .id = "player.next", .title = "Next Track" },
+        .{ .id = "app.quit", .title = "Quit" },
+    },
+    .shortcuts = .{
+        .{ .id = "player.toggle", .key = "p", .modifiers = .{ "primary" } },
+        .{ .id = "player.next", .key = "n", .modifiers = .{ "primary" } },
+    },
+    .menus = .{
+        .{
+            .title = "Player",
+            .items = .{
+                .{ .label = "Open Player", .command = "app.open" },
+                .{ .separator = true },
+                .{ .label = "Play or Pause", .command = "player.toggle", .key = "p", .modifiers = .{ "primary" } },
+                .{ .label = "Next Track", .command = "player.next", .key = "n", .modifiers = .{ "primary" } },
+                .{ .separator = true },
+                .{ .label = "Quit", .command = "app.quit", .key = "q", .modifiers = .{ "primary" } },
+            },
+        },
+    },
     .shell = .{
         .windows = .{
             .{
@@ -23,7 +49,6 @@
                 .title = "Menu Bar Player",
                 .width = 420,
                 .height = 260,
-                .restore_state = false,
                 .restore_policy = "center_on_primary",
                 // A true menu-bar app starts behind its status item. The
                 // tray's Open Player command is the initial reveal path.

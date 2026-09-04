@@ -17,7 +17,11 @@
 //! fire-and-forget exception: the OS owns delivery after the one
 //! loop-thread platform call, so there is no meaningful terminal Msg.
 //! Invalid requests and unavailable services fail closed; fake execution
-//! and session replay never emit a real notification. Clipboard effects
+//! and session replay never emit a real notification. Opening a URL in
+//! the user's default handler (`openUrl`) is the same shape, with the
+//! same reasoning, over an ALLOWLIST of schemes (http, https, mailto) —
+//! app cores hand it untrusted bytes, so anything else is a whole
+//! no-op. Clipboard effects
 //! (`writeClipboard`/`readClipboard`) keep
 //! the same shape over the platform pasteboard — the seam the
 //! runtime's cmd+C copy uses — executed synchronously on the loop
@@ -373,6 +377,12 @@ pub const WindowActionBinding = struct {
     close_fn: *const fn (context: *anyopaque, window_label: []const u8) bool,
     minimize_fn: *const fn (context: *anyopaque, window_label: []const u8) bool,
     hide_fn: *const fn (context: *anyopaque, window_label: []const u8) bool,
+    fullscreen_fn: *const fn (context: *anyopaque, window_label: []const u8, fullscreen: bool) bool,
+    /// Whether the window is fullscreen RIGHT NOW. A read, not a verb:
+    /// `toggleFullscreenWindow` needs the OS's answer rather than a
+    /// state the app has to mirror, and the runtime already tracks it
+    /// (`WindowInfo.fullscreen`) with no platform round-trip.
+    fullscreen_state_fn: *const fn (context: *anyopaque, window_label: []const u8) bool,
     show_fn: *const fn (context: *anyopaque, window_label: []const u8) bool,
     dock_presence_fn: *const fn (context: *anyopaque, visible: bool) bool,
     quit_fn: *const fn (context: *anyopaque) bool,
@@ -452,6 +462,11 @@ pub const WindowActionState = struct {
     close_count: u32 = 0,
     minimize_count: u32 = 0,
     hide_count: u32 = 0,
+    fullscreen_count: u32 = 0,
+    /// The fullscreen state the last `setWindowFullscreen` asked for,
+    /// so a fake-executor test can assert the REQUEST and not just that
+    /// one happened.
+    fullscreen_requested: bool = false,
     show_count: u32 = 0,
     dock_presence_count: u32 = 0,
     dock_visible: bool = true,
@@ -977,17 +992,16 @@ pub fn imageCachePartialPath(buffer: []u8, cache_path: []const u8, generation: u
 /// `.rejected` image result Msg.
 pub const max_effect_image_path_bytes: usize = max_effect_file_path_bytes;
 
-/// Maximum ENCODED source bytes one `loadImage` accepts — from a local
-/// file, the URL cache, or the network alike. Sized past the decoded
-/// pixel bound (`canvas_limits.max_registered_canvas_image_pixel_bytes`)
-/// by the same 1/4 margin the decode scratch carries: an encoded stream
-/// larger than that cannot decode inside the registered-image budget on
-/// any host, so hauling more bytes would only defer the same
-/// `.too_large` answer. Unlike fetch bodies there is no truncated
-/// delivery — a cut image can never decode, so over-bound sources fail
-/// whole with `.too_large`, never arrive clipped.
-pub const max_effect_image_bytes: usize = canvas_limits.max_registered_canvas_image_pixel_bytes +
-    canvas_limits.max_registered_canvas_image_pixel_bytes / 4;
+/// Maximum ENCODED source bytes one `loadImage` accepts — independent of
+/// the decoded-pixel target now that codecs decode-to-fit. Eight MiB covers
+/// typical phone JPEG/HEIC photos while keeping costs fixed and loud: every
+/// in-flight load owns a transient `bound + 1` fetch/read buffer, recorded
+/// source bytes grow the session blob store, and URL cache entries may reach
+/// this size. Unlike fetch bodies there is no truncated delivery — a cut
+/// image can never decode, so over-bound sources fail whole with
+/// `.too_large`. The bound stays flat when an app raises its pixel budget.
+pub const max_effect_image_source_bytes: usize = 8 * 1024 * 1024;
+pub const max_effect_image_bytes: usize = max_effect_image_source_bytes;
 
 /// Bytes of an image effect result's content address in the session
 /// journal: the first half of the source bytes' SHA-256, the
@@ -1031,9 +1045,10 @@ pub const EffectImageOutcome = enum(u8) {
     http_status,
     /// `cancel(id)` ended the load before its result was delivered.
     cancelled,
-    /// The source bytes exceed `max_effect_image_bytes`, or the decoded
-    /// pixels exceed the registered-image slot bound
-    /// (`error.ImageTooLarge`) — one budget class either way.
+    /// The source bytes exceed `max_effect_image_source_bytes`. A conforming
+    /// codec fits decoded pixels to the app's registered-image budget;
+    /// `error.ImageTooLarge` is retained only as a defensive codec-contract
+    /// violation and maps here too.
     too_large,
     /// The host has no image codec (`error.UnsupportedService`), or no
     /// image registry is bound to this channel.
@@ -1099,10 +1114,65 @@ pub const max_effect_channel_pending: usize = 32;
 
 /// In-flight ptys (interactive terminal sessions) per Effects channel —
 /// their own table beside the channel table: a pty is a long-lived keyed
-/// occupancy like a channel, not a run-to-completion worker slot. One
-/// live terminal surface plus a background job or two is the realistic
-/// shape; a fifth spawn is refused loudly (reason `.rejected`).
-pub const max_effect_ptys: usize = 4;
+/// occupancy like a channel, not a run-to-completion worker slot. The
+/// (N+1)-th spawn is refused loudly (reason `.rejected`).
+///
+/// This was 4, on the reasoning that "one live terminal surface plus a
+/// background job or two is the realistic shape". That is the shape of an
+/// app that HAS a terminal. It is not the shape of an app that IS one: a
+/// multiplexer offers tabs and splits, and under 4 its fifth pane is
+/// refused by a ceiling that lives here, invisible from the app. This
+/// table is per-PROCESS, so every surface in every window shares it.
+///
+/// NOTHING STRUCTURAL PICKS THE NUMBER. There is no bitmask over slots,
+/// no `fd_set`, no shared poll array, and no fixed-width slot index that
+/// saturates below 65535 (`Entry.slot_index` is a `u16`). Every slot
+/// operation is a linear scan (`findPtySlot`, `findIdlePtySlot`,
+/// `idlePtySlotCount`, `ptyOccupiesKey`), each pty polls only its OWN two
+/// fds on its own io thread (`pty.zig`, `poll(&fds, nfds, -1)` over
+/// `[2]Pollfd`), and no assertion anywhere mentions this constant. The
+/// costs are all linear, and each was MEASURED against a real terminal
+/// app rather than reasoned about:
+///
+///   shells=1 rss_kib=153952 threads=23 fds=63
+///   shells=2 rss_kib=161072 threads=24 fds=66
+///   shells=3 rss_kib=163840 threads=25 fds=69
+///   shells=4 rss_kib=166592 threads=26 fds=72
+///
+/// so one LIVE pty costs exactly +1 OS thread, exactly +3 descriptors,
+/// and ~2.7 MiB of rss — and the thread and descriptor counts land on the
+/// nose of what the code says they should, which is the check that the
+/// measurement is measuring the right thing. Derive it again with:
+///
+///   phux-cockpit/scripts/drive-shell-ceiling.sh --want 4 --measure
+///
+/// The per-SLOT cost (paid whether or not the slot is used) is only the
+/// inline part of `PtySlot`, measured at 6552 bytes by the comptime
+/// budget below — 209,664 bytes of inline `Effects` at 32 slots, up from
+/// 26,208 at 4. The 256 KiB staging block and the 64 KiB outbound block
+/// are NOT in that: they are heap, allocated at spawn and freed at
+/// retire, so they scale with live sessions rather than with this number.
+///
+/// 32 rather than 8 or 16 because 32 is what the consuming multiplexer's
+/// own terminal registry holds, and a ceiling that is invisible AND lower
+/// than the app's own is the exact shape of the bug this replaces: the
+/// app refuses at a number it never chose and cannot see. At 32 the
+/// binding constraint moves back into the app, where it is nameable.
+/// Worst case (all 32 live at once) that is ~86 MiB rss, 32 threads and
+/// 96 descriptors against a `kern.maxfilesperproc` of 184320.
+pub const max_effect_ptys: usize = 32;
+
+/// The pty table's INLINE footprint inside `Effects`, bounded so that
+/// raising `max_effect_ptys` again has to look at what it costs. This is
+/// not a guess about `PtySlot`: it is checked against the real
+/// `@sizeOf`, so the assert moves the moment either factor does.
+///
+/// `Effects` is normally heap-allocated (see the by-value warning on
+/// `UiApp`), but the suite constructs it on the stack
+/// (`var fx = DirectFx.init(...)` in effects_pty_tests.zig), and a stack
+/// frame is the one place this table's growth can actually break
+/// something. 512 KiB leaves that headroom explicit.
+pub const max_effect_pty_table_bytes: usize = 512 * 1024;
 /// Longest one delivered pty output record: one Msg payload, one
 /// journal blob. Output arriving between drains coalesces into batches
 /// of at most this size — `cat largefile` journals per-drain batches,
@@ -3535,6 +3605,20 @@ pub fn Effects(comptime Msg: type) type {
                 return slot.term_storage[0..slot.term_len];
             }
         };
+
+        comptime {
+            // The pty table is the only inline cost `max_effect_ptys`
+            // multiplies. Measured, not assumed: `@sizeOf` is the real
+            // slot, so this fails if a slot grows a buffer as readily as
+            // if the count grows. See `max_effect_pty_table_bytes`.
+            const table_bytes = @sizeOf(PtySlot) * max_effect_ptys;
+            if (table_bytes > max_effect_pty_table_bytes) @compileError(std.fmt.comptimePrint(
+                "pty table is {d} bytes ({d} slots x {d}); budget is {d}. " ++
+                    "Raising max_effect_ptys costs inline Effects bytes - " ++
+                    "measure before raising the budget with it.",
+                .{ table_bytes, max_effect_ptys, @sizeOf(PtySlot), max_effect_pty_table_bytes },
+            ));
+        }
 
         /// How one channel table slot advances: `.open` accepts posts
         /// and delivers `.data` events; `.closing` (closeChannel ran)
@@ -7044,11 +7128,14 @@ pub fn Effects(comptime Msg: type) type {
         /// `max_effects` slots and the key space with spawns and fetches.
         pub fn writeFile(self: *Self, options: WriteFileOptions) void {
             if (options.path.len == 0 or options.path.len > max_effect_file_path_bytes or
-                options.bytes.len > max_effect_file_bytes)
+                options.bytes.len > max_effect_file_bytes or pathEndsWithSeparator(options.path))
             {
                 return self.rejectFile(options.key, .write, options.on_result);
             }
-            var access = self.resolvedFileAccess(options.path, .{ .create_parents = true }) orelse return self.rejectFileExternal(options.key, .write, options.on_result);
+            var access = self.resolvedFileAccess(options.path, .{
+                .create_parents = true,
+                .preserve_final_component = true,
+            }) orelse return self.rejectFileExternal(options.key, .write, options.on_result);
             self.startFile(options.key, .write, &access, options.bytes, options.on_result);
         }
 
@@ -8595,6 +8682,44 @@ pub fn Effects(comptime Msg: type) type {
             validation.validateNotificationOptions(options) catch return;
             const services = self.services orelse return;
             services.showNotification(options) catch {};
+        }
+
+        /// Ask the desktop host to open `url` in the user's default
+        /// handler — the browser for `http`/`https`, the mail client for
+        /// `mailto`. This is the `update`-side seam for the same
+        /// platform verb the webview bridge exposes as
+        /// `native-sdk.os.openUrl`; before it, a Zig core with no
+        /// webview had no way to reach it. Fire-and-forget for the same
+        /// reason `showNotification` is: the OS owns whether a handler
+        /// actually launched, so no success Msg would be truthful.
+        ///
+        /// The URL is treated as HOSTILE — apps hand this bytes that
+        /// came from terminal output, fetch bodies, and pastes — and is
+        /// validated against an ALLOWLIST of schemes
+        /// (`validation.open_url_schemes`: http, https, mailto) before
+        /// the platform sees it. Empty, over-bound
+        /// (`platform.max_external_url_bytes`), NUL- or control-byte-
+        /// bearing, and unrecognised-scheme URLs — `file:` and
+        /// `javascript:` among them — fail closed: a refused request is
+        /// a whole no-op, never a trimmed or coerced open. Nothing
+        /// reaches the platform, so a test's null platform records
+        /// nothing (`lastExternalUrl()`), which is how a rejection is
+        /// observed.
+        ///
+        /// Unlike the runtime's `openExternalUrl`, this is NOT gated on
+        /// the app's webview external-link policy: that policy governs
+        /// links WEB CONTENT follows, and this call comes from the app's
+        /// own `update`.
+        ///
+        /// The call runs synchronously on the loop thread, where the
+        /// platform launch services expect to be entered. Fake execution
+        /// and session replay suppress the platform call so tests stay
+        /// hermetic and a replay never reopens an external window.
+        pub fn openUrl(self: *Self, url: []const u8) void {
+            if (self.executor == .fake or self.replay) return;
+            validation.validateOpenUrl(url) catch return;
+            const services = self.services orelse return;
+            services.openExternalUrl(url) catch {};
         }
 
         /// Put text on the system clipboard through the platform
@@ -10356,6 +10481,51 @@ pub fn Effects(comptime Msg: type) type {
             if (self.executor == .fake) return;
             const binding = self.window_actions orelse return;
             _ = binding.hide_fn(binding.context, window_label);
+        }
+
+        /// Enter or leave fullscreen for a window by its declared
+        /// label — the real OS verb (macOS moves the window to its own
+        /// Space).
+        ///
+        /// SET rather than toggle: an app that remembers a window was
+        /// fullscreen can restore it without first reading back the
+        /// current state and computing parity. `toggleFullscreenWindow`
+        /// is the convenience over it for a menu item or a shortcut,
+        /// which is the case that genuinely wants "the other one".
+        ///
+        /// This is the write half of a capability the platform already
+        /// REPORTED (`WindowInfo.fullscreen`): before it, an app could
+        /// be told it was fullscreen and never ask to be. Note that
+        /// supplying ANY custom menu bar replaces the stock one — the
+        /// standard View ▸ Enter Full Screen item included — so a
+        /// custom-menu app binds its own item to this.
+        ///
+        /// Fire-and-forget, same contract as `closeWindow`.
+        pub fn setWindowFullscreen(self: *Self, window_label: []const u8, fullscreen: bool) void {
+            self.window_action_state.fullscreen_count += 1;
+            self.window_action_state.fullscreen_requested = fullscreen;
+            self.window_action_state.record(window_label);
+            if (self.executor == .fake) return;
+            const binding = self.window_actions orelse return;
+            _ = binding.fullscreen_fn(binding.context, window_label, fullscreen);
+        }
+
+        /// `setWindowFullscreen` against the window's CURRENT state —
+        /// the menu-item and keyboard-shortcut shape, and the one a
+        /// custom-menu app binds its own "Enter Full Screen" item to.
+        /// An unknown label is a no-op like every other window verb.
+        pub fn toggleFullscreenWindow(self: *Self, window_label: []const u8) void {
+            self.setWindowFullscreen(window_label, !self.windowIsFullscreen(window_label));
+        }
+
+        /// Whether a declared window is fullscreen right now. Reads the
+        /// runtime's tracked `WindowInfo.fullscreen`, so it is correct
+        /// for transitions the USER started from the green button too.
+        /// False under the fake executor and for unknown labels.
+        pub fn windowIsFullscreen(self: *Self, window_label: []const u8) bool {
+            if (self.executor == .fake) return false;
+            const binding = self.window_actions orelse return false;
+            return binding.fullscreen_state_fn(binding.context, window_label);
         }
 
         /// Show a window by its declared label: unhide + order front,
@@ -16413,6 +16583,59 @@ pub fn Effects(comptime Msg: type) type {
             ctx.done.store(true, .release);
         }
 
+        const OpenedFileParent = struct {
+            dir: std.Io.Dir,
+            basename: []const u8,
+        };
+
+        fn openOrCreateFileParent(io: std.Io, file_path: []const u8) !OpenedFileParent {
+            const parent_path = std.fs.path.dirname(file_path) orelse ".";
+            const parent = std.Io.Dir.cwd().openDir(io, parent_path, .{ .follow_symlinks = true }) catch |err| switch (err) {
+                error.FileNotFound => create: {
+                    try std.Io.Dir.cwd().createDirPath(io, parent_path);
+                    // A newly created final component must still be a directory,
+                    // not a symlink substituted between creation and opening.
+                    break :create try std.Io.Dir.cwd().openDir(io, parent_path, .{ .follow_symlinks = false });
+                },
+                else => return err,
+            };
+            return .{ .dir = parent, .basename = std.fs.path.basename(file_path) };
+        }
+
+        fn pathEndsWithSeparator(path: []const u8) bool {
+            const last = path[path.len - 1];
+            return last == '/' or (builtin.os.tag == .windows and last == '\\');
+        }
+
+        fn writeThroughOpenedParent(dir: std.Io.Dir, io: std.Io, basename: []const u8, bytes: []const u8) !void {
+            const existing = dir.openFile(io, basename, .{
+                .mode = .write_only,
+                .allow_directory = false,
+                .follow_symlinks = false,
+            }) catch |err| switch (err) {
+                error.FileNotFound, error.SymLinkLoop => null,
+                else => return err,
+            };
+            if (existing) |file| {
+                const stat = file.stat(io) catch |err| {
+                    file.close(io);
+                    return err;
+                };
+                if (stat.kind != .file and stat.kind != .sym_link) {
+                    defer file.close(io);
+                    try file.writeStreamingAll(io, bytes);
+                    return;
+                }
+                file.close(io);
+            }
+
+            var atomic = try dir.createFileAtomic(io, basename, .{ .replace = true });
+            defer atomic.deinit(io);
+            try atomic.file.writePositionalAll(io, bytes, 0);
+            try atomic.file.sync(io);
+            try atomic.replace(io);
+        }
+
         fn runFileOp(ctx: *FileWorkerContext, io: std.Io) EffectFileOutcome {
             if (ctx.missing) return if (ctx.op == .stat) .ok else .not_found;
             const dir = ctx.parent orelse std.Io.Dir.cwd();
@@ -16420,10 +16643,9 @@ pub fn Effects(comptime Msg: type) type {
             switch (ctx.op) {
                 .write => {
                     if (ctx.parent == null) {
-                        if (std.fs.path.dirname(file_path)) |parent| {
-                            dir.createDirPath(io, parent) catch |err| return fileOpFailure(err);
-                        }
-                        dir.writeFile(io, .{ .sub_path = file_path, .data = ctx.payload() }) catch |err| return fileOpFailure(err);
+                        var opened_parent = openOrCreateFileParent(io, file_path) catch |err| return fileOpFailure(err);
+                        defer opened_parent.dir.close(io);
+                        writeThroughOpenedParent(opened_parent.dir, io, opened_parent.basename, ctx.payload()) catch |err| return fileOpFailure(err);
                         return .ok;
                     }
                     var atomic = dir.createFileAtomic(io, file_path, .{ .make_path = ctx.parent == null, .replace = true }) catch |err| return fileOpFailure(err);

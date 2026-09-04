@@ -138,7 +138,7 @@ pub fn checkFiles(allocator: std.mem.Allocator, io: std.Io, files: []const []con
 /// app tree, so "nothing embeds this" is a false signal that once cost a
 /// user their view.
 fn printOrphanHint(arena: std.mem.Allocator, io: std.Io, file_path: []const u8, cache: *?[]const []const u8) void {
-    if (!fileExists(io, "app.zon")) return;
+    if (!fileExists(io, "app.json") and !fileExists(io, "app.zon")) return;
     const ts_track = fileExists(io, "src/core.ts");
     const basenames: []const []const u8 = if (ts_track) &.{} else cache.* orelse blk: {
         const collected = collectEmbeddedBasenames(arena, io) catch return;
@@ -231,7 +231,7 @@ const ContractState = union(enum) {
 /// app.zon and prove it fresh (the artifact carries a hash over the app's
 /// Zig sources; any drift degrades to structural checking).
 fn discoverContract(arena: std.mem.Allocator, io: std.Io) ContractState {
-    if (!fileExists(io, "app.zon")) return .no_app;
+    if (!fileExists(io, "app.json") and !fileExists(io, "app.zon")) return .no_app;
     const source = readFile(arena, io, ui_markup.contract.default_artifact_path) catch return .missing;
     const parsed = ui_markup.contract.parseArtifact(arena, source) catch return .unreadable;
     if (parsed.format != ui_markup.contract.format_version) return .unreadable;
@@ -449,6 +449,7 @@ fn isA11yErrorMessage(message: []const u8) bool {
         ui_markup.a11y_unlabeled_control_message,
         ui_markup.a11y_icon_only_message,
         ui_markup.a11y_unlabeled_editable_message,
+        ui_markup.a11y_unlabeled_radiogroup_message,
         ui_markup.a11y_unknown_role_message,
         ui_markup.a11y_container_role_message,
     };
@@ -634,8 +635,8 @@ fn usage() void {
         \\bundled face renders as tofu boxes on reference paths - the error
         \\names the character; register a covering font and bind the text
         \\from the model, or use icons or plain words), and accessibility
-        \\(unnamed interactive controls, icon-only controls without labels,
-        \\and role misuse are errors - a screen reader user is blocked;
+        \\(unnamed interactive controls or radiogroups, icon-only controls
+        \\without labels, and role misuse are errors - a screen reader user is blocked;
         \\unnamed images and redundant labels are warnings).
         \\
         \\Inside an app directory with a fresh zig-out/model-contract.zon

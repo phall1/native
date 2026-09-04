@@ -26,6 +26,8 @@
 #include <string.h>
 #include <time.h>
 
+#include "../ios/apple_image_fit.h"
+
 @class NativeSdkAppKitHost;
 @class NativeSdkAudioCaptureTarget;
 @class NativeSdkScreenAudioCapture;
@@ -99,7 +101,11 @@ static void *NativeSdkAppKitVideoTimeControlContext = &NativeSdkAppKitVideoTimeC
 /* Render-thread ring state for the spectrum tap; defined with the rest
  * of the spectrum machinery in the audio section below. */
 typedef struct native_sdk_spectrum_tap_state native_sdk_spectrum_tap_state_t;
-static NSRect constrainFrame(NSRect frame);
+static NSScreen *NativeSdkPrimaryScreen(void);
+static NSScreen *NativeSdkScreenForFrame(NSRect frame);
+static NSRect NativeSdkConstrainFrameToScreen(NSRect frame, NSScreen *screen);
+static NSRect NativeSdkConstrainFrame(NSRect frame);
+static NSRect NativeSdkCenterFrameOnScreen(NSRect frame, NSScreen *screen);
 static NSString *NativeSdkAppKitBridgeScript(void);
 static NSString *NativeSdkMenuKeyEquivalent(NSString *key);
 static NSString *NativeSdkMimeTypeForPath(NSString *path);
@@ -267,6 +273,8 @@ static NSAccessibilityRole NativeSdkAccessibilityRoleForWidgetRole(NSInteger rol
             return NSAccessibilityCheckBoxRole;
         case NATIVE_SDK_APPKIT_WIDGET_ROLE_RADIO:
             return NSAccessibilityRadioButtonRole;
+        case NATIVE_SDK_APPKIT_WIDGET_ROLE_RADIOGROUP:
+            return NSAccessibilityRadioGroupRole;
         case NATIVE_SDK_APPKIT_WIDGET_ROLE_MENU:
             return NSAccessibilityMenuRole;
         case NATIVE_SDK_APPKIT_WIDGET_ROLE_MENUITEM:
@@ -298,6 +306,7 @@ static NSCursor *NativeSdkCursorForKind(NSInteger kind) {
         case NATIVE_SDK_APPKIT_CURSOR_POINTING_HAND: return [NSCursor pointingHandCursor];
         case NATIVE_SDK_APPKIT_CURSOR_TEXT: return [NSCursor IBeamCursor];
         case NATIVE_SDK_APPKIT_CURSOR_RESIZE_HORIZONTAL: return [NSCursor resizeLeftRightCursor];
+        case NATIVE_SDK_APPKIT_CURSOR_RESIZE_VERTICAL: return [NSCursor resizeUpDownCursor];
         case NATIVE_SDK_APPKIT_CURSOR_ARROW:
         default:
             return [NSCursor arrowCursor];
@@ -470,11 +479,12 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
 @property(nonatomic, assign) uint32_t actionFlags;
 @property(nonatomic, assign) BOOL canUndo;
 @property(nonatomic, assign) BOOL canRedo;
+@property(nonatomic, assign) NSRect surfaceFrame;
 - (BOOL)emitSetTextAccessibilityValue:(id)value;
 - (BOOL)emitSetSelectionAccessibilityValue:(id)value;
 @end
 
-@interface NativeSdkMetalSurfaceView : NSView <NSTextInputClient>
+@interface NativeSdkMetalSurfaceView : NSView <NSTextInputClient, NSDraggingDestination>
 @property(nonatomic, strong) id<MTLDevice> device;
 @property(nonatomic, strong) id<MTLCommandQueue> commandQueue;
 @property(nonatomic, strong) CAMetalLayer *metalLayer;
@@ -493,6 +503,7 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
 @property(nonatomic, assign) NativeSdkAppKitHost *host;
 @property(nonatomic, assign) uint64_t windowId;
 @property(nonatomic, strong) NSString *surfaceLabel;
+@property(nonatomic, strong) NSString *viewLabel;
 @property(nonatomic, assign) NSUInteger frameIndex;
 /* Whether this surface has completed at least one REAL present. Gates the
  * occluded short-circuit: until the first present lands, occluded frames
@@ -665,6 +676,7 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
 @property(nonatomic, assign) NSRange selectedTextRange;
 @property(nonatomic, assign) BOOL interpretedKeyEventEmittedInput;
 @property(nonatomic, strong) NSArray<NSAccessibilityElement *> *widgetAccessibilityElements;
+@property(nonatomic, strong) NSArray<NSAccessibilityElement *> *widgetAccessibilityRootElements;
 @property(nonatomic, strong) NSMutableArray<NativeSdkScrollDriverView *> *scrollDrivers;
 @property(nonatomic, assign) NSPoint wheelGesturePoint;
 @property(nonatomic, assign) BOOL wheelGestureActive;
@@ -743,7 +755,7 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
 - (void)updateSurfaceTrackingArea;
 - (void)emitSelectAllTextInputCommand;
 - (void)emitTextInputEventWithKind:(NSInteger)kind text:(NSString *)text compositionCursor:(NSInteger)compositionCursor;
-- (NSAccessibilityElement *)focusedTextAccessibilityElement;
+- (NativeSdkWidgetAccessibilityElement *)focusedTextAccessibilityElement;
 - (BOOL)emitWidgetAccessibilityActionWithId:(uint64_t)widgetId action:(NSInteger)action;
 - (BOOL)emitWidgetAccessibilityActionWithId:(uint64_t)widgetId action:(NSInteger)action text:(NSString *)text selectedRange:(NSRange)selectedRange hasSelectedRange:(BOOL)hasSelectedRange;
 - (void)setSurfaceCursor:(NSCursor *)cursor;
@@ -763,6 +775,10 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
 @property(nonatomic, assign) uint32_t modifiers;
 @end
 
+@interface NativeSdkTraySegmentedControl : NSSegmentedControl
+@property(nonatomic, assign) NSInteger sourceSelectedSegment;
+@end
+
 @interface NativeSdkStatusItemEntry : NSObject
 @property(nonatomic, assign) uint32_t identifier;
 @property(nonatomic, strong) NSStatusItem *item;
@@ -773,6 +789,8 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
 @property(nonatomic, assign) int presentationTone;
 @property(nonatomic, assign) double presentationIconOpacity;
 @property(nonatomic, assign) BOOL presentationMonospaced;
+@property(nonatomic, assign) double presentationFontSize;
+@property(nonatomic, assign) int presentationFontWeight;
 @property(nonatomic, strong) NSString *activationCommand;
 @property(nonatomic, strong) NSString *alternateActivationCommand;
 @property(nonatomic, strong) NSString *openCommand;
@@ -1013,8 +1031,8 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
 @property(nonatomic, strong) NSArray<NSString *> *allowedNavigationOrigins;
 @property(nonatomic, strong) NSArray<NSString *> *allowedExternalURLs;
 @property(nonatomic, assign) NSInteger externalLinkAction;
-- (instancetype)initWithAppName:(NSString *)appName displayName:(NSString *)displayName version:(NSString *)version aboutDescription:(NSString *)aboutDescription hasWebContent:(BOOL)hasWebContent dockVisible:(BOOL)dockVisible windowTitle:(NSString *)windowTitle bundleIdentifier:(NSString *)bundleIdentifier iconPath:(NSString *)iconPath windowLabel:(NSString *)windowLabel x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame resizable:(BOOL)resizable titlebarStyle:(int)titlebarStyle showPolicy:(int)showPolicy windowFlags:(uint32_t)windowFlags;
-- (BOOL)createWindowWithId:(uint64_t)windowId title:(NSString *)title label:(NSString *)label x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame resizable:(BOOL)resizable titlebarStyle:(int)titlebarStyle showPolicy:(int)showPolicy windowFlags:(uint32_t)windowFlags makeMain:(BOOL)makeMain;
+- (instancetype)initWithAppName:(NSString *)appName displayName:(NSString *)displayName version:(NSString *)version aboutDescription:(NSString *)aboutDescription hasWebContent:(BOOL)hasWebContent dockVisible:(BOOL)dockVisible windowTitle:(NSString *)windowTitle bundleIdentifier:(NSString *)bundleIdentifier iconPath:(NSString *)iconPath windowLabel:(NSString *)windowLabel x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame initialPlacement:(int)initialPlacement restorePolicy:(int)restorePolicy resizable:(BOOL)resizable titlebarStyle:(int)titlebarStyle showPolicy:(int)showPolicy windowFlags:(uint32_t)windowFlags;
+- (BOOL)createWindowWithId:(uint64_t)windowId title:(NSString *)title label:(NSString *)label x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame initialPlacement:(int)initialPlacement restorePolicy:(int)restorePolicy resizable:(BOOL)resizable titlebarStyle:(int)titlebarStyle showPolicy:(int)showPolicy windowFlags:(uint32_t)windowFlags makeMain:(BOOL)makeMain;
 - (void)orderWindowForImplicitShow:(uint64_t)windowId;
 - (void)showDeferredWindowIfPending:(uint64_t)windowId reason:(const char *)reason;
 - (void)applyWindowClearColor:(uint64_t)windowId red:(uint8_t)red green:(uint8_t)green blue:(uint8_t)blue alpha:(uint8_t)alpha;
@@ -1084,13 +1102,14 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
 - (NativeSdkStatusItemEntry *)statusEntryForMenu:(NSMenu *)menu;
 - (void)emitStatusCommand:(NSString *)command statusItemId:(uint32_t)statusItemId;
 - (void)statusItemActivated:(id)sender;
+- (void)traySegmentChanged:(NSSegmentedControl *)control;
 - (uint64_t)activeCommandWindowId;
 - (void)setMenusWithTitles:(const char *const *)menuTitles titleLengths:(const size_t *)menuTitleLengths count:(size_t)menuCount itemMenuIndices:(const uint32_t *)itemMenuIndices itemLabels:(const char *const *)itemLabels itemLabelLengths:(const size_t *)itemLabelLengths itemCommands:(const char *const *)itemCommands itemCommandLengths:(const size_t *)itemCommandLengths itemKeys:(const char *const *)itemKeys itemKeyLengths:(const size_t *)itemKeyLengths itemModifiers:(const uint32_t *)itemModifiers itemSeparators:(const int *)itemSeparators itemEnabled:(const int *)itemEnabled itemChecked:(const int *)itemChecked itemCount:(size_t)itemCount;
 - (void)runWithCallback:(native_sdk_appkit_event_callback_t)callback context:(void *)context;
 - (void)stop;
 - (BOOL)drainPendingPreRunStop;
 - (void)emitEvent:(native_sdk_appkit_event_t)event;
-- (BOOL)emitDroppedFileURLs:(NSArray<NSURL *> *)urls windowId:(uint64_t)windowId;
+- (BOOL)emitDroppedFileURLs:(NSArray<NSURL *> *)urls windowId:(uint64_t)windowId viewLabel:(NSString *)viewLabel point:(NSPoint)point;
 - (void)startApplicationActivationObservers;
 - (void)stopApplicationActivationObservers;
 - (void)applicationDidBecomeActive:(NSNotification *)notification;
@@ -1189,6 +1208,14 @@ static void NativeSdkEmitGpuSurfaceResizes(NSView *view) {
     }
 }
 
+// Convert an AppKit-local point to the runtime's top-left-origin space.
+// Unflipped canvas/content views need the y inversion; flipped views such as
+// WKWebView already use the runtime's orientation and must pass through.
+static NSPoint NativeSdkViewLocalYDownPoint(NSView *view, NSPoint point) {
+    if (!view.isFlipped) point.y = view.bounds.size.height - point.y;
+    return point;
+}
+
 @implementation NativeSdkWindowDelegate
 
 - (void)windowDidResize:(NSNotification *)notification {
@@ -1281,9 +1308,9 @@ static void NativeSdkEmitGpuSurfaceResizes(NSView *view) {
 
 // The window is a dragging destination now that the main WebView (whose
 // registration used to catch every drop) is lazy: NSWindow forwards
-// these to its delegate, and the emit path is byte-identical to the
-// WebView's. A present main/child WebView still wins (views outrank the
-// window for registered types), and its handler emits the same event.
+// these to its delegate. A present main/child WebView or canvas surface
+// still wins (views outrank the window for registered types); the fallback
+// hit-tests anyway so adopted/layered content keeps the most specific label.
 - (NSDragOperation)draggingEntered:(id<NSDraggingInfo>)sender {
     (void)sender;
     return NSDragOperationCopy;
@@ -1293,7 +1320,36 @@ static void NativeSdkEmitGpuSurfaceResizes(NSView *view) {
     NSPasteboard *pasteboard = sender.draggingPasteboard;
     NSArray<NSURL *> *urls = [pasteboard readObjectsForClasses:@[ [NSURL class] ]
                                                        options:@{ NSPasteboardURLReadingFileURLsOnlyKey : @YES }];
-    return [self.host emitDroppedFileURLs:urls windowId:self.windowId];
+    NSWindow *window = self.host.windows[@(self.windowId)] ?: (self.windowId == 1 ? self.host.window : nil);
+    NSView *contentView = window.contentView;
+    if (!contentView) return NO;
+
+    const NSPoint windowPoint = sender.draggingLocation;
+    const NSPoint contentPoint = [contentView convertPoint:windowPoint fromView:nil];
+    NSView *targetView = [contentView hitTest:contentPoint];
+    NSString *viewLabel = @"";
+    for (NSView *candidate = targetView; candidate; candidate = candidate.superview) {
+        if ([candidate isKindOfClass:[NativeSdkMetalSurfaceView class]]) {
+            NSString *label = ((NativeSdkMetalSurfaceView *)candidate).viewLabel;
+            if (label.length > 0) {
+                targetView = candidate;
+                viewLabel = label;
+                break;
+            }
+        } else if ([candidate isKindOfClass:[NativeSdkWebView class]]) {
+            NSString *label = ((NativeSdkWebView *)candidate).viewLabel;
+            if (label.length > 0) {
+                targetView = candidate;
+                viewLabel = label;
+                break;
+            }
+        }
+        if (candidate == contentView) break;
+    }
+
+    NSView *coordinateView = viewLabel.length > 0 ? targetView : contentView;
+    NSPoint point = NativeSdkViewLocalYDownPoint(coordinateView, [coordinateView convertPoint:windowPoint fromView:nil]);
+    return [self.host emitDroppedFileURLs:urls windowId:self.windowId viewLabel:viewLabel point:point];
 }
 
 // close_policy .hide: the USER's close affordance (the red button,
@@ -1397,7 +1453,8 @@ static void NativeSdkEmitGpuSurfaceResizes(NSView *view) {
     NSPasteboard *pasteboard = sender.draggingPasteboard;
     NSArray<NSURL *> *urls = [pasteboard readObjectsForClasses:@[[NSURL class]]
                                                        options:@{ NSPasteboardURLReadingFileURLsOnlyKey: @YES }];
-    return [self.host emitDroppedFileURLs:urls windowId:self.windowId];
+    NSPoint point = NativeSdkViewLocalYDownPoint(self, [self convertPoint:sender.draggingLocation fromView:nil]);
+    return [self.host emitDroppedFileURLs:urls windowId:self.windowId viewLabel:self.viewLabel point:point];
 }
 
 @end
@@ -2536,28 +2593,48 @@ int native_sdk_appkit_measure_text_advances(uint64_t font_id, double size, const
 // CGBitmapContext can render into) and is un-premultiplied in place,
 // because the canvas image pipeline — the reference renderer and the
 // packet host's kCGImageAlphaLast upload — expects straight alpha.
-int native_sdk_appkit_decode_image(const uint8_t *bytes, size_t bytes_len, uint8_t *pixels, size_t pixels_len, size_t *out_width, size_t *out_height) {
+int native_sdk_appkit_decode_image(const uint8_t *bytes, size_t bytes_len, uint8_t *pixels, size_t pixels_len, size_t max_pixels, size_t *out_width, size_t *out_height) {
     if (out_width) *out_width = 0;
     if (out_height) *out_height = 0;
-    if (!bytes || bytes_len == 0 || !pixels) return 0;
+    if (!bytes || bytes_len == 0 || !pixels || max_pixels == 0) return 0;
     @autoreleasepool {
         NSData *data = [NSData dataWithBytesNoCopy:(void *)bytes length:bytes_len freeWhenDone:NO];
         CGImageRef image = NULL;
         CGImageSourceRef source = CGImageSourceCreateWithData((__bridge CFDataRef)data, NULL);
         if (source) {
-            image = CGImageSourceCreateImageAtIndex(source, 0, NULL);
+            CFDictionaryRef properties = CGImageSourceCopyPropertiesAtIndex(source, 0, NULL);
+            int64_t source_width_value = 0;
+            int64_t source_height_value = 0;
+            if (properties) {
+                CFNumberRef width_value = CFDictionaryGetValue(properties, kCGImagePropertyPixelWidth);
+                CFNumberRef height_value = CFDictionaryGetValue(properties, kCGImagePropertyPixelHeight);
+                if (width_value) CFNumberGetValue(width_value, kCFNumberSInt64Type, &source_width_value);
+                if (height_value) CFNumberGetValue(height_value, kCFNumberSInt64Type, &source_height_value);
+                CFRelease(properties);
+            }
+            size_t source_width = source_width_value > 0 ? (size_t)source_width_value : 0;
+            size_t source_height = source_height_value > 0 ? (size_t)source_height_value : 0;
+            if (source_width > 0 && source_height > 0) {
+                const size_t max_dimension = native_sdk_apple_image_thumbnail_max_dimension(source_width, source_height, max_pixels);
+                NSDictionary *thumbnail_options = @{
+                    (NSString *)kCGImageSourceCreateThumbnailFromImageAlways: @YES,
+                    (NSString *)kCGImageSourceThumbnailMaxPixelSize: @(max_dimension),
+                    (NSString *)kCGImageSourceCreateThumbnailWithTransform: @YES,
+                };
+                image = CGImageSourceCreateThumbnailAtIndex(source, 0, (__bridge CFDictionaryRef)thumbnail_options);
+            }
             CFRelease(source);
         }
         if (!image) {
             NSImage *system_image = [[NSImage alloc] initWithData:data];
             NSSize size = system_image ? system_image.size : NSZeroSize;
-            if (size.width > 0 && size.height > 0 && size.width <= 8192 && size.height <= 8192) {
+            if (size.width > 0 && size.height > 0 && isfinite(size.width) && isfinite(size.height)) {
                 // SVG is resolution-independent, so cap the proposed point
                 // extent before NSImage selects its Retina representation.
                 // A 256pt square becomes at most the registry's 512px square
                 // on macOS's 2x displays instead of materializing an
                 // attacker-declared multi-hundred-megabyte bitmap first.
-                const CGFloat max_raster_points = 256.0;
+                const CGFloat max_raster_points = sqrt((CGFloat)max_pixels) / 2.0;
                 const CGFloat raster_scale = MIN(1.0, MIN(max_raster_points / size.width, max_raster_points / size.height));
                 NSRect proposed = NSMakeRect(0, 0, size.width * raster_scale, size.height * raster_scale);
                 CGImageRef rendered = [system_image CGImageForProposedRect:&proposed context:nil hints:nil];
@@ -2568,14 +2645,14 @@ int native_sdk_appkit_decode_image(const uint8_t *bytes, size_t bytes_len, uint8
 
         size_t width = CGImageGetWidth(image);
         size_t height = CGImageGetHeight(image);
-        if (width == 0 || height == 0 || width > 8192 || height > 8192) {
+        if (width == 0 || height == 0 || width > NATIVE_SDK_MAX_DECODED_IMAGE_DIMENSION || height > NATIVE_SDK_MAX_DECODED_IMAGE_DIMENSION) {
             CGImageRelease(image);
             return 0;
         }
         if (out_width) *out_width = width;
         if (out_height) *out_height = height;
         size_t byte_len = width * height * 4;
-        if (byte_len / 4 / height != width || pixels_len < byte_len) {
+        if (width > max_pixels / height || byte_len / 4 / height != width || pixels_len < byte_len) {
             CGImageRelease(image);
             return -1;
         }
@@ -2951,6 +3028,435 @@ static BOOL NativeSdkPacketDrawCommand(NSDictionary *command, CGContextRef conte
 
 /* Kind dispatch shared by direct draws and raster-cache fills: expects
  * clip/transform state already applied to the current graphics context. */
+
+/* ------------------------------------------------------------------
+ * Packed cell-grid rendering.
+ *
+ * The SPEC is the engine's reference renderer (canvas/reference.zig,
+ * `drawCellGrid` / `drawCellDecorations`), because that is the oracle
+ * the automation screenshots and every golden test go through. This
+ * function mirrors it deliberately:
+ *
+ *   - TWO PASSES, and the order is the contract: every background
+ *     first, then every glyph and decoration. One pass would let cell
+ *     N+1's background erase the part of cell N's glyph that overhangs
+ *     into it, which real mono faces do constantly.
+ *   - Decoration geometry matches `CellDecoration`: underline sits
+ *     2 thicknesses off the cell bottom, its second bar 4, strikethrough
+ *     at 55% of the cell, overline at the top, thickness
+ *     max(1, round(size/12)).
+ *   - Dotted/dashed underlines walk the same segment periods; curly
+ *     walks the same one-point triangle-wave ticks.
+ *
+ * KNOWN DIVERGENCE, stated rather than hidden: glyph RASTERIZATION
+ * differs. The reference renderer fills the engine's own outline
+ * through its vector core; this draws through CoreText with the host's
+ * resolved face. Both put the glyph at the same pen and the same
+ * baseline in the same cell, so layout is identical, but antialiasing
+ * and hinting are not byte-identical between the two. That is already
+ * true of every `draw_text` command in this file — the packet path has
+ * never been byte-identical to the reference rasterizer, only
+ * geometrically identical.
+ *
+ * `bold` and `italic` reach the cell but are NOT synthesised here: with
+ * a single registered mono face there is no companion to switch to, and
+ * faking them with a synthetic oblique or a stroke would put the host
+ * ahead of the reference renderer, which carries them without applying
+ * them. Same behaviour on both sides is worth more than either one
+ * being prettier. */
+
+enum {
+    NativeSdkCellFlagBold = 1 << 0,
+    NativeSdkCellFlagItalic = 1 << 1,
+    NativeSdkCellFlagStrikethrough = 1 << 2,
+    NativeSdkCellFlagOverline = 1 << 3,
+    NativeSdkCellFlagHasBackground = 1 << 4,
+    NativeSdkCellFlagHasUnderlineColor = 1 << 5,
+};
+
+/* Underline style occupies bits 6..8, cell width bits 9..10 — the
+ * engine's `CellFlags` packing (canvas/cell_grid.zig). */
+static inline uint8_t NativeSdkCellUnderlineStyle(uint16_t flags) { return (uint8_t)((flags >> 6) & 0x7); }
+static inline uint8_t NativeSdkCellWidthKind(uint16_t flags) { return (uint8_t)((flags >> 9) & 0x3); }
+
+static CGFloat NativeSdkCellStrokeWidth(CGFloat fontSize) {
+    return MAX(1, round(fontSize / 12));
+}
+
+/* Faux-weight rules, mirrored from the engine's
+ * canvas/cell_grid.zig `CellSynthesis`. They exist so a `\x1b[1m` run
+ * is visible on an app that registered no bold companion, and they are
+ * duplicated here rather than derived because a bold run that renders
+ * bold on the reference path and regular on this one is worse than no
+ * bold at all. */
+static CGFloat NativeSdkCellBoldOffset(CGFloat fontSize) {
+    return MAX(1, round(fontSize / 14));
+}
+static const CGFloat NativeSdkCellItalicTangent = 0.2;
+
+/* The face a cell's style asks for, and what is left to synthesize.
+ * Mirrors `CellGrid.face`: real companions win, a half-family is used
+ * for the half it covers, and only what is missing is faked. */
+typedef struct {
+    unsigned long long regular;
+    unsigned long long bold;
+    unsigned long long italic;
+    unsigned long long boldItalic;
+} NativeSdkCellFontIds;
+
+typedef struct {
+    unsigned long long fontId;
+    BOOL syntheticBold;
+    BOOL syntheticItalic;
+} NativeSdkCellFace;
+
+static NativeSdkCellFace NativeSdkCellFaceFor(NativeSdkCellFontIds fonts, uint16_t flags) {
+    const BOOL wantBold = (flags & NativeSdkCellFlagBold) != 0;
+    const BOOL wantItalic = (flags & NativeSdkCellFlagItalic) != 0;
+    NativeSdkCellFace face = {fonts.regular, NO, NO};
+    if (wantBold && wantItalic) {
+        if (fonts.boldItalic != 0) { face.fontId = fonts.boldItalic; return face; }
+        if (fonts.bold != 0) { face.fontId = fonts.bold; face.syntheticItalic = YES; return face; }
+        if (fonts.italic != 0) { face.fontId = fonts.italic; face.syntheticBold = YES; return face; }
+        face.syntheticBold = YES;
+        face.syntheticItalic = YES;
+        return face;
+    }
+    if (wantBold) {
+        if (fonts.bold != 0) { face.fontId = fonts.bold; return face; }
+        face.syntheticBold = YES;
+        return face;
+    }
+    if (wantItalic) {
+        if (fonts.italic != 0) { face.fontId = fonts.italic; return face; }
+        face.syntheticItalic = YES;
+        return face;
+    }
+    return face;
+}
+
+#ifdef NATIVE_SDK_APPKIT_CELL_GRID_TESTING
+static NSUInteger NativeSdkCellGridFontResolutionCount = 0;
+#endif
+
+static NSFont *NativeSdkCellGridResolveFont(unsigned long long fontId, CGFloat size) {
+#ifdef NATIVE_SDK_APPKIT_CELL_GRID_TESTING
+    NativeSdkCellGridFontResolutionCount += 1;
+#endif
+    return NativeSdkFontForFontId(fontId, size);
+}
+
+static void NativeSdkCellFillRect(NSRect rect, NSColor *color) {
+    if (!color || NSIsEmptyRect(rect)) return;
+    [color setFill];
+    NSRectFillUsingOperation(rect, NSCompositingOperationSourceOver);
+}
+
+typedef struct {
+    __unsafe_unretained NSArray *cells;
+    NSUInteger cols;
+    NSPoint origin;
+    CGFloat cellWidth;
+    CGFloat cellHeight;
+    CGFloat baseline;
+    CGFloat size;
+    CGFloat thickness;
+    NativeSdkCellFace faces[4];
+    __unsafe_unretained NSFont *regularFont;
+    __unsafe_unretained NSFont *boldFont;
+    __unsafe_unretained NSFont *italicFont;
+    __unsafe_unretained NSFont *boldItalicFont;
+} NativeSdkCellGridDrawState;
+
+static NSFont *NativeSdkCellGridFontForStyle(const NativeSdkCellGridDrawState *state, NSUInteger style) {
+    switch (style) {
+    case 1: return state->boldFont;
+    case 2: return state->italicFont;
+    case 3: return state->boldItalicFont;
+    default: return state->regularFont;
+    }
+}
+
+static void NativeSdkCellGridDrawBackgrounds(const NativeSdkCellGridDrawState *state, CGFloat opacity) {
+    id previousValue = nil;
+    NSColor *previousColor = nil;
+    BOOL havePrevious = NO;
+    NSUInteger index = 0;
+    for (id cellObject in state->cells) {
+        NSDictionary *cell = NativeSdkPacketDictionary(cellObject);
+        NSUInteger column = index++;
+        if (!cell || column >= state->cols) continue;
+        uint16_t flags = (uint16_t)NativeSdkPacketNumber(cell[@"flags"], 0);
+        if (!(flags & NativeSdkCellFlagHasBackground)) continue;
+        id value = cell[@"bg"];
+        if (!havePrevious || value != previousValue) {
+            previousValue = value;
+            previousColor = NativeSdkPacketColor(value, opacity);
+            havePrevious = YES;
+        }
+        if (!previousColor) continue;
+        NativeSdkCellFillRect(
+            NSMakeRect(
+                state->origin.x + (CGFloat)column * state->cellWidth,
+                state->origin.y,
+                state->cellWidth,
+                state->cellHeight),
+            previousColor);
+    }
+}
+
+static void NativeSdkCellGridDrawGlyph(
+    NSString *cluster,
+    NSPoint pen,
+    CGFloat baselineY,
+    NSDictionary *attributes,
+    NativeSdkCellFace face,
+    CGFloat size
+) {
+    if (face.syntheticItalic) {
+        /* Shear about the BASELINE, the same axis and the same tangent
+         * the reference renderer bakes into its glyph affine. */
+        CGContextRef context = NSGraphicsContext.currentContext.CGContext;
+        CGContextSaveGState(context);
+        CGContextTranslateCTM(context, 0, baselineY);
+        CGContextConcatCTM(context, CGAffineTransformMake(1, 0, NativeSdkCellItalicTangent, 1, 0, 0));
+        CGContextTranslateCTM(context, 0, -baselineY);
+        [cluster drawAtPoint:pen withAttributes:attributes];
+        if (face.syntheticBold) {
+            [cluster drawAtPoint:NSMakePoint(pen.x + NativeSdkCellBoldOffset(size), pen.y) withAttributes:attributes];
+        }
+        CGContextRestoreGState(context);
+        return;
+    }
+    [cluster drawAtPoint:pen withAttributes:attributes];
+    if (face.syntheticBold) {
+        [cluster drawAtPoint:NSMakePoint(pen.x + NativeSdkCellBoldOffset(size), pen.y) withAttributes:attributes];
+    }
+}
+
+static void NativeSdkCellGridDrawCurlyUnderline(
+    const NativeSdkCellGridDrawState *state,
+    NSRect line,
+    NSColor *color
+) {
+    const CGFloat amplitude = state->thickness;
+    const CGFloat period = MAX(4, round(state->size / 3));
+    for (CGFloat step = 0; step < line.size.width; step += 1) {
+        CGFloat phase = fmod(step, period) / period;
+        CGFloat ramp = phase < 0.5 ? phase * 2 : (1 - phase) * 2;
+        NativeSdkCellFillRect(
+            NSMakeRect(line.origin.x + step, line.origin.y - amplitude + ramp * amplitude * 2, 1, state->thickness),
+            color);
+    }
+}
+
+static void NativeSdkCellGridDrawSegmentedUnderline(
+    NSRect line,
+    NSColor *color,
+    uint8_t style
+) {
+    const CGFloat period = style == 4 ? MAX(2, round(line.size.height * 2)) : MAX(4, round(line.size.height * 6));
+    const CGFloat on = style == 4 ? MAX(1, round(period * 0.5)) : MAX(2, round(period * 0.6));
+    for (CGFloat start = 0; start < line.size.width; start += period) {
+        CGFloat width = MIN(on, line.size.width - start);
+        NativeSdkCellFillRect(NSMakeRect(line.origin.x + start, line.origin.y, width, line.size.height), color);
+    }
+}
+
+static void NativeSdkCellGridDrawDecorations(
+    const NativeSdkCellGridDrawState *state,
+    NSDictionary *cell,
+    uint16_t flags,
+    CGFloat x,
+    CGFloat inkWidth,
+    NSColor *foreground,
+    CGFloat opacity,
+    id *previousUnderlineValue,
+    NSColor **previousUnderlineColor,
+    BOOL *havePreviousUnderline
+) {
+    if (flags & NativeSdkCellFlagOverline) {
+        NativeSdkCellFillRect(NSMakeRect(x, state->origin.y, inkWidth, state->thickness), foreground);
+    }
+    if (flags & NativeSdkCellFlagStrikethrough) {
+        NativeSdkCellFillRect(
+            NSMakeRect(
+                x,
+                state->origin.y + round(state->cellHeight * 0.55) - state->thickness,
+                inkWidth,
+                state->thickness),
+            foreground);
+    }
+    const uint8_t underlineStyle = NativeSdkCellUnderlineStyle(flags);
+    if (underlineStyle == 0) return;
+
+    NSColor *underlineColor = foreground;
+    if (flags & NativeSdkCellFlagHasUnderlineColor) {
+        id value = cell[@"ul"];
+        if (!*havePreviousUnderline || value != *previousUnderlineValue) {
+            *previousUnderlineValue = value;
+            *previousUnderlineColor = NativeSdkPacketColor(value, opacity);
+            *havePreviousUnderline = YES;
+        }
+        if (*previousUnderlineColor) underlineColor = *previousUnderlineColor;
+    }
+    const NSRect line = NSMakeRect(
+        x,
+        state->origin.y + state->cellHeight - state->thickness * 2,
+        inkWidth,
+        state->thickness);
+    switch (underlineStyle) {
+    case 1: /* single */
+        NativeSdkCellFillRect(line, underlineColor);
+        break;
+    case 2: /* double */
+        NativeSdkCellFillRect(line, underlineColor);
+        NativeSdkCellFillRect(
+            NSMakeRect(x, state->origin.y + state->cellHeight - state->thickness * 4, inkWidth, state->thickness),
+            underlineColor);
+        break;
+    case 3: /* curly: one-point ticks tracing a triangle wave */
+        NativeSdkCellGridDrawCurlyUnderline(state, line, underlineColor);
+        break;
+    case 4:   /* dotted */
+    case 5:   /* dashed */
+        NativeSdkCellGridDrawSegmentedUnderline(line, underlineColor, underlineStyle);
+        break;
+    default:
+        break;
+    }
+}
+
+static void NativeSdkCellGridDrawInk(const NativeSdkCellGridDrawState *state, CGFloat opacity) {
+    id previousForegroundValue = nil;
+    NSColor *previousForeground = nil;
+    BOOL havePreviousForeground = NO;
+    NSUInteger previousStyle = NSUIntegerMax;
+    NSDictionary *previousAttributes = nil;
+    id previousUnderlineValue = nil;
+    NSColor *previousUnderlineColor = nil;
+    BOOL havePreviousUnderline = NO;
+
+    NSUInteger index = 0;
+    for (id cellObject in state->cells) {
+        NSDictionary *cell = NativeSdkPacketDictionary(cellObject);
+        NSUInteger column = index++;
+        if (!cell || column >= state->cols) continue;
+        uint16_t flags = (uint16_t)NativeSdkPacketNumber(cell[@"flags"], 0);
+        const uint8_t widthKind = NativeSdkCellWidthKind(flags);
+        if (widthKind == 2) continue; /* spacer */
+
+        id foregroundValue = cell[@"fg"];
+        if (!havePreviousForeground || foregroundValue != previousForegroundValue) {
+            previousForegroundValue = foregroundValue;
+            previousForeground = NativeSdkPacketColor(foregroundValue, opacity);
+            previousAttributes = nil;
+            havePreviousForeground = YES;
+        }
+        if (!previousForeground) continue;
+
+        const CGFloat x = state->origin.x + (CGFloat)column * state->cellWidth;
+        const CGFloat inkWidth = widthKind == 1 ? state->cellWidth * 2 : state->cellWidth;
+        NSString *cluster = [cell[@"text"] isKindOfClass:[NSString class]] ? cell[@"text"] : nil;
+        if (cluster.length > 0) {
+            const NSUInteger style = flags & (NativeSdkCellFlagBold | NativeSdkCellFlagItalic);
+            if (!previousAttributes || previousStyle != style) {
+                NSFont *font = NativeSdkCellGridFontForStyle(state, style);
+                previousAttributes = font ? @{
+                    NSFontAttributeName : font,
+                    NSForegroundColorAttributeName : previousForeground,
+                } : nil;
+                previousStyle = style;
+            }
+            if (previousAttributes) {
+                NativeSdkCellGridDrawGlyph(
+                    cluster,
+                    NSMakePoint(x, state->origin.y + state->baseline - state->size),
+                    state->origin.y + state->baseline,
+                    previousAttributes,
+                    state->faces[style],
+                    state->size);
+            }
+        }
+        NativeSdkCellGridDrawDecorations(
+            state,
+            cell,
+            flags,
+            x,
+            inkWidth,
+            previousForeground,
+            opacity,
+            &previousUnderlineValue,
+            &previousUnderlineColor,
+            &havePreviousUnderline);
+    }
+}
+
+static BOOL NativeSdkPacketDrawCellGrid(NSDictionary *grid, CGFloat opacity) {
+    if (!grid) return NO;
+    NSArray *cells = [grid[@"cells"] isKindOfClass:[NSArray class]] ? grid[@"cells"] : nil;
+    if (!cells) return NO;
+    NSUInteger cols = (NSUInteger)NativeSdkPacketNumber(grid[@"cols"], 0);
+    if (cols == 0) return YES;
+    NSPoint origin = NativeSdkPacketPoint(grid[@"origin"]);
+    CGFloat cellWidth = NativeSdkPacketNumber(grid[@"cellWidth"], 0);
+    CGFloat cellHeight = NativeSdkPacketNumber(grid[@"cellHeight"], 0);
+    CGFloat baseline = NativeSdkPacketNumber(grid[@"baseline"], 0);
+    CGFloat size = MAX(1, NativeSdkPacketNumber(grid[@"size"], 12));
+    if (cellWidth <= 0 || cellHeight <= 0) return YES;
+
+    const NativeSdkCellFontIds fontIds = {
+        .regular = (unsigned long long)NativeSdkPacketNumber(grid[@"font"], 1),
+        .bold = (unsigned long long)NativeSdkPacketNumber(grid[@"boldFont"], 0),
+        .italic = (unsigned long long)NativeSdkPacketNumber(grid[@"italicFont"], 0),
+        .boldItalic = (unsigned long long)NativeSdkPacketNumber(grid[@"boldItalicFont"], 0),
+    };
+    NativeSdkCellFace faces[4] = {
+        NativeSdkCellFaceFor(fontIds, 0),
+        NativeSdkCellFaceFor(fontIds, NativeSdkCellFlagBold),
+        NativeSdkCellFaceFor(fontIds, NativeSdkCellFlagItalic),
+        NativeSdkCellFaceFor(fontIds, NativeSdkCellFlagBold | NativeSdkCellFlagItalic),
+    };
+    /* Font lookup is synchronized and formats a cache key. Resolve each
+     * DISTINCT row face once instead of repeating that work for every
+     * occupied cell while parallel row fills contend on the same table. */
+    NSFont *__strong faceFonts[4] = {nil, nil, nil, nil};
+    for (NSUInteger index = 0; index < 4; index += 1) {
+        BOOL reused = NO;
+        for (NSUInteger previous = 0; previous < index; previous += 1) {
+            if (faces[index].fontId == faces[previous].fontId) {
+                faceFonts[index] = faceFonts[previous];
+                reused = YES;
+                break;
+            }
+        }
+        if (!reused) {
+            faceFonts[index] = NativeSdkCellGridResolveFont(faces[index].fontId, size);
+        }
+    }
+    NativeSdkCellGridDrawState state = {
+        .cells = cells,
+        .cols = cols,
+        .origin = origin,
+        .cellWidth = cellWidth,
+        .cellHeight = cellHeight,
+        .baseline = baseline,
+        .size = size,
+        .thickness = NativeSdkCellStrokeWidth(size),
+        .faces = {faces[0], faces[1], faces[2], faces[3]},
+        .regularFont = faceFonts[0],
+        .boldFont = faceFonts[1],
+        .italicFont = faceFonts[2],
+        .boldItalicFont = faceFonts[3],
+    };
+
+    /* Two passes remain mandatory: a following cell's background may
+     * overlap the previous cell's glyph ink. */
+    NativeSdkCellGridDrawBackgrounds(&state, opacity);
+    NativeSdkCellGridDrawInk(&state, opacity);
+    return YES;
+}
+
 static BOOL NativeSdkPacketDrawCommandBody(NSDictionary *command, NSString *kind, CGFloat opacity, CGContextRef context, CGFloat scale, BOOL hasEffectiveClip, NSRect effectiveClip, NSDictionary<NSString *, NSImage *> *imageCache) {
     BOOL ok = YES;
     if ([kind hasPrefix:@"fill_rect"] || [kind hasPrefix:@"fill_rounded_rect"]) {
@@ -2977,6 +3483,8 @@ static BOOL NativeSdkPacketDrawCommandBody(NSDictionary *command, NSString *kind
         ok = NativeSdkPacketDrawPaintedPath(path, NativeSdkPacketDictionary(command[@"paint"]), opacity, YES);
     } else if ([kind isEqualToString:@"draw_text"]) {
         ok = NativeSdkPacketDrawText(NativeSdkPacketDictionary(command[@"text"]), opacity);
+    } else if ([kind isEqualToString:@"cell_grid"]) {
+        ok = NativeSdkPacketDrawCellGrid(NativeSdkPacketDictionary(command[@"cellGrid"]), opacity);
     } else if ([kind isEqualToString:@"shadow"] || [kind isEqualToString:@"blur"]) {
         ok = NativeSdkPacketDrawEffect(NativeSdkPacketDictionary(command[@"effect"]), opacity, context, scale, command[@"transform"], hasEffectiveClip, effectiveClip);
     } else if ([kind isEqualToString:@"draw_image"]) {
@@ -3028,7 +3536,11 @@ static BOOL NativeSdkGpuCompositeEnabled(void) {
 static BOOL NativeSdkPacketCommandRasterCacheable(NSDictionary *command, NSString *kind) {
     if (command[@"transform"]) return NO;
     if (command[@"clip"] && !NativeSdkPacketArray(command[@"clip"], 4)) return NO;
-    if ([kind isEqualToString:@"draw_text"] || [kind isEqualToString:@"shadow"]) return YES;
+    /* A cell-grid row is a pure function of its command (its cells carry
+     * their own colours and clusters), so its raster caches like any
+     * text run — which is what makes an unchanged row a blit instead of
+     * a per-cell re-raster on every dirty update. */
+    if ([kind isEqualToString:@"draw_text"] || [kind isEqualToString:@"shadow"] || [kind isEqualToString:@"cell_grid"]) return YES;
     if ([kind hasPrefix:@"fill_rect"] || [kind hasPrefix:@"fill_rounded_rect"] || [kind hasPrefix:@"stroke_rect"] || [kind hasPrefix:@"draw_line"]) return YES;
     if ([kind isEqualToString:@"fill_path"] || [kind isEqualToString:@"stroke_path"]) return YES;
     if ([kind isEqualToString:@"draw_image"]) return YES;
@@ -3053,7 +3565,7 @@ static NSRect NativeSdkPacketAlignRectToPixels(NSRect rect, CGFloat scale, NSUIn
 }
 
 /* ---------------------------------------------------------------------------
- * Compact binary gpu-surface packet decoding (wire format v5).
+ * Compact binary gpu-surface packet decoding (wire format v7).
  *
  * Little-endian, length-prefixed, mirror of the engine's binary packet
  * encoder (serialization.zig, `writeCanvasGpuPacketBinary` and the patch
@@ -3155,6 +3667,42 @@ static NSString *NativeSdkBinaryReadString(NativeSdkBinaryPacketReader *reader) 
     return value;
 }
 
+/* The cell stream is overwhelmingly one-byte terminal text. Keep the
+ * complete ASCII mapping once for the process instead of allocating and
+ * copying one NSString per occupied cell on every decoded frame. The
+ * table's identity is immutable Unicode scalar value -> NSString, its
+ * lifetime needs no font invalidation, and its exact 128-entry bound is
+ * independent of frame count. */
+static NSArray<NSString *> *NativeSdkCellAsciiClusters(void) {
+    static NSArray<NSString *> *clusters = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSMutableArray<NSString *> *values = [NSMutableArray arrayWithCapacity:128];
+        for (NSUInteger value = 0; value < 128; value += 1) {
+            unichar character = (unichar)value;
+            [values addObject:[NSString stringWithCharacters:&character length:1]];
+        }
+        clusters = [values copy];
+    });
+    return clusters;
+}
+
+static NSString *NativeSdkBinaryReadCellCluster(NativeSdkBinaryPacketReader *reader, uint8_t length) {
+    if (!NativeSdkBinaryHasBytes(reader, length)) return nil;
+    NSString *cluster = nil;
+    if (length == 1 && reader->bytes[reader->offset] < 128) {
+        cluster = NativeSdkCellAsciiClusters()[reader->bytes[reader->offset]];
+    } else {
+        cluster = [[NSString alloc] initWithBytes:reader->bytes + reader->offset
+                                          length:length
+                                        encoding:NSUTF8StringEncoding];
+    }
+    reader->offset += length;
+    /* Preserve the original cell decoder's invalid-cluster behavior:
+     * malformed UTF-8 is an empty cluster, not a framing refusal. */
+    return cluster ?: @"";
+}
+
 /* Stable wire codes for the command kind; must match the engine's
  * `binaryCommandKindCode` table. */
 static NSString *NativeSdkBinaryCommandKindName(uint8_t code) {
@@ -3173,6 +3721,7 @@ static NSString *NativeSdkBinaryCommandKindName(uint8_t code) {
     case 11: return @"draw_text";
     case 12: return @"shadow";
     case 13: return @"blur";
+    case 14: return @"cell_grid";
     default: return nil;
     }
 }
@@ -3425,6 +3974,117 @@ enum {
     NativeSdkBinaryCommandFlagEffect = 0x80,
 };
 
+/* One packed cell-grid ROW (wire v6).
+ *
+ * The engine's `cell_grid` command carries a terminal row as a lattice
+ * of cells rather than as per-run fills and text draws, so a dense
+ * screen costs one command per row instead of two per cell. Cells
+ * arrive as a DELTA stream: a tag byte per cell whose low bit means
+ * "same colours and flags as the previous cell", which is why a plain
+ * row is roughly a byte a column on the wire.
+ *
+ * Decoded into the same NSDictionary shape the rest of this file works
+ * in: cells become an NSArray of per-cell dictionaries so the draw path
+ * below reads them without a second parse. The SPEC for what these
+ * pixels must be is the engine's reference renderer
+ * (canvas/reference.zig, drawCellGrid / drawCellDecorations); this
+ * decoder mirrors it deliberately, including the two-pass order. */
+static NSDictionary *NativeSdkBinaryReadCellGrid(NativeSdkBinaryPacketReader *reader) {
+    uint32_t fontId = NativeSdkBinaryReadU32(reader);
+    uint32_t boldFontId = NativeSdkBinaryReadU32(reader);
+    uint32_t italicFontId = NativeSdkBinaryReadU32(reader);
+    uint32_t boldItalicFontId = NativeSdkBinaryReadU32(reader);
+    NSNumber *fontSize = NativeSdkBinaryReadF32Number(reader);
+    NSArray *origin = NativeSdkBinaryReadF32Array(reader, 2);
+    NSNumber *cellWidth = NativeSdkBinaryReadF32Number(reader);
+    NSNumber *cellHeight = NativeSdkBinaryReadF32Number(reader);
+    NSNumber *baseline = NativeSdkBinaryReadF32Number(reader);
+    uint16_t cols = NativeSdkBinaryReadU16(reader);
+    uint16_t rows = NativeSdkBinaryReadU16(reader);
+    uint32_t cellCount = NativeSdkBinaryReadU32(reader);
+    if (reader->failed || !origin || !fontSize) return nil;
+    /* A row cannot be longer than the engine's own column ceiling; a
+     * count past it is a framing violation, not a big screen. */
+    if (cellCount > 4096 || cellCount > reader->length - reader->offset) {
+        reader->failed = YES;
+        return nil;
+    }
+
+    NSMutableArray *cells = [NSMutableArray arrayWithCapacity:cellCount];
+    uint8_t fg[4] = {0, 0, 0, 0};
+    uint8_t bg[4] = {0, 0, 0, 0};
+    uint8_t underline[4] = {0, 0, 0, 0};
+    NSArray *foregroundValue = nil;
+    NSArray *backgroundValue = nil;
+    NSArray *underlineValue = nil;
+    uint16_t cellFlags = 0;
+    BOOL haveStyle = NO;
+    for (uint32_t index = 0; index < cellCount; index++) {
+        uint8_t tag = NativeSdkBinaryReadU8(reader);
+        if (reader->failed) return nil;
+        BOOL sameStyle = (tag & 1) != 0;
+        BOOL hasCluster = (tag & 2) != 0;
+        if (!sameStyle) {
+            for (int channel = 0; channel < 4; channel++) fg[channel] = NativeSdkBinaryReadU8(reader);
+            for (int channel = 0; channel < 4; channel++) bg[channel] = NativeSdkBinaryReadU8(reader);
+            for (int channel = 0; channel < 4; channel++) underline[channel] = NativeSdkBinaryReadU8(reader);
+            cellFlags = NativeSdkBinaryReadU16(reader);
+            haveStyle = YES;
+            /* Style-delta runs share their immutable color values. This
+             * removes three arrays and twelve boxed numbers from every
+             * SAME cell, and gives the draw pass pointer-stable run
+             * identity for reusing NSColor and attribute objects. */
+            foregroundValue = @[ @(fg[0] / 255.0), @(fg[1] / 255.0), @(fg[2] / 255.0), @(fg[3] / 255.0) ];
+            backgroundValue = @[ @(bg[0] / 255.0), @(bg[1] / 255.0), @(bg[2] / 255.0), @(bg[3] / 255.0) ];
+            underlineValue = @[ @(underline[0] / 255.0), @(underline[1] / 255.0), @(underline[2] / 255.0), @(underline[3] / 255.0) ];
+        } else if (!haveStyle) {
+            /* "Same as the previous cell" with no previous cell. */
+            reader->failed = YES;
+            return nil;
+        }
+        NSString *cluster = nil;
+        if (hasCluster) {
+            uint8_t length = NativeSdkBinaryReadU8(reader);
+            if (reader->failed || length > reader->length - reader->offset) {
+                reader->failed = YES;
+                return nil;
+            }
+            cluster = NativeSdkBinaryReadCellCluster(reader, length);
+        }
+        if (reader->failed) return nil;
+        NSDictionary *cell = cluster
+            ? @{
+                @"fg" : foregroundValue,
+                @"bg" : backgroundValue,
+                @"ul" : underlineValue,
+                @"flags" : @(cellFlags),
+                @"text" : cluster,
+            }
+            : @{
+                @"fg" : foregroundValue,
+                @"bg" : backgroundValue,
+                @"ul" : underlineValue,
+                @"flags" : @(cellFlags),
+            };
+        [cells addObject:cell];
+    }
+    if (reader->failed) return nil;
+    return @{
+        @"font" : @(fontId),
+        @"boldFont" : @(boldFontId),
+        @"italicFont" : @(italicFontId),
+        @"boldItalicFont" : @(boldItalicFontId),
+        @"size" : fontSize,
+        @"origin" : origin,
+        @"cellWidth" : cellWidth,
+        @"cellHeight" : cellHeight,
+        @"baseline" : baseline,
+        @"cols" : @(cols),
+        @"rows" : @(rows),
+        @"cells" : cells,
+    };
+}
+
 static NSDictionary *NativeSdkBinaryReadCommand(NativeSdkBinaryPacketReader *reader) {
     uint8_t kindCode = NativeSdkBinaryReadU8(reader);
     uint8_t flags = NativeSdkBinaryReadU8(reader);
@@ -3484,6 +4144,13 @@ static NSDictionary *NativeSdkBinaryReadCommand(NativeSdkBinaryPacketReader *rea
         if (!effect) return nil;
         command[@"effect"] = effect;
     }
+    /* Implied by the KIND, not by a flag bit: the flag byte is full, and
+     * every cell_grid carries this payload while no other kind does. */
+    if (kindCode == 14) {
+        NSDictionary *grid = NativeSdkBinaryReadCellGrid(reader);
+        if (!grid) return nil;
+        command[@"cellGrid"] = grid;
+    }
     return reader->failed ? nil : command;
 }
 
@@ -3501,7 +4168,7 @@ static NSDictionary *NativeSdkPacketDictionaryFromBinary(const uint8_t *bytes, N
     if (memcmp(bytes, "NSGP", 4) != 0) return nil;
     reader.offset = 4;
     uint8_t version = NativeSdkBinaryReadU8(&reader);
-    if (version != 5) return nil;
+    if (version != 7) return nil;
     uint8_t loadActionCode = NativeSdkBinaryReadU8(&reader);
     uint8_t packetFlags = NativeSdkBinaryReadU8(&reader);
     (void)NativeSdkBinaryReadU8(&reader); /* reserved */
@@ -3683,6 +4350,14 @@ static void NativeSdkPremultiplyStraightRgba8(const uint8_t *source, uint8_t *de
 
 @implementation NativeSdkMetalSurfaceView
 
+- (NSString *)viewLabel {
+    return self.surfaceLabel;
+}
+
+- (void)setViewLabel:(NSString *)viewLabel {
+    self.surfaceLabel = viewLabel ?: @"";
+}
+
 - (instancetype)initWithFrame:(NSRect)frameRect {
     self = [super initWithFrame:frameRect];
     if (!self) return nil;
@@ -3731,7 +4406,7 @@ static void NativeSdkPremultiplyStraightRgba8(const uint8_t *source, uint8_t *de
 - (void)configureWithHost:(NativeSdkAppKitHost *)host windowId:(uint64_t)windowId label:(NSString *)label {
     self.host = host;
     self.windowId = windowId;
-    self.surfaceLabel = label ?: @"";
+    self.viewLabel = label;
     __weak NativeSdkMetalSurfaceView *weakSelf = self;
     dispatch_async(dispatch_get_main_queue(), ^{
         NativeSdkMetalSurfaceView *strongSelf = weakSelf;
@@ -3740,6 +4415,19 @@ static void NativeSdkPremultiplyStraightRgba8(const uint8_t *source, uint8_t *de
         [strongSelf emitResizeEvent];
         [strongSelf renderFrame];
     });
+}
+
+- (NSDragOperation)draggingEntered:(id<NSDraggingInfo>)sender {
+    (void)sender;
+    return NSDragOperationCopy;
+}
+
+- (BOOL)performDragOperation:(id<NSDraggingInfo>)sender {
+    NSPasteboard *pasteboard = sender.draggingPasteboard;
+    NSArray<NSURL *> *urls = [pasteboard readObjectsForClasses:@[[NSURL class]]
+                                                       options:@{ NSPasteboardURLReadingFileURLsOnlyKey: @YES }];
+    NSPoint point = NativeSdkViewLocalYDownPoint(self, [self convertPoint:sender.draggingLocation fromView:nil]);
+    return [self.host emitDroppedFileURLs:urls windowId:self.windowId viewLabel:self.viewLabel point:point];
 }
 
 - (void)dealloc {
@@ -3752,7 +4440,7 @@ static void NativeSdkPremultiplyStraightRgba8(const uint8_t *source, uint8_t *de
 }
 
 - (NSArray *)accessibilityChildren {
-    return self.widgetAccessibilityElements ?: @[];
+    return self.widgetAccessibilityRootElements ?: @[];
 }
 
 - (BOOL)isAvailable {
@@ -4299,6 +4987,17 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     if (!bitmap) return nil;
     CGContextSetAllowsAntialiasing(bitmap, true);
     CGContextSetShouldAntialias(bitmap, true);
+    /* Font smoothing is macOS's stem darkening for text, and it is OFF by
+     * default on a transparent backing. Every glyph this host draws lands in
+     * a CGBitmapContext like this one, so leaving it off renders ALL text
+     * systematically thin - measured at 35% fewer fully-solid stem pixels
+     * (2341 vs 3164 at 13pt/scale 2) with the bundled JetBrains Mono NL.
+     * Measure with phux-cockpit's scripts/measure-glyph-smoothing.m before
+     * changing this; the deficit is invisible in the CPU reference renderer,
+     * which never touches CoreText, so no reference screenshot can catch a
+     * regression here. Allows- must precede Should-: the former gates it. */
+    CGContextSetAllowsFontSmoothing(bitmap, true);
+    CGContextSetShouldSmoothFonts(bitmap, true);
     CGContextTranslateCTM(bitmap, 0, (CGFloat)rasterHeight);
     CGContextScaleCTM(bitmap, scale, -scale);
     CGContextTranslateCTM(bitmap, -minX / scale, -minY / scale);
@@ -4975,6 +5674,11 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     if (!bitmap) return nil;
     CGContextSetAllowsAntialiasing(bitmap, true);
     CGContextSetShouldAntialias(bitmap, true);
+    /* Stem darkening for text; see the raster path above for why and for how
+     * to measure it. This is the CACHED command raster, so a glyph rasterized
+     * thin here stays thin for the life of the cache entry. */
+    CGContextSetAllowsFontSmoothing(bitmap, true);
+    CGContextSetShouldSmoothFonts(bitmap, true);
     CGContextTranslateCTM(bitmap, 0, (CGFloat)rasterHeight);
     CGContextScaleCTM(bitmap, scale, -scale);
     CGContextTranslateCTM(bitmap, -minX / scale, -minY / scale);
@@ -5188,6 +5892,12 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
 
     CGContextSetAllowsAntialiasing(context, true);
     CGContextSetShouldAntialias(context, true);
+    /* Stem darkening for text; see the raster path above for why and for how
+     * to measure it. This is the MAIN per-present surface pass - the one that
+     * draws the terminal cell grid - so it is the site the faint-text report
+     * was actually about. */
+    CGContextSetAllowsFontSmoothing(context, true);
+    CGContextSetShouldSmoothFonts(context, true);
     CGContextTranslateCTM(context, 0, (CGFloat)pixelHeight);
     CGContextScaleCTM(context, scale, -scale);
 
@@ -5612,11 +6322,14 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
 - (void)updateWidgetAccessibilityWithNodes:(const native_sdk_appkit_widget_accessibility_node_t *)nodes count:(NSUInteger)count {
     if (!nodes || count == 0) {
         self.widgetAccessibilityElements = @[];
+        self.widgetAccessibilityRootElements = @[];
         NSAccessibilityPostNotification(self, NSAccessibilityLayoutChangedNotification);
         return;
     }
 
-    NSMutableArray<NSAccessibilityElement *> *elements = [NSMutableArray arrayWithCapacity:count];
+    NSMutableArray<NativeSdkWidgetAccessibilityElement *> *elements = [NSMutableArray arrayWithCapacity:count];
+    NSMutableArray<NSNumber *> *parentIds = [NSMutableArray arrayWithCapacity:count];
+    NSMutableDictionary<NSNumber *, NativeSdkWidgetAccessibilityElement *> *elementsById = [NSMutableDictionary dictionaryWithCapacity:count];
     for (NSUInteger index = 0; index < count; index++) {
         const native_sdk_appkit_widget_accessibility_node_t node = nodes[index];
         NSString *label = NativeSdkStringFromBytes(node.label, node.label_len) ?: @"";
@@ -5627,7 +6340,6 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         element.surfaceView = self;
         element.widgetId = node.id;
         element.actionFlags = node.action_flags;
-        element.accessibilityParent = self;
         element.accessibilityRole = NativeSdkAccessibilityRoleForWidgetRole(node.role);
         element.accessibilityIdentifier = [NSString stringWithFormat:@"native-sdk-widget-%llu", node.id];
         element.accessibilityLabel = name;
@@ -5704,10 +6416,46 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
             element.accessibilityValueDescription = [stateDescriptions componentsJoinedByString:@", "];
         }
         CGFloat nativeY = self.bounds.size.height - node.y - node.height;
-        element.accessibilityFrameInParentSpace = NSMakeRect(node.x, nativeY, node.width, node.height);
+        element.surfaceFrame = NSMakeRect(node.x, nativeY, node.width, node.height);
+        element.accessibilityFrameInParentSpace = element.surfaceFrame;
         [elements addObject:element];
+        [parentIds addObject:@(node.parent_id)];
+        [elementsById setObject:element forKey:@(node.id)];
+    }
+
+    NSMutableArray<NSAccessibilityElement *> *rootElements = [NSMutableArray arrayWithCapacity:count];
+    NSMutableDictionary<NSNumber *, NSMutableArray<NSAccessibilityElement *> *> *childrenByParentId = [NSMutableDictionary dictionaryWithCapacity:count];
+    for (NSUInteger index = 0; index < elements.count; index++) {
+        NativeSdkWidgetAccessibilityElement *element = elements[index];
+        NSNumber *parentId = parentIds[index];
+        NativeSdkWidgetAccessibilityElement *parent = parentId.unsignedLongLongValue == 0 ? nil : [elementsById objectForKey:parentId];
+        if (parent && parent != element) {
+            element.accessibilityParent = parent;
+            NSRect parentFrame = parent.surfaceFrame;
+            NSRect childFrame = element.surfaceFrame;
+            element.accessibilityFrameInParentSpace = NSMakeRect(
+                childFrame.origin.x - parentFrame.origin.x,
+                childFrame.origin.y - parentFrame.origin.y,
+                childFrame.size.width,
+                childFrame.size.height
+            );
+            NSMutableArray<NSAccessibilityElement *> *children = [childrenByParentId objectForKey:parentId];
+            if (!children) {
+                children = [NSMutableArray array];
+                [childrenByParentId setObject:children forKey:parentId];
+            }
+            [children addObject:element];
+        } else {
+            element.accessibilityParent = self;
+            [rootElements addObject:element];
+        }
+    }
+    for (NSNumber *parentId in childrenByParentId) {
+        NativeSdkWidgetAccessibilityElement *parent = [elementsById objectForKey:parentId];
+        parent.accessibilityChildren = [childrenByParentId objectForKey:parentId];
     }
     self.widgetAccessibilityElements = elements;
+    self.widgetAccessibilityRootElements = rootElements;
     NSAccessibilityPostNotification(self, NSAccessibilityLayoutChangedNotification);
 }
 
@@ -6951,7 +7699,7 @@ static BOOL NativeSdkScrollDriverCanConsumeHorizontally(NativeSdkScrollDriverVie
 
 - (void)emitInputEventWithKind:(NSInteger)kind point:(NSPoint)point timestampNs:(uint64_t)timestampNs modifiers:(uint32_t)modifiers keyText:(NSString *)keyText inputText:(NSString *)inputText button:(NSInteger)button deltaX:(double)deltaX deltaY:(double)deltaY {
     if (!self.host || self.surfaceLabel.length == 0) return;
-    CGFloat y = self.bounds.size.height - point.y;
+    const NSPoint yDownPoint = NativeSdkViewLocalYDownPoint(self, point);
     const char *labelBytes = self.surfaceLabel.UTF8String ?: "";
     NSString *safeKeyText = keyText ?: @"";
     NSString *safeInputText = inputText ?: @"";
@@ -6961,8 +7709,8 @@ static BOOL NativeSdkScrollDriverCanConsumeHorizontally(NativeSdkScrollDriverVie
         .kind = NATIVE_SDK_APPKIT_EVENT_GPU_SURFACE_INPUT,
         .window_id = self.windowId,
         .timestamp_ns = timestampNs,
-        .x = point.x,
-        .y = y,
+        .x = yDownPoint.x,
+        .y = yDownPoint.y,
         .view_label = labelBytes,
         .view_label_len = [self.surfaceLabel lengthOfBytesUsingEncoding:NSUTF8StringEncoding],
         .key_text = keyBytes,
@@ -7082,10 +7830,10 @@ static BOOL NativeSdkScrollDriverCanConsumeHorizontally(NativeSdkScrollDriverVie
 }
 
 - (NSUInteger)characterIndexForPoint:(NSPoint)point {
-    NSAccessibilityElement *element = [self focusedTextAccessibilityElement];
+    NativeSdkWidgetAccessibilityElement *element = [self focusedTextAccessibilityElement];
     if (!element || !self.window) return 0;
 
-    NSRect frame = element.accessibilityFrameInParentSpace;
+    NSRect frame = element.surfaceFrame;
     if (NSIsEmptyRect(frame)) return 0;
 
     NSPoint windowPoint = [self.window convertPointFromScreen:point];
@@ -7100,10 +7848,10 @@ static BOOL NativeSdkScrollDriverCanConsumeHorizontally(NativeSdkScrollDriverVie
 }
 
 - (NSRect)firstRectForCharacterRange:(NSRange)range actualRange:(NSRangePointer)actualRange {
-    NSAccessibilityElement *element = [self focusedTextAccessibilityElement];
+    NativeSdkWidgetAccessibilityElement *element = [self focusedTextAccessibilityElement];
     NSRect localRect = NSZeroRect;
     if (element) {
-        NSRect frame = element.accessibilityFrameInParentSpace;
+        NSRect frame = element.surfaceFrame;
         NSInteger characterCount = MAX(0, element.accessibilityNumberOfCharacters);
         NSUInteger location = range.location == NSNotFound ? 0 : MIN(range.location, (NSUInteger)characterCount);
         NSUInteger length = range.location == NSNotFound ? 0 : MIN(range.length, (NSUInteger)characterCount - location);
@@ -7126,8 +7874,8 @@ static BOOL NativeSdkScrollDriverCanConsumeHorizontally(NativeSdkScrollDriverVie
     return self.window ? [self.window convertRectToScreen:windowRect] : windowRect;
 }
 
-- (NSAccessibilityElement *)focusedTextAccessibilityElement {
-    for (NSAccessibilityElement *element in self.widgetAccessibilityElements ?: @[]) {
+- (NativeSdkWidgetAccessibilityElement *)focusedTextAccessibilityElement {
+    for (NativeSdkWidgetAccessibilityElement *element in self.widgetAccessibilityElements ?: @[]) {
         if (!element.accessibilityFocused) continue;
         if ([element.accessibilityRole isEqualToString:NSAccessibilityTextFieldRole]) return element;
     }
@@ -7350,6 +8098,9 @@ static BOOL NativeSdkScrollDriverCanConsumeHorizontally(NativeSdkScrollDriverVie
 @end
 
 @implementation NativeSdkShortcut
+@end
+
+@implementation NativeSdkTraySegmentedControl
 @end
 
 @implementation NativeSdkStatusItemEntry
@@ -7684,7 +8435,7 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
 
 @implementation NativeSdkAppKitHost
 
-- (instancetype)initWithAppName:(NSString *)appName displayName:(NSString *)displayName version:(NSString *)version aboutDescription:(NSString *)aboutDescription hasWebContent:(BOOL)hasWebContent dockVisible:(BOOL)dockVisible windowTitle:(NSString *)windowTitle bundleIdentifier:(NSString *)bundleIdentifier iconPath:(NSString *)iconPath windowLabel:(NSString *)windowLabel x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame resizable:(BOOL)resizable titlebarStyle:(int)titlebarStyle showPolicy:(int)showPolicy windowFlags:(uint32_t)windowFlags {
+- (instancetype)initWithAppName:(NSString *)appName displayName:(NSString *)displayName version:(NSString *)version aboutDescription:(NSString *)aboutDescription hasWebContent:(BOOL)hasWebContent dockVisible:(BOOL)dockVisible windowTitle:(NSString *)windowTitle bundleIdentifier:(NSString *)bundleIdentifier iconPath:(NSString *)iconPath windowLabel:(NSString *)windowLabel x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame initialPlacement:(int)initialPlacement restorePolicy:(int)restorePolicy resizable:(BOOL)resizable titlebarStyle:(int)titlebarStyle showPolicy:(int)showPolicy windowFlags:(uint32_t)windowFlags {
     self = [super init];
     if (!self) {
         return nil;
@@ -7734,7 +8485,7 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
     [self configureApplication];
     NativeSdkLaunchLap("app_configured");
 
-    [self createWindowWithId:1 title:(windowTitle.length > 0 ? windowTitle : self.appName) label:self.windowLabel x:x y:y width:width height:height restoreFrame:restoreFrame resizable:resizable titlebarStyle:titlebarStyle showPolicy:showPolicy windowFlags:windowFlags makeMain:YES];
+    [self createWindowWithId:1 title:(windowTitle.length > 0 ? windowTitle : self.appName) label:self.windowLabel x:x y:y width:width height:height restoreFrame:restoreFrame initialPlacement:initialPlacement restorePolicy:restorePolicy resizable:resizable titlebarStyle:titlebarStyle showPolicy:showPolicy windowFlags:windowFlags makeMain:YES];
     self.didShutdown = NO;
     self.pendingPreRunStop = NO;
     self.observesApplicationActivation = NO;
@@ -7742,16 +8493,23 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
     return self;
 }
 
-- (BOOL)createWindowWithId:(uint64_t)windowId title:(NSString *)title label:(NSString *)label x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame resizable:(BOOL)resizable titlebarStyle:(int)titlebarStyle showPolicy:(int)showPolicy windowFlags:(uint32_t)windowFlags makeMain:(BOOL)makeMain {
+- (BOOL)createWindowWithId:(uint64_t)windowId title:(NSString *)title label:(NSString *)label x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame initialPlacement:(int)initialPlacement restorePolicy:(int)restorePolicy resizable:(BOOL)resizable titlebarStyle:(int)titlebarStyle showPolicy:(int)showPolicy windowFlags:(uint32_t)windowFlags makeMain:(BOOL)makeMain {
     NSNumber *key = @(windowId);
     if (self.windows[key]) {
         return NO;
     }
 
-    NSRect rect = restoreFrame ? NSMakeRect(x, y, width, height) : NSMakeRect(0, 0, width, height);
-    if (restoreFrame) {
-        rect = constrainFrame(rect);
-    }
+    (void)restoreFrame; // Persistence opt-in; initialPlacement says whether a frame was found.
+    const BOOL restoredPlacement = initialPlacement == 0;
+    // A restored center policy deliberately discards only the saved origin;
+    // its saved OUTER size is reapplied after construction below. Fresh
+    // frames remain content rectangles, preserving the public width/height
+    // contract for authored windows.
+    const BOOL centerOnPrimary = initialPlacement == 2 || (restoredPlacement && restorePolicy == 1);
+    NSScreen *primaryScreen = NativeSdkPrimaryScreen();
+    NSRect rect = centerOnPrimary
+        ? NativeSdkConstrainFrameToScreen(NSMakeRect(0, 0, width, height), primaryScreen)
+        : NativeSdkConstrainFrame(NSMakeRect(x, y, width, height));
     NSWindowStyleMask styleMask = NSWindowStyleMaskTitled |
                                   NSWindowStyleMaskClosable |
                                   NSWindowStyleMaskMiniaturizable;
@@ -7833,14 +8591,30 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
         window.toolbarStyle = NSWindowToolbarStyleUnified;
         window.titlebarSeparatorStyle = NSTitlebarSeparatorStyleNone;
     }
-    if (!restoreFrame) {
-        [window center];
+    if (restoredPlacement) {
+        // Window-state events persist content geometry. Convert that saved
+        // rect through the window's FINAL chrome, then constrain/center the
+        // completed outer frame so the content rect round-trips without
+        // titlebar growth while the whole window stays visible.
+        NSRect restoredContentFrame = NSMakeRect(x, y, width, height);
+        NSRect restoredWindowFrame = [window frameRectForContentRect:restoredContentFrame];
+        restoredWindowFrame = restorePolicy == 1
+            ? NativeSdkCenterFrameOnScreen(restoredWindowFrame, primaryScreen)
+            : NativeSdkConstrainFrame(restoredWindowFrame);
+        [window setFrame:restoredWindowFrame display:NO];
+    } else if (initialPlacement == 1) {
+        // Fresh authored dimensions are content size, but visibility is an
+        // OUTER-frame guarantee. AppKit adds titlebar chrome during
+        // construction, so constrain the completed frame as the final step.
+        [window setFrame:NativeSdkConstrainFrame(window.frame) display:NO];
+    } else if (centerOnPrimary) {
+        [window setFrame:NativeSdkCenterFrameOnScreen(window.frame, primaryScreen) display:NO];
         // AppKit centers every new window by default, which leaves a
         // model-declared secondary window exactly covering the editor that
         // opened it. Cascade from the active window like Win32's default
         // placement so repeated Command+N windows stay visibly distinct.
         NSWindow *referenceWindow = NSApp.keyWindow ?: self.window;
-        if (!makeMain && referenceWindow) {
+        if (initialPlacement == 2 && restorePolicy == 0 && !makeMain && referenceWindow) {
             NSRect referenceFrame = referenceWindow.frame;
             NSRect cascadedFrame = window.frame;
             cascadedFrame.origin.x = NSMinX(referenceFrame) + 24.0;
@@ -7862,7 +8636,7 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
     }
     if (makeMain) NativeSdkLaunchLap("window_chrome_ready");
 
-    NSView *container = [[NSView alloc] initWithFrame:rect];
+    NSView *container = [[NSView alloc] initWithFrame:window.contentView.bounds];
     container.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     window.contentView = container;
     // The window's MAIN WebView is created lazily
@@ -8087,6 +8861,24 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
     NSWindow *window = self.windows[@(windowId)];
     if (!window) return;
     [window miniaturize:nil];
+}
+
+/* SET fullscreen, not toggle. AppKit only offers `toggleFullScreen:`,
+ * so the state is compared first and the verb only fires when it
+ * differs — that is what makes the engine-side call idempotent, and
+ * what stops an app restoring a remembered layout from flipping OUT of
+ * fullscreen because it was already in.
+ *
+ * The confirmation arrives through the window's own delegate callbacks
+ * (the same ones that keep `WindowInfo.fullscreen` current), so a
+ * transition the USER started from the green button and one the app
+ * asked for are reported identically. */
+- (void)setWindowWithId:(uint64_t)windowId fullscreen:(BOOL)fullscreen {
+    NSWindow *window = self.windows[@(windowId)];
+    if (!window) return;
+    const BOOL isFullscreen = (window.styleMask & NSWindowStyleMaskFullScreen) != 0;
+    if (isFullscreen == fullscreen) return;
+    [window toggleFullScreen:nil];
 }
 
 // The window-drag region channel. Called synchronously while the runtime
@@ -8358,6 +9150,7 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
         case NATIVE_SDK_APPKIT_VIEW_GPU_SURFACE: {
             NativeSdkMetalSurfaceView *surface = [[NativeSdkMetalSurfaceView alloc] initWithFrame:NSZeroRect];
             if (![surface isAvailable]) return nil;
+            [surface registerForDraggedTypes:@[NSPasteboardTypeFileURL]];
             view = surface;
             break;
         }
@@ -9176,8 +9969,46 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
     }
 }
 
-static NSRect constrainFrame(NSRect frame) {
-    NSScreen *screen = [NSScreen mainScreen];
+static NSScreen *NativeSdkPrimaryScreen(void) {
+    // AppKit's mainScreen follows the key window. The first screen is the
+    // menu-bar display: macOS's primary screen and the policy contract.
+    return [NSScreen screens].firstObject ?: [NSScreen mainScreen];
+}
+
+static NSScreen *NativeSdkScreenForFrame(NSRect frame) {
+    NSArray<NSScreen *> *screens = [NSScreen screens];
+    NSScreen *bestScreen = nil;
+    CGFloat bestArea = 0;
+    for (NSScreen *screen in screens) {
+        NSRect intersection = NSIntersectionRect(frame, screen.visibleFrame);
+        CGFloat area = NSWidth(intersection) * NSHeight(intersection);
+        if (area > bestArea) {
+            bestArea = area;
+            bestScreen = screen;
+        }
+    }
+    if (bestScreen) return bestScreen;
+
+    // A frame from a disconnected display has no intersection. Clamp it to
+    // the nearest remaining display instead of always teleporting to primary.
+    NSPoint center = NSMakePoint(NSMidX(frame), NSMidY(frame));
+    CGFloat bestDistance = CGFLOAT_MAX;
+    for (NSScreen *screen in screens) {
+        NSRect visible = screen.visibleFrame;
+        CGFloat nearestX = MIN(MAX(center.x, NSMinX(visible)), NSMaxX(visible));
+        CGFloat nearestY = MIN(MAX(center.y, NSMinY(visible)), NSMaxY(visible));
+        CGFloat dx = center.x - nearestX;
+        CGFloat dy = center.y - nearestY;
+        CGFloat distance = dx * dx + dy * dy;
+        if (distance < bestDistance) {
+            bestDistance = distance;
+            bestScreen = screen;
+        }
+    }
+    return bestScreen ?: [NSScreen mainScreen];
+}
+
+static NSRect NativeSdkConstrainFrameToScreen(NSRect frame, NSScreen *screen) {
     if (!screen) return frame;
     NSRect visible = screen.visibleFrame;
     if (frame.size.width > visible.size.width) frame.size.width = visible.size.width;
@@ -9187,6 +10018,19 @@ static NSRect constrainFrame(NSRect frame) {
     if (NSMaxX(frame) > NSMaxX(visible)) frame.origin.x = NSMaxX(visible) - frame.size.width;
     if (NSMaxY(frame) > NSMaxY(visible)) frame.origin.y = NSMaxY(visible) - frame.size.height;
     return frame;
+}
+
+static NSRect NativeSdkConstrainFrame(NSRect frame) {
+    return NativeSdkConstrainFrameToScreen(frame, NativeSdkScreenForFrame(frame));
+}
+
+static NSRect NativeSdkCenterFrameOnScreen(NSRect frame, NSScreen *screen) {
+    frame = NativeSdkConstrainFrameToScreen(frame, screen);
+    if (!screen) return frame;
+    NSRect visible = screen.visibleFrame;
+    frame.origin.x = NSMidX(visible) - NSWidth(frame) / 2.0;
+    frame.origin.y = NSMidY(visible) - NSHeight(frame) / 2.0;
+    return NativeSdkConstrainFrameToScreen(frame, screen);
 }
 
 static NSString *NativeSdkAppKitBridgeScript(void) {
@@ -10038,7 +10882,16 @@ static void NativeSdkApplyProcessDisplayName(NSString *displayName) {
 - (void)emitWindowFrameForWindowId:(uint64_t)windowId open:(BOOL)open {
     NSWindow *window = self.windows[@(windowId)] ?: self.window;
     NSString *label = self.windowLabels[@(windowId)] ?: (windowId == 1 ? self.windowLabel : @"");
-    NSRect frame = window.frame;
+    // The frame event's rect is the CONTENT rect in screen coordinates,
+    // never window.frame: every consumer treats these numbers as content
+    // geometry — shell layout bounds, the resize channel
+    // (contentView.bounds), window-state persistence, and
+    // createWindowWithId:'s initWithContentRect: round-trip — and the
+    // GTK/Win32 hosts report content size on the same event. The outer
+    // frame here laid shell views past the content's bottom edge on
+    // open/restore and grew every restored window by the titlebar height
+    // once per launch.
+    NSRect frame = [window contentRectForFrameRect:window.frame];
     [self emitEvent:(native_sdk_appkit_event_t){
         .kind = NATIVE_SDK_APPKIT_EVENT_WINDOW_FRAME,
         .window_id = windowId,
@@ -10053,6 +10906,10 @@ static void NativeSdkApplyProcessDisplayName(NSString *displayName) {
         // frame emit while a window sits in the policy-hidden set
         // carries it, and hide/show flip the set before they emit.
         .hidden = [self.policyHiddenWindows containsObject:@(windowId)] ? 1 : 0,
+        // Host truth, same as `hidden`: the style mask is what AppKit
+        // flips on both sides of a fullscreen transition, whoever
+        // started it.
+        .fullscreen = (window.styleMask & NSWindowStyleMaskFullScreen) != 0 ? 1 : 0,
         .label = label.UTF8String,
         .label_len = [label lengthOfBytesUsingEncoding:NSUTF8StringEncoding],
     }];
@@ -11885,7 +12742,7 @@ static void NativeSdkVideoFittedSize(double naturalWidth, double naturalHeight, 
     }];
 }
 
-- (BOOL)emitDroppedFileURLs:(NSArray<NSURL *> *)urls windowId:(uint64_t)windowId {
+- (BOOL)emitDroppedFileURLs:(NSArray<NSURL *> *)urls windowId:(uint64_t)windowId viewLabel:(NSString *)viewLabel point:(NSPoint)point {
     if (urls.count == 0) return NO;
     NSMutableArray<NSString *> *paths = [NSMutableArray array];
     for (NSURL *url in urls) {
@@ -11902,9 +12759,15 @@ static void NativeSdkVideoFittedSize(double naturalWidth, double naturalHeight, 
         [data appendData:pathData];
     }
     if (data.length == 0) return NO;
+    NSString *safeViewLabel = viewLabel ?: @"";
+    const char *viewLabelBytes = safeViewLabel.UTF8String ?: "";
     [self emitEvent:(native_sdk_appkit_event_t){
         .kind = NATIVE_SDK_APPKIT_EVENT_FILES_DROPPED,
         .window_id = windowId,
+        .x = point.x,
+        .y = point.y,
+        .view_label = viewLabelBytes,
+        .view_label_len = [safeViewLabel lengthOfBytesUsingEncoding:NSUTF8StringEncoding],
         .drop_paths = data.bytes,
         .drop_paths_len = data.length,
     }];
@@ -11977,6 +12840,22 @@ static void NativeSdkVideoFittedSize(double naturalWidth, double naturalHeight, 
         uint64_t packed = (uint64_t)(NSUInteger)menuItem.tag;
         self.trayCallback(self.trayContext, (uint32_t)(packed >> 32), (uint32_t)packed);
     }
+}
+
+- (void)traySegmentChanged:(NSSegmentedControl *)control {
+    NSInteger selected = control.selectedSegment;
+    if (selected < 0 || !self.trayCallback) return;
+    NSInteger itemId = [control tagForSegment:selected];
+    if (itemId <= 0) return;
+    // Selection is model-owned. AppKit applies its optimistic selection
+    // before sending the action; restore the declared state before dispatch
+    // so an ignored or failed command cannot leave native chrome ahead of
+    // the model. A successful dispatch rebuilds the row from the new state.
+    NSInteger sourceSelected = [(NativeSdkTraySegmentedControl *)control sourceSelectedSegment];
+    for (NSInteger index = 0; index < control.segmentCount; index++) {
+        [control setSelected:index == sourceSelected forSegment:index];
+    }
+    self.trayCallback(self.trayContext, (uint32_t)control.tag, (uint32_t)itemId);
 }
 
 - (NativeSdkStatusItemEntry *)statusEntryForId:(uint32_t)identifier {
@@ -12210,7 +13089,7 @@ static BOOL NativeSdkPolicyListMatches(NSArray<NSString *> *values, NSURL *url) 
     return NO;
 }
 
-native_sdk_appkit_host_t *native_sdk_appkit_create(const char *app_name, size_t app_name_len, const char *display_name, size_t display_name_len, const char *version, size_t version_len, const char *about_description, size_t about_description_len, int has_web_content, int dock_visible, const char *window_title, size_t window_title_len, const char *bundle_id, size_t bundle_id_len, const char *icon_path, size_t icon_path_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, int show_policy, uint32_t window_flags) {
+native_sdk_appkit_host_t *native_sdk_appkit_create(const char *app_name, size_t app_name_len, const char *display_name, size_t display_name_len, const char *version, size_t version_len, const char *about_description, size_t about_description_len, int has_web_content, int dock_visible, const char *window_title, size_t window_title_len, const char *bundle_id, size_t bundle_id_len, const char *icon_path, size_t icon_path_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int initial_placement, int restore_policy, int resizable, int titlebar_style, int show_policy, uint32_t window_flags) {
     @autoreleasepool {
         NSString *appNameString = [[NSString alloc] initWithBytes:app_name length:app_name_len encoding:NSUTF8StringEncoding] ?: @"native-sdk";
         NSString *displayNameString = [[NSString alloc] initWithBytes:display_name length:display_name_len encoding:NSUTF8StringEncoding] ?: @"";
@@ -12220,7 +13099,7 @@ native_sdk_appkit_host_t *native_sdk_appkit_create(const char *app_name, size_t 
         NSString *bundleIdString = [[NSString alloc] initWithBytes:bundle_id length:bundle_id_len encoding:NSUTF8StringEncoding] ?: @"dev.native_sdk.app";
         NSString *iconPathString = [[NSString alloc] initWithBytes:icon_path length:icon_path_len encoding:NSUTF8StringEncoding] ?: @"";
         NSString *windowLabelString = [[NSString alloc] initWithBytes:window_label length:window_label_len encoding:NSUTF8StringEncoding] ?: @"main";
-        NativeSdkAppKitHost *host = [[NativeSdkAppKitHost alloc] initWithAppName:appNameString displayName:displayNameString version:versionString aboutDescription:aboutDescriptionString hasWebContent:(has_web_content != 0) dockVisible:(dock_visible != 0) windowTitle:windowTitleString bundleIdentifier:bundleIdString iconPath:iconPathString windowLabel:windowLabelString x:x y:y width:width height:height restoreFrame:(restore_frame != 0) resizable:(resizable != 0) titlebarStyle:titlebar_style showPolicy:show_policy windowFlags:window_flags];
+        NativeSdkAppKitHost *host = [[NativeSdkAppKitHost alloc] initWithAppName:appNameString displayName:displayNameString version:versionString aboutDescription:aboutDescriptionString hasWebContent:(has_web_content != 0) dockVisible:(dock_visible != 0) windowTitle:windowTitleString bundleIdentifier:bundleIdString iconPath:iconPathString windowLabel:windowLabelString x:x y:y width:width height:height restoreFrame:(restore_frame != 0) initialPlacement:initial_placement restorePolicy:restore_policy resizable:(resizable != 0) titlebarStyle:titlebar_style showPolicy:show_policy windowFlags:window_flags];
         return (__bridge_retained native_sdk_appkit_host_t *)host;
     }
 }
@@ -12538,11 +13417,11 @@ void native_sdk_appkit_set_shortcuts(native_sdk_appkit_host_t *host, const char 
     [object setShortcutsWithIds:ids idLengths:id_lens keys:keys keyLengths:key_lens modifiers:modifiers count:count];
 }
 
-int native_sdk_appkit_create_window(native_sdk_appkit_host_t *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int resizable, int titlebar_style, int show_policy, uint32_t window_flags) {
+int native_sdk_appkit_create_window(native_sdk_appkit_host_t *host, uint64_t window_id, const char *window_title, size_t window_title_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int initial_placement, int restore_policy, int resizable, int titlebar_style, int show_policy, uint32_t window_flags) {
     NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
     NSString *titleString = window_title ? [[NSString alloc] initWithBytes:window_title length:window_title_len encoding:NSUTF8StringEncoding] : @"";
     NSString *labelString = window_label ? [[NSString alloc] initWithBytes:window_label length:window_label_len encoding:NSUTF8StringEncoding] : @"";
-    return [object createWindowWithId:window_id title:titleString ?: @"" label:labelString ?: @"" x:x y:y width:width height:height restoreFrame:(restore_frame != 0) resizable:(resizable != 0) titlebarStyle:titlebar_style showPolicy:show_policy windowFlags:window_flags makeMain:NO] ? 1 : 0;
+    return [object createWindowWithId:window_id title:titleString ?: @"" label:labelString ?: @"" x:x y:y width:width height:height restoreFrame:(restore_frame != 0) initialPlacement:initial_placement restorePolicy:restore_policy resizable:(resizable != 0) titlebarStyle:titlebar_style showPolicy:show_policy windowFlags:window_flags makeMain:NO] ? 1 : 0;
 }
 
 int native_sdk_appkit_set_window_content_min_size(native_sdk_appkit_host_t *host, uint64_t window_id, double min_width, double min_height) {
@@ -12583,6 +13462,13 @@ int native_sdk_appkit_hide_window(native_sdk_appkit_host_t *host, uint64_t windo
     NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
     if (!object.windows[@(window_id)]) return 0;
     [object hideWindowWithId:window_id];
+    return 1;
+}
+
+int native_sdk_appkit_set_window_fullscreen(native_sdk_appkit_host_t *host, uint64_t window_id, int fullscreen) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    if (!object.windows[@(window_id)]) return 0;
+    [object setWindowWithId:window_id fullscreen:fullscreen != 0];
     return 1;
 }
 
@@ -13126,20 +14012,33 @@ static NSImage *NativeSdkTrayImageWithOpacity(NSImage *source, double opacity) {
     return image;
 }
 
-static void NativeSdkApplyTrayPresentation(NativeSdkAppKitHost *object, NativeSdkStatusItemEntry *entry, NSString *requestedTitle, double width, int tone, double iconOpacity, BOOL monospaced) {
+static NSFontWeight NativeSdkTrayFontWeight(int weight) {
+    switch (weight) {
+        case 1: return NSFontWeightMedium;
+        case 2: return NSFontWeightSemibold;
+        case 3: return NSFontWeightBold;
+        default: return NSFontWeightRegular;
+    }
+}
+
+static void NativeSdkApplyTrayPresentation(NativeSdkAppKitHost *object, NativeSdkStatusItemEntry *entry, NSString *requestedTitle, double width, int tone, double iconOpacity, BOOL monospaced, double fontSize, int fontWeight) {
     if (!entry.item) return;
     entry.presentationTitle = requestedTitle ?: @"";
     entry.presentationWidth = width;
     entry.presentationTone = tone;
     entry.presentationIconOpacity = iconOpacity;
     entry.presentationMonospaced = monospaced;
+    entry.presentationFontSize = fontSize;
+    entry.presentationFontWeight = fontWeight;
     NSString *title = requestedTitle ?: @"";
     if (!entry.baseImage && title.length == 0) {
         title = object.appName.length > 0 ? [object.appName substringToIndex:MIN(1, object.appName.length)] : @"Z";
     }
+    CGFloat resolvedSize = fontSize > 0 ? fontSize : 11;
+    NSFontWeight resolvedWeight = NativeSdkTrayFontWeight(fontWeight);
     NSFont *font = monospaced
-        ? ([NSFont fontWithName:@"Geist Mono" size:11] ?: [NSFont monospacedDigitSystemFontOfSize:11 weight:NSFontWeightRegular])
-        : [NSFont systemFontOfSize:11];
+        ? [NSFont monospacedSystemFontOfSize:resolvedSize weight:resolvedWeight]
+        : [NSFont systemFontOfSize:resolvedSize weight:resolvedWeight];
     NSStatusBarButton *button = entry.item.button;
     if (tone == 0) {
         button.title = title;
@@ -13180,7 +14079,7 @@ static void NativeSdkApplyTrayShell(NativeSdkAppKitHost *object, NativeSdkStatus
     entry.item.visible = visible != 0;
 }
 
-void native_sdk_appkit_create_tray(native_sdk_appkit_host_t *host, uint32_t status_item_id, const char *icon_path, size_t icon_path_len, const char *title, size_t title_len, const char *tooltip, size_t tooltip_len, int visible, double width, int tone, double icon_opacity, int monospaced, const char *activation_command, size_t activation_command_len, const char *alternate_activation_command, size_t alternate_activation_command_len, const char *open_command, size_t open_command_len) {
+void native_sdk_appkit_create_tray(native_sdk_appkit_host_t *host, uint32_t status_item_id, const char *icon_path, size_t icon_path_len, const char *title, size_t title_len, const char *tooltip, size_t tooltip_len, int visible, double width, int tone, double icon_opacity, int monospaced, double font_size, int font_weight, const char *activation_command, size_t activation_command_len, const char *alternate_activation_command, size_t alternate_activation_command_len, const char *open_command, size_t open_command_len) {
     NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
     @autoreleasepool {
         NSNumber *key = @(status_item_id);
@@ -13197,7 +14096,7 @@ void native_sdk_appkit_create_tray(native_sdk_appkit_host_t *host, uint32_t stat
         entry.item = [[NSStatusBar systemStatusBar] statusItemWithLength:hasTitle ? NSVariableStatusItemLength : NSSquareStatusItemLength];
         NSString *titleString = hasTitle ? ([[NSString alloc] initWithBytes:title length:title_len encoding:NSUTF8StringEncoding] ?: @"") : @"";
         NativeSdkApplyTrayShell(object, entry, icon_path, icon_path_len, tooltip, tooltip_len, visible, activation_command, activation_command_len, alternate_activation_command, alternate_activation_command_len, open_command, open_command_len);
-        NativeSdkApplyTrayPresentation(object, entry, titleString, width, tone, icon_opacity, monospaced != 0);
+        NativeSdkApplyTrayPresentation(object, entry, titleString, width, tone, icon_opacity, monospaced != 0, font_size, font_weight);
     }
 }
 
@@ -13207,7 +14106,7 @@ void native_sdk_appkit_update_tray_shell(native_sdk_appkit_host_t *host, uint32_
         NativeSdkStatusItemEntry *entry = [object statusEntryForId:status_item_id];
         if (!entry) return;
         NativeSdkApplyTrayShell(object, entry, icon_path, icon_path_len, tooltip, tooltip_len, visible, activation_command, activation_command_len, alternate_activation_command, alternate_activation_command_len, open_command, open_command_len);
-        NativeSdkApplyTrayPresentation(object, entry, entry.presentationTitle, entry.presentationWidth, entry.presentationTone, entry.presentationIconOpacity, entry.presentationMonospaced);
+        NativeSdkApplyTrayPresentation(object, entry, entry.presentationTitle, entry.presentationWidth, entry.presentationTone, entry.presentationIconOpacity, entry.presentationMonospaced, entry.presentationFontSize, entry.presentationFontWeight);
         if (entry.activationCommand.length == 0 && entry.alternateActivationCommand.length == 0) entry.item.menu = entry.menu;
         else entry.item.menu = nil;
     }
@@ -13220,7 +14119,114 @@ enum {
     NativeSdkTrayRoleHero = 3,
     NativeSdkTrayRoleAgent = 4,
     NativeSdkTrayRoleContext = 5,
+    NativeSdkTrayRoleSegmented = 6,
+    NativeSdkTrayRoleChart = 7,
 };
+
+@interface NativeSdkTrayBarChartView : NSView
+@property(nonatomic, copy) NSArray<NSNumber *> *values;
+@property(nonatomic, assign) double minValue;
+@property(nonatomic, assign) double maxValue;
+@end
+
+@implementation NativeSdkTrayBarChartView
+- (BOOL)isFlipped { return YES; }
+- (void)drawRect:(NSRect)dirtyRect {
+    [super drawRect:dirtyRect];
+    if (self.values.count == 0 || !(self.maxValue > self.minValue)) return;
+    CGFloat gap = 2;
+    CGFloat barWidth = MAX(1, (NSWidth(self.bounds) - gap * (self.values.count - 1)) / self.values.count);
+    CGFloat x = 0;
+    [NSColor.controlAccentColor setFill];
+    for (NSNumber *number in self.values) {
+        double fraction = (number.doubleValue - self.minValue) / (self.maxValue - self.minValue);
+        fraction = MIN(MAX(fraction, 0), 1);
+        CGFloat height = MAX(fraction > 0 ? 1 : 0, floor(fraction * NSHeight(self.bounds)));
+        NSRectFill(NSMakeRect(x, NSHeight(self.bounds) - height, barWidth, height));
+        x += barWidth + gap;
+    }
+}
+@end
+
+static NSString *NativeSdkTrayString(const char *bytes, size_t len) {
+    return bytes && len > 0 ? ([[NSString alloc] initWithBytes:bytes length:len encoding:NSUTF8StringEncoding] ?: @"") : @"";
+}
+
+static NSView *NativeSdkTraySegmentedView(NativeSdkAppKitHost *object, uint32_t statusItemId, const native_sdk_appkit_tray_segment_option_t *options, size_t count) {
+    NSView *row = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 320, 38)];
+    NativeSdkTraySegmentedControl *control = [[NativeSdkTraySegmentedControl alloc] initWithFrame:NSMakeRect(14, 5, 292, 28)];
+    control.segmentCount = count;
+    control.segmentStyle = NSSegmentStyleAutomatic;
+    control.trackingMode = NSSegmentSwitchTrackingSelectOne;
+    control.target = object;
+    control.action = @selector(traySegmentChanged:);
+    control.tag = (NSInteger)statusItemId;
+    control.sourceSelectedSegment = -1;
+    control.autoresizingMask = NSViewWidthSizable;
+    for (size_t i = 0; i < count; i++) {
+        [control setLabel:NativeSdkTrayString(options[i].label, options[i].label_len) forSegment:i];
+        [control setEnabled:options[i].enabled != 0 forSegment:i];
+        [control setTag:(NSInteger)options[i].item_id forSegment:i];
+        [control setSelected:options[i].selected != 0 forSegment:i];
+        if (options[i].selected != 0) control.sourceSelectedSegment = (NSInteger)i;
+    }
+    [row addSubview:control];
+    row.accessibilityRole = NSAccessibilityGroupRole;
+    return row;
+}
+
+static NSView *NativeSdkTrayMetricView(const native_sdk_appkit_tray_metric_row_t *metric) {
+    NSView *row = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 320, 58)];
+    NSTextField *primary = [NSTextField labelWithString:NativeSdkTrayString(metric->primary_text, metric->primary_text_len)];
+    NSTextField *secondary = [NSTextField labelWithString:NativeSdkTrayString(metric->secondary_text, metric->secondary_text_len)];
+    primary.frame = NSMakeRect(14, 25, 292, 28);
+    secondary.frame = NSMakeRect(14, 6, 292, 16);
+    primary.font = [NSFont fontWithName:@"Geist Mono" size:20] ?: [NSFont monospacedDigitSystemFontOfSize:20 weight:NSFontWeightMedium];
+    secondary.font = [NSFont systemFontOfSize:11];
+    secondary.textColor = NSColor.secondaryLabelColor;
+    primary.autoresizingMask = NSViewWidthSizable;
+    secondary.autoresizingMask = NSViewWidthSizable;
+    primary.accessibilityElement = NO;
+    secondary.accessibilityElement = NO;
+    [row addSubview:primary];
+    [row addSubview:secondary];
+    row.accessibilityLabel = NativeSdkTrayString(metric->accessibility_label, metric->accessibility_label_len);
+    row.accessibilityRole = NSAccessibilityGroupRole;
+    return row;
+}
+
+static NSView *NativeSdkTrayChartView(const native_sdk_appkit_tray_chart_row_t *chart) {
+    NSString *leading = NativeSdkTrayString(chart->leading_caption, chart->leading_caption_len);
+    NSString *trailing = NativeSdkTrayString(chart->trailing_summary, chart->trailing_summary_len);
+    NSView *row = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 320, 58)];
+    NSTextField *leadingField = [NSTextField labelWithString:leading];
+    NSTextField *trailingField = [NSTextField labelWithString:trailing];
+    leadingField.frame = NSMakeRect(14, 3, 142, 15);
+    trailingField.frame = NSMakeRect(164, 3, 142, 15);
+    trailingField.alignment = NSTextAlignmentRight;
+    leadingField.font = [NSFont systemFontOfSize:10];
+    trailingField.font = [NSFont monospacedDigitSystemFontOfSize:10 weight:NSFontWeightRegular];
+    leadingField.textColor = NSColor.secondaryLabelColor;
+    trailingField.textColor = NSColor.secondaryLabelColor;
+    leadingField.autoresizingMask = NSViewWidthSizable;
+    trailingField.autoresizingMask = NSViewMinXMargin;
+    leadingField.accessibilityElement = NO;
+    trailingField.accessibilityElement = NO;
+    NativeSdkTrayBarChartView *bars = [[NativeSdkTrayBarChartView alloc] initWithFrame:NSMakeRect(14, 21, 292, 32)];
+    NSMutableArray<NSNumber *> *values = [NSMutableArray arrayWithCapacity:chart->value_count];
+    for (size_t i = 0; i < chart->value_count; i++) [values addObject:@(chart->values[i])];
+    bars.values = values;
+    bars.minValue = chart->min_value;
+    bars.maxValue = chart->max_value;
+    bars.autoresizingMask = NSViewWidthSizable;
+    bars.accessibilityElement = NO;
+    [row addSubview:leadingField];
+    [row addSubview:trailingField];
+    [row addSubview:bars];
+    row.accessibilityLabel = NativeSdkTrayString(chart->accessibility_label, chart->accessibility_label_len);
+    row.accessibilityRole = NSAccessibilityGroupRole;
+    return row;
+}
 
 static NSView *NativeSdkTrayHeroView(NSString *headline, NSString *quota) {
     NSArray<NSString *> *parts = [headline componentsSeparatedByString:@"\n"];
@@ -13449,6 +14455,7 @@ void native_sdk_appkit_update_tray_menu(native_sdk_appkit_host_t *host, uint32_t
             NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:label ?: @""
                                                           action:@selector(trayMenuItemClicked:)
                                                    keyEquivalent:@""];
+            item.representedObject = @(i);
             item.tag = (NSInteger)(((uint64_t)status_item_id << 32) | item_ids[i]);
             item.target = object;
             item.enabled = enabled_flags[i] != 0;
@@ -13522,6 +14529,46 @@ void native_sdk_appkit_update_tray_menu(native_sdk_appkit_host_t *host, uint32_t
     }
 }
 
+void native_sdk_appkit_update_tray_rich_rows(native_sdk_appkit_host_t *host, uint32_t status_item_id, const native_sdk_appkit_tray_segmented_row_t *segmented_rows, size_t segmented_count, const native_sdk_appkit_tray_metric_row_t *metric_rows, size_t metric_count, const native_sdk_appkit_tray_chart_row_t *chart_rows, size_t chart_count) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    @autoreleasepool {
+        NativeSdkStatusItemEntry *entry = [object statusEntryForId:status_item_id];
+        if (!entry || !entry.menu) return;
+        for (size_t i = 0; i < segmented_count; i++) {
+            const native_sdk_appkit_tray_segmented_row_t *row = &segmented_rows[i];
+            NSMenuItem *item = nil;
+            for (NSMenuItem *candidate in entry.menu.itemArray) {
+                if ([candidate.representedObject isEqual:@(row->row_index)]) { item = candidate; break; }
+            }
+            if (!item) continue;
+            item.action = NULL;
+            item.target = nil;
+            item.view = NativeSdkTraySegmentedView(object, status_item_id, row->options, row->option_count);
+        }
+        for (size_t i = 0; i < metric_count; i++) {
+            NSMenuItem *item = nil;
+            for (NSMenuItem *candidate in entry.menu.itemArray) {
+                if ([candidate.representedObject isEqual:@(metric_rows[i].row_index)]) { item = candidate; break; }
+            }
+            if (!item) continue;
+            item.action = NULL;
+            item.target = nil;
+            item.view = NativeSdkTrayMetricView(&metric_rows[i]);
+        }
+        for (size_t i = 0; i < chart_count; i++) {
+            const native_sdk_appkit_tray_chart_row_t *row = &chart_rows[i];
+            NSMenuItem *item = nil;
+            for (NSMenuItem *candidate in entry.menu.itemArray) {
+                if ([candidate.representedObject isEqual:@(row->row_index)]) { item = candidate; break; }
+            }
+            if (!item) continue;
+            item.action = NULL;
+            item.target = nil;
+            item.view = NativeSdkTrayChartView(row);
+        }
+    }
+}
+
 void native_sdk_appkit_update_tray_title(native_sdk_appkit_host_t *host, uint32_t status_item_id, const char *title, size_t title_len) {
     NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
     @autoreleasepool {
@@ -13535,18 +14582,20 @@ void native_sdk_appkit_update_tray_title(native_sdk_appkit_host_t *host, uint32_
             entry.presentationWidth,
             entry.presentationTone,
             entry.presentationIconOpacity,
-            entry.presentationMonospaced
+            entry.presentationMonospaced,
+            entry.presentationFontSize,
+            entry.presentationFontWeight
         );
     }
 }
 
-void native_sdk_appkit_update_tray_presentation(native_sdk_appkit_host_t *host, uint32_t status_item_id, const char *title, size_t title_len, double width, int tone, double icon_opacity, int monospaced) {
+void native_sdk_appkit_update_tray_presentation(native_sdk_appkit_host_t *host, uint32_t status_item_id, const char *title, size_t title_len, double width, int tone, double icon_opacity, int monospaced, double font_size, int font_weight) {
     NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
     @autoreleasepool {
         NativeSdkStatusItemEntry *entry = [object statusEntryForId:status_item_id];
         if (!entry) return;
         NSString *value = title ? ([[NSString alloc] initWithBytes:title length:title_len encoding:NSUTF8StringEncoding] ?: @"") : @"";
-        NativeSdkApplyTrayPresentation(object, entry, value, width, tone, icon_opacity, monospaced != 0);
+        NativeSdkApplyTrayPresentation(object, entry, value, width, tone, icon_opacity, monospaced != 0, font_size, font_weight);
     }
 }
 

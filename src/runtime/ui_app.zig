@@ -54,6 +54,17 @@ const ui_app_log = std.log.scoped(.zero_ui_app);
 /// Maximum number of webview panes a `UiApp` can drive (`Options.web_panes`).
 pub const max_web_panes: usize = 4;
 
+/// Per-thread scratch for composing chrome around a widget display list.
+/// Packed-cell builders own a frame-sized cell store, so keeping both
+/// builders on the stack can overflow deeper app/test call paths.
+const ChromeDisplayScratch = struct {
+    chrome_commands: [canvas_limits.max_canvas_commands_per_view]canvas.CanvasCommand = undefined,
+    commands: [canvas_limits.max_canvas_commands_per_view]canvas.CanvasCommand = undefined,
+    chrome_builder: canvas.Builder = undefined,
+    builder: canvas.Builder = undefined,
+};
+const chrome_display_scratch = canvas.lazy_tls.LazyTls(ChromeDisplayScratch);
+
 /// One queued `on-terminal` dispatch: the terminal widget's id and the
 /// post-change view state the reconcile produced (see
 /// `applyTerminalLayout`). `id == 0` marks an empty slot.
@@ -208,7 +219,46 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             /// `prefix_commands` commands followed by `suffix_commands`
             /// commands (up to `prefix_commands` under
             /// `variable_prefix`).
+            ///
+            /// Called for the MAIN canvas only. A multi-window app wants
+            /// `build_window` instead — this signature cannot say which
+            /// window it is painting, so chrome built here is the main
+            /// window's by construction.
             build: *const fn (model: *const ModelT, builder: *canvas.Builder, size: geometry.SizeF, tokens: canvas.DesignTokens) anyerror!void,
+            /// The per-WINDOW chrome builder, and the one a multi-window
+            /// app should implement.
+            ///
+            /// When set it replaces `build` for every window, main and
+            /// secondary alike, and the context names which window is
+            /// being painted. Without it, secondary windows get their
+            /// widget tree and no chrome at all — which for an app whose
+            /// terminals ARE chrome means a window that opens, lays out
+            /// correctly, and paints nothing.
+            ///
+            /// Additive on purpose: `build` keeps working untouched, and
+            /// the migration is one line — rename `build` to
+            /// `build_window` and take `context` instead of
+            /// `size`/`tokens` (`context.size`, `context.tokens`).
+            build_window: ?*const fn (model: *const ModelT, builder: *canvas.Builder, context: ChromeContext) anyerror!void = null,
+        };
+
+        /// What a chrome build is painting into. A struct rather than
+        /// more parameters so the next thing a window needs to know
+        /// does not break every caller again.
+        pub const ChromeContext = struct {
+            /// The canvas view label of the window being painted —
+            /// `Options.canvas_label` for the main window, the
+            /// descriptor's canvas label for a secondary one. The
+            /// discriminator an app switches on to pick which of its
+            /// windows' content to draw.
+            canvas_label: []const u8,
+            /// The platform window id behind that label.
+            window_id: platform.WindowId,
+            /// This window's canvas size, not the main window's.
+            size: geometry.SizeF,
+            tokens: canvas.DesignTokens,
+            /// Whether this is the app's main scene window.
+            is_main: bool,
         };
 
         /// A live webview region hosted alongside the canvas — the "both
@@ -281,6 +331,23 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             items: []const platform.TrayMenuItem = &.{},
         };
 
+        /// The stock-theme axes a model may own without replacing the full
+        /// DesignTokens register. `system` follows the platform's live color
+        /// scheme; null pack/accent values inherit the manifest-backed
+        /// Options fields. Native chrome and WebViews remain OS-themed — this
+        /// state controls canvas tokens only.
+        pub const ThemeColorScheme = enum { system, light, dark };
+
+        pub const ThemeState = struct {
+            pack: ?canvas.ThemePack = null,
+            color_scheme: ThemeColorScheme = .system,
+            accent: ?canvas.Color = null,
+            /// Adapter-only invalid declaration marker. Zig cores already
+            /// pass a typed Color; the TS adapter retains malformed source
+            /// text here so rebuild rejects it instead of silently inheriting.
+            invalid_accent: ?[]const u8 = null,
+        };
+
         /// One entry in the model-declared status-item collection.
         /// `id` is stable identity; dropping the entry removes that
         /// native status item, while every other field patches in place.
@@ -299,6 +366,8 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             title_buffer: [platform.max_tray_title_bytes]u8 = undefined,
             arena_buffer: [2048]u8 = undefined,
             items: [platform.max_tray_items]platform.TrayMenuItem = undefined,
+            segment_options: [platform.max_tray_items * platform.max_tray_segment_options]platform.TraySegmentOption = undefined,
+            chart_values: [platform.max_tray_items * platform.max_tray_chart_values]f32 = undefined,
         };
 
         /// Scratch for `status_items_fn`. The flat row store gives each
@@ -309,6 +378,8 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             title_buffers: [platform.max_status_items][platform.max_tray_title_bytes]u8 = undefined,
             arena_buffer: [platform.max_status_items * 2048]u8 = undefined,
             items: [platform.max_status_items * platform.max_tray_items]platform.TrayMenuItem = undefined,
+            segment_options: [platform.max_status_items * platform.max_tray_items * platform.max_tray_segment_options]platform.TraySegmentOption = undefined,
+            chart_values: [platform.max_status_items * platform.max_tray_items * platform.max_tray_chart_values]f32 = undefined,
         };
 
         const AppliedStatusItem = struct {
@@ -353,6 +424,12 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             x: ?f32 = null,
             y: ?f32 = null,
             resizable: bool = true,
+            /// Placement policy passed to the host when creating this
+            /// fresh, non-restored window. On macOS,
+            /// `.center_on_primary` centers a descriptor without an authored
+            /// origin on the primary screen; other hosts currently retain
+            /// their native default placement.
+            restore_policy: app_manifest.WindowRestorePolicy = .clamp_to_visible_screen,
             /// Content min-size floor the WINDOW enforces (macOS
             /// `contentMinSize`): the user's resize stops at the floor
             /// instead of the layout clamping/clipping panes below
@@ -485,6 +562,11 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             /// `tokens_fn` still take precedence because those paths own
             /// the complete token register.
             theme_fn: ?*const fn (model: *const ModelT) canvas.ThemePack = null,
+            /// Cohesive model-derived stock-theme state: built-in pack,
+            /// canvas color scheme, and accent. This subsumes `theme_fn` and
+            /// is mutually exclusive with it. Explicit `tokens_fn`/`tokens`
+            /// still own the complete register and take precedence.
+            theme_state_fn: ?*const fn (model: *const ModelT) ThemeState = null,
             /// The app's ONE-accent brand statement over the stock
             /// tokens: when set (and the app claims neither `tokens`
             /// nor `tokens_fn` — apps that own their tokens own their
@@ -750,7 +832,22 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             /// Engine-agnostic: the webview backend is whatever the build
             /// selected (`-Dweb-engine=system|cef`); platforms without
             /// child webviews log a warning and continue.
-            web_panes: ?*const fn (model: *const ModelT, out: []WebViewPane) usize = null,
+            ///
+            /// Takes the same `ChromeContext` as `build_window`, and for
+            /// the same reason: panes are reconciled PER WINDOW, so a
+            /// signature that could not say which window it was being
+            /// asked about had to answer with the whole app's pane set
+            /// every time. A webview belongs to exactly one window, so
+            /// every OTHER window's rebuild then resolved that pane's
+            /// anchor against a widget tree that does not contain it and
+            /// logged "no canvas widget carries semantics label ..." —
+            /// correct behaviour (the pane is found and snapped in the
+            /// window that owns it) buried under a warning on every
+            /// rebuild of every other window. Switch on
+            /// `context.canvas_label` (or `context.is_main`) and return
+            /// only the panes belonging to that window; returning 0 is
+            /// the right answer for a window that hosts none.
+            web_panes: ?*const fn (model: *const ModelT, context: ChromeContext, out: []WebViewPane) usize = null,
             /// Menu-bar extra installed once, on the installing frame.
             /// macOS-proven (`NSStatusItem`); platforms without a
             /// status-bar service log a warning and continue.
@@ -962,6 +1059,10 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// light/dark setting live. Test/null platforms never emit it,
         /// so deterministic runs stay on the default light theme.
         system_appearance: platform.Appearance = .{},
+        /// Last valid model-derived state. Re-derived before each rebuild;
+        /// equality is a handful of scalar/optional fields.
+        theme_state: ThemeState = .{},
+        theme_state_known: bool = false,
         pixel_snap_scale: f32 = 1,
         frame_timestamp_ns: u64 = 0,
         markup_arenas: [2]std.heap.ArenaAllocator,
@@ -1397,6 +1498,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             std.debug.assert((options.update != null) != (options.update_fx != null));
             // Declared windows need the per-window view to build them.
             std.debug.assert(options.windows_fn == null or options.window_view != null);
+            std.debug.assert(options.theme_fn == null or options.theme_state_fn == null);
             if (comptime !features.runtime_markup) std.debug.assert(options.markup == null);
         }
 
@@ -1498,6 +1600,8 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .close_fn = effectsCloseWindowByLabel,
                 .minimize_fn = effectsMinimizeWindowByLabel,
                 .hide_fn = effectsHideWindowByLabel,
+                .fullscreen_fn = effectsSetWindowFullscreenByLabel,
+                .fullscreen_state_fn = effectsWindowIsFullscreenByLabel,
                 .show_fn = effectsShowWindowByLabel,
                 .dock_presence_fn = effectsSetDockPresence,
                 .quit_fn = effectsQuitApp,
@@ -1883,30 +1987,64 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 tokens.pixel_snap.scale = self.pixel_snap_scale;
                 return tokens;
             }
-            var tokens = canvas.DesignTokens.theme(.{
-                .color_scheme = switch (self.system_appearance.color_scheme) {
+            const state = self.currentThemeState();
+            const color_scheme: canvas.ColorScheme = switch (state.color_scheme) {
+                .system => switch (self.system_appearance.color_scheme) {
                     .light => .light,
                     .dark => .dark,
                 },
+                .light => .light,
+                .dark => .dark,
+            };
+            var tokens = canvas.DesignTokens.theme(.{
+                .color_scheme = color_scheme,
                 .contrast = if (self.system_appearance.high_contrast) .high else .standard,
                 .reduce_motion = self.system_appearance.reduce_motion,
-                .pack = if (self.options.theme_fn) |theme_fn| theme_fn(&self.model) else self.options.theme,
+                .pack = state.pack orelse if (self.options.theme_fn) |theme_fn| theme_fn(&self.model) else self.options.theme,
             });
-            if (self.options.theme_accent) |accent| {
+            if (state.accent orelse self.options.theme_accent) |accent| {
                 // The manifest accent layers over the resolved pack —
                 // except under high contrast, where the pack's own loud
                 // register wins untouched (accessibility beats brand).
                 // The bundle takes the resolved scheme: the dark ring
                 // derives desaturated (canvas.accentFocusRing).
                 if (!self.system_appearance.high_contrast) {
-                    tokens = tokens.withOverrides(canvas.accentOverrides(accent, switch (self.system_appearance.color_scheme) {
-                        .light => .light,
-                        .dark => .dark,
-                    }));
+                    tokens = tokens.withOverrides(canvas.accentOverrides(accent, color_scheme));
                 }
             }
             tokens.pixel_snap.scale = self.pixel_snap_scale;
             return tokens;
+        }
+
+        fn currentThemeState(self: *const Self) ThemeState {
+            if (self.theme_state_known) return self.theme_state;
+            return if (self.options.theme_state_fn) |theme_state_fn| theme_state_fn(&self.model) else .{};
+        }
+
+        /// Re-derive once per rebuild and reject malformed adapter input at
+        /// the declaration boundary. A valid retained state contains no
+        /// borrowed accent text, so it remains safe between dispatches.
+        fn refreshThemeState(self: *Self) error{InvalidThemeAccent}!void {
+            // Complete-token paths outrank the stock-theme helper entirely.
+            // Do not even validate an unused model accent: the app has
+            // explicitly claimed the whole DesignTokens register.
+            if (self.options.tokens_fn != null or self.options.tokens != null) {
+                self.theme_state = .{};
+                self.theme_state_known = true;
+                return;
+            }
+            const next = if (self.options.theme_state_fn) |theme_state_fn| theme_state_fn(&self.model) else ThemeState{};
+            if (next.invalid_accent) |accent| {
+                ui_app_log.warn(
+                    "themeState(model) returned accent '{s}'; expected exactly #rrggbb (six hexadecimal digits)",
+                    .{accent},
+                );
+                return error.InvalidThemeAccent;
+            }
+            if (!self.theme_state_known or !std.meta.eql(self.theme_state, next)) {
+                self.theme_state = next;
+                self.theme_state_known = true;
+            }
         }
 
         /// The design tokens for a secondary window's rebuild: the same
@@ -1924,13 +2062,15 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// true only when the app claims neither token override, so an
         /// appearance flip must re-derive and re-render.
         fn followsSystemAppearance(self: *const Self) bool {
-            return self.options.tokens_fn == null and self.options.tokens == null;
+            if (self.options.tokens_fn != null or self.options.tokens != null) return false;
+            if (self.options.theme_state_fn == null) return true;
+            return self.currentThemeState().color_scheme == .system;
         }
 
         /// Whether tokens are derived per rebuild (model-owned or
         /// system-followed) rather than a fixed set.
         fn derivesTokens(self: *const Self) bool {
-            return self.options.tokens_fn != null or self.followsSystemAppearance();
+            return self.options.tokens_fn != null or self.options.theme_state_fn != null or self.followsSystemAppearance();
         }
 
         /// Whether a rebuild must push its tokens into the runtime's
@@ -1947,8 +2087,8 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// pre-registration metrics). Ordinary rebuilds keep skipping
         /// the redundant emission.
         fn rebuildEmitsTokens(self: *const Self, runtime: *Runtime, window_id: platform.WindowId, canvas_label: []const u8, tokens: canvas.DesignTokens) bool {
-            if (self.derivesTokens()) return true;
             const stored = runtime.canvasWidgetDesignTokens(window_id, canvas_label) catch return true;
+            if (self.derivesTokens()) return !std.meta.eql(stored, tokens);
             if (!std.meta.eql(stored.text_measure, tokens.text_measure)) return true;
             return stored.pixel_snap.scale != tokens.pixel_snap.scale;
         }
@@ -1981,6 +2121,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// for the next Msg.
         pub fn rebuild(self: *Self, runtime: *Runtime, window_id: platform.WindowId) anyerror!void {
             self.syncModel(runtime, window_id);
+            try self.refreshThemeState();
             if (comptime features.runtime_markup) {
                 // Under automation, drive the interpreter from the first
                 // frame even when a compiled view is present: provenance
@@ -2054,7 +2195,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             // so hover enters keep flowing even when an idle app
             // performs no further rebuild.
             if (self.options.chrome) |chrome| {
-                try self.installChromeDisplayList(runtime, window_id, chrome, layout, tokens);
+                try self.installChromeDisplayList(runtime, window_id, self.options.canvas_label, self.canvas_size, chrome, layout, tokens, &self.main_tree_current);
             } else {
                 try self.publishWidgetLayoutTracked(runtime, window_id, self.options.canvas_label, layout, &self.main_tree_current);
                 if (self.installed and self.rebuildEmitsTokens(runtime, window_id, self.options.canvas_label, tokens)) {
@@ -2086,7 +2227,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             }
             try self.scheduleAnimations(runtime, window_id);
             try self.scheduleLayoutTweens(runtime, window_id);
-            self.applyWebPanes(runtime, window_id, layout);
+            self.applyWebPanes(runtime, window_id, self.options.canvas_label, self.canvas_size, tokens, layout);
             try self.applyTerminalLayout(runtime, window_id, layout, tokens);
             self.applyStatusItem(runtime);
             self.applyVideoDeclaration(runtime);
@@ -2816,6 +2957,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 .x = descriptor.x,
                 .y = descriptor.y,
                 .resizable = descriptor.resizable,
+                .restore_policy = descriptor.restore_policy,
                 .titlebar = descriptor.titlebar,
                 .transparent = descriptor.transparent,
                 .always_on_top = descriptor.always_on_top,
@@ -2944,6 +3086,13 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// model — every dispatched Msg funnels through here after the
         /// main rebuild, so all open windows always render the same
         /// model generation.
+        /// Whether secondary windows paint chrome — true exactly when
+        /// the app implements the per-window builder.
+        fn slotPaintsChrome(self: *const Self) bool {
+            const chrome = self.options.chrome orelse return false;
+            return chrome.build_window != null;
+        }
+
         fn rebuildWindowSlots(self: *Self, runtime: *Runtime) anyerror!void {
             for (self.window_slots[0..self.window_slot_count]) |*slot| {
                 if (!slot.installed) continue;
@@ -2953,6 +3102,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
 
         fn rebuildWindowSlot(self: *Self, runtime: *Runtime, slot: *WindowSlot) anyerror!void {
             if (self.options.window_view == null) return;
+            try self.refreshThemeState();
             var tokens = runtime.tokensWithTextMeasure(self.slotEffectiveTokens(slot));
             const next_index = self.contextMenuRebuildIndex(slot.window_id, slot.arena_index);
             const bounds = geometry.RectF.fromSize(slot.canvas_size).deflate(runtime.viewportInsetsForWindow(slot.window_id));
@@ -2984,10 +3134,33 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             // matching handler tree lands below, wherever the rebuild
             // was driven from (the full pass or a direct resize/install
             // site).
-            try self.publishWidgetLayoutTracked(runtime, slot.window_id, slot.canvasLabel(), layout, &slot.tree_current);
-            if (slot.installed and self.rebuildEmitsTokens(runtime, slot.window_id, slot.canvasLabel(), tokens)) {
-                _ = try runtime.emitCanvasWidgetDisplayList(slot.window_id, slot.canvasLabel(), tokens);
+            // The SAME branch the main canvas takes. A secondary window
+            // that published its widget layout and emitted with
+            // `WithChrome(.{})` got a chrome prefix of zero — so an app
+            // whose terminals are chrome commands rendered its tab strip,
+            // its dividers, and its widget bounds over an empty canvas.
+            // Gated on `build_window`, not merely on `chrome`: a chrome
+            // builder that cannot be told which window it is painting
+            // would paint the MAIN window's content into this one, which
+            // is a different wrong answer from the blank canvas it used
+            // to give. An app opts into per-window chrome by
+            // implementing `build_window`; until it does, nothing about
+            // its secondary windows changes.
+            if (self.slotPaintsChrome()) {
+                const chrome = self.options.chrome.?;
+                try self.installChromeDisplayList(runtime, slot.window_id, slot.canvasLabel(), slot.canvas_size, chrome, layout, tokens, &slot.tree_current);
+            } else {
+                try self.publishWidgetLayoutTracked(runtime, slot.window_id, slot.canvasLabel(), layout, &slot.tree_current);
+                if (slot.installed and self.rebuildEmitsTokens(runtime, slot.window_id, slot.canvasLabel(), tokens)) {
+                    _ = try runtime.emitCanvasWidgetDisplayList(slot.window_id, slot.canvasLabel(), tokens);
+                }
             }
+            // Per-window terminal sizing and web panes. Both used to run
+            // only for the main canvas, so a secondary window's ptys
+            // would have kept whatever grid they were born with even
+            // once its cells painted.
+            try self.applyTerminalLayout(runtime, slot.window_id, layout, tokens);
+            self.applyWebPanes(runtime, slot.window_id, slot.canvasLabel(), slot.canvas_size, tokens, layout);
             slot.tree = tree;
             slot.arena_index = next_index;
             live_tree_reset = false;
@@ -3134,10 +3307,28 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// frame, URL, or reload token changed. Failures degrade to a
         /// logged warning so a missing webview or a denied origin never
         /// takes the render loop down.
-        fn applyWebPanes(self: *Self, runtime: *Runtime, window_id: platform.WindowId, layout: canvas.WidgetLayoutTree) void {
+        fn applyWebPanes(
+            self: *Self,
+            runtime: *Runtime,
+            window_id: platform.WindowId,
+            canvas_label: []const u8,
+            canvas_size: geometry.SizeF,
+            tokens: canvas.DesignTokens,
+            layout: canvas.WidgetLayoutTree,
+        ) void {
             const panes_fn = self.options.web_panes orelse return;
             var panes: [max_web_panes]WebViewPane = undefined;
-            const count = @min(panes_fn(&self.model, &panes), max_web_panes);
+            // The window discriminator, built exactly like
+            // `installChromeDisplayList`'s so an app switches on ONE
+            // context shape whichever per-window hook it implements.
+            const declared = panes_fn(&self.model, .{
+                .canvas_label = canvas_label,
+                .window_id = window_id,
+                .size = canvas_size,
+                .tokens = tokens,
+                .is_main = std.mem.eql(u8, canvas_label, self.options.canvas_label),
+            }, &panes);
+            const count = @min(declared, max_web_panes);
             for (panes[0..count]) |pane| self.applyWebPane(runtime, window_id, layout, pane);
         }
 
@@ -3232,10 +3423,38 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// runtime then regenerates the widget span on internal state
         /// changes while preserving the chrome via
         /// `emitCanvasWidgetDisplayListWithChrome`.
-        fn installChromeDisplayList(self: *Self, runtime: *Runtime, window_id: platform.WindowId, chrome: ChromeOptions, layout: canvas.WidgetLayoutTree, tokens: canvas.DesignTokens) anyerror!void {
-            var chrome_commands: [canvas_limits.max_canvas_commands_per_view]canvas.CanvasCommand = undefined;
-            var chrome_builder = canvas.Builder.init(&chrome_commands);
-            try chrome.build(&self.model, &chrome_builder, self.canvas_size, tokens);
+        /// Install one window's chrome + widget display list.
+        ///
+        /// Parameterized by WINDOW rather than reading the main
+        /// canvas's fields, because secondary windows take this exact
+        /// path now: the chrome prefix is what produces a terminal's
+        /// cells, so a window that skipped it rendered its tab strip and
+        /// its splits over an empty black canvas.
+        fn installChromeDisplayList(
+            self: *Self,
+            runtime: *Runtime,
+            window_id: platform.WindowId,
+            canvas_label: []const u8,
+            canvas_size: geometry.SizeF,
+            chrome: ChromeOptions,
+            layout: canvas.WidgetLayoutTree,
+            tokens: canvas.DesignTokens,
+            tree_current: *bool,
+        ) anyerror!void {
+            const scratch = chrome_display_scratch.get();
+            scratch.chrome_builder.initAt(&scratch.chrome_commands);
+            const chrome_builder = &scratch.chrome_builder;
+            if (chrome.build_window) |build_window| {
+                try build_window(&self.model, chrome_builder, .{
+                    .canvas_label = canvas_label,
+                    .window_id = window_id,
+                    .size = canvas_size,
+                    .tokens = tokens,
+                    .is_main = std.mem.eql(u8, canvas_label, self.options.canvas_label),
+                });
+            } else {
+                try chrome.build(&self.model, chrome_builder, canvas_size, tokens);
+            }
             const chrome_list = chrome_builder.displayList();
             if (chrome.variable_prefix) {
                 if (chrome_list.commands.len < chrome.suffix_commands or
@@ -3248,19 +3467,18 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             }
             const prefix_len = chrome_list.commands.len - chrome.suffix_commands;
 
-            var commands: [canvas_limits.max_canvas_commands_per_view]canvas.CanvasCommand = undefined;
-            var builder = canvas.Builder.init(&commands);
+            scratch.builder.initAt(&scratch.commands);
+            const builder = &scratch.builder;
             for (chrome_list.commands[0..prefix_len]) |command| try builder.append(command);
-            try layout.emitDisplayList(&builder, tokens);
+            try layout.emitDisplayList(builder, tokens);
             for (chrome_list.commands[prefix_len..]) |command| try builder.append(command);
 
-            _ = try runtime.setCanvasDisplayList(window_id, self.options.canvas_label, builder.displayList());
-            // The main install window opens at the layout's true
-            // adoption inside the tracked publication (see `rebuild`)
-            // and closes when the caller adopts the matching handler
-            // tree.
-            try self.publishWidgetLayoutTracked(runtime, window_id, self.options.canvas_label, layout, &self.main_tree_current);
-            _ = try runtime.emitCanvasWidgetDisplayListWithChrome(window_id, self.options.canvas_label, tokens, .{
+            _ = try runtime.setCanvasDisplayList(window_id, canvas_label, builder.displayList());
+            // The install window opens at the layout's true adoption
+            // inside the tracked publication (see `rebuild`) and closes
+            // when the caller adopts the matching handler tree.
+            try self.publishWidgetLayoutTracked(runtime, window_id, canvas_label, layout, tree_current);
+            _ = try runtime.emitCanvasWidgetDisplayListWithChrome(window_id, canvas_label, tokens, .{
                 .prefix_command_count = prefix_len,
                 .suffix_command_count = chrome.suffix_commands,
             });
@@ -4249,7 +4467,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     }
                 },
                 .appearance_changed => |appearance| {
-                    const changed = !std.meta.eql(self.system_appearance, appearance);
+                    const previous = self.system_appearance;
                     self.system_appearance = appearance;
                     if (self.options.on_appearance) |map| {
                         if (map(appearance)) |msg| {
@@ -4257,14 +4475,22 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                             return;
                         }
                     }
-                    // No app mapping consumed the change: when the stock
-                    // tokens follow the system, re-derive and re-render
-                    // live — flipping the OS appearance re-themes the
-                    // running app without a restart. Before install the
-                    // stored appearance alone is enough: the first build
+                    // No app mapping consumed the change. High contrast and
+                    // reduced motion remain live system axes even when the
+                    // model forces light/dark; only a scheme-only flip may
+                    // skip repaint while themeState is forced. Before install
+                    // the stored appearance alone is enough: the first build
                     // reads it.
-                    if (changed and self.installed and self.followsSystemAppearance()) {
+                    const accessibility_changed =
+                        previous.high_contrast != appearance.high_contrast or
+                        previous.reduce_motion != appearance.reduce_motion;
+                    const followed_scheme_changed =
+                        previous.color_scheme != appearance.color_scheme and self.followsSystemAppearance();
+                    if (self.installed and self.options.tokens_fn == null and self.options.tokens == null and
+                        (accessibility_changed or followed_scheme_changed))
+                    {
                         try self.rebuild(runtime, self.canvas_window_id);
+                        try self.rebuildWindowSlots(runtime);
                         if (self.options.chrome == null) {
                             _ = try runtime.emitCanvasWidgetDisplayList(self.canvas_window_id, self.options.canvas_label, runtime.tokensWithTextMeasure(self.effectiveTokens()));
                         }
@@ -4543,7 +4769,14 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 // canvas, so the reconciliation ride-along here converges
                 // without a dedicated event.
                 if (runtime.canvasWidgetLayout(frame_event.window_id, self.options.canvas_label)) |layout| {
-                    self.applyWebPanes(runtime, frame_event.window_id, layout);
+                    self.applyWebPanes(
+                        runtime,
+                        frame_event.window_id,
+                        self.options.canvas_label,
+                        self.canvas_size,
+                        runtime.tokensWithTextMeasure(self.effectiveTokens()),
+                        layout,
+                    );
                 } else |_| {}
             }
             // Terminal outbound pacing: a child that read without
@@ -4585,7 +4818,15 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 slot.canvas_size = frame_event.size;
                 slot.pixel_snap_scale = scale;
                 try self.rebuildWindowSlot(runtime, slot);
-                _ = try runtime.emitCanvasWidgetDisplayList(slot.window_id, slot.canvasLabel(), runtime.tokensWithTextMeasure(self.slotEffectiveTokens(slot)));
+                // Only the chrome-less path needs this: `rebuildWindowSlot`
+                // skips its own emit while `installed` is still false, but
+                // the chrome branch always emits WITH the right prefix
+                // split — and re-emitting here would overwrite it with a
+                // zero-prefix list, erasing the chrome that was just
+                // installed.
+                if (!self.slotPaintsChrome()) {
+                    _ = try runtime.emitCanvasWidgetDisplayList(slot.window_id, slot.canvasLabel(), runtime.tokensWithTextMeasure(self.slotEffectiveTokens(slot)));
+                }
                 slot.installed = true;
             } else if (@abs(slot.pixel_snap_scale - scale) > 0.001) {
                 // THIS window moved to a different density (the main
@@ -4623,6 +4864,17 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             // fully once, while an idle completion for the current owner
             // is allowed to skip.
             try self.presentFrame(runtime, frame_event, slot.canvasLabel(), installing, clear_color);
+            if (installing) return;
+            // The per-frame hook, for THIS window. It used to fire only
+            // for the main canvas, which for a terminal app is the pump
+            // that sizes the viewport and the pty — so a secondary
+            // window's terminals would have kept their birth grid
+            // forever, whatever the window was resized to.
+            const on_frame = self.options.on_frame orelse return;
+            const gpu_frame = runtime.gpuSurfaceFrame(slot.window_id, slot.canvasLabel()) catch return;
+            if (on_frame(&self.model, gpu_frame)) |msg| {
+                try self.dispatch(runtime, slot.window_id, msg);
+            }
         }
 
         /// A face joined the runtime's font registry after this app's
@@ -4763,7 +5015,8 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             hasher.update(presentation.title);
             hasher.update(std.mem.asBytes(&presentation.width));
             hasher.update(std.mem.asBytes(&presentation.icon_opacity));
-            hasher.update(&.{ @intFromEnum(presentation.tone), @intFromBool(presentation.monospaced) });
+            hasher.update(std.mem.asBytes(&presentation.font_size));
+            hasher.update(&.{ @intFromEnum(presentation.tone), @intFromBool(presentation.monospaced), @intFromEnum(presentation.font_weight) });
             return hasher.final();
         }
 
@@ -4780,6 +5033,33 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 hasher.update(item.detail);
                 hasher.update(std.mem.asBytes(&item.key.len));
                 hasher.update(item.key);
+                if (item.segmented) |segmented| {
+                    hasher.update(std.mem.asBytes(&segmented.options.len));
+                    for (segmented.options) |option| {
+                        hasher.update(std.mem.asBytes(&option.id));
+                        hasher.update(std.mem.asBytes(&option.label.len));
+                        hasher.update(option.label);
+                        hasher.update(std.mem.asBytes(&option.command.len));
+                        hasher.update(option.command);
+                        hasher.update(&.{ @intFromBool(option.selected), @intFromBool(option.enabled) });
+                    }
+                }
+                if (item.metric) |metric| {
+                    for ([_][]const u8{ metric.primary_text, metric.secondary_text, metric.accessibility_label }) |field| {
+                        hasher.update(std.mem.asBytes(&field.len));
+                        hasher.update(field);
+                    }
+                }
+                if (item.chart) |chart| {
+                    hasher.update(std.mem.asBytes(&chart.values.len));
+                    hasher.update(std.mem.sliceAsBytes(chart.values));
+                    hasher.update(std.mem.asBytes(&chart.min_value));
+                    hasher.update(std.mem.asBytes(&chart.max_value));
+                    for ([_][]const u8{ chart.leading_caption, chart.trailing_summary, chart.accessibility_label }) |field| {
+                        hasher.update(std.mem.asBytes(&field.len));
+                        hasher.update(field);
+                    }
+                }
                 hasher.update(&.{
                     @intFromBool(item.separator),
                     @intFromBool(item.enabled),
@@ -4983,7 +5263,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             // `on_double_press` handler (falling back to the ordinary
             // press), while its first release already dispatched the
             // single press — select-then-act, the list convention.
-            if (tree.msgForPointerClick(target.id, pointer_event.pointer.phase, pointer_event.pointer.click_count)) |msg| {
+            if (tree.msgForPointerEvent(target.id, pointer_event.pointer)) |msg| {
                 try self.dispatch(runtime, pointer_event.window_id, msg);
             }
         }
@@ -5829,6 +6109,12 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                             }
                             return;
                         }
+                        // A radio group owns Arrow/Home/End even when the
+                        // requested target is already focused and selected.
+                        // That in-place case deliberately has no selection
+                        // intent (and therefore no duplicate on-change), but
+                        // it must still stop before the app-level key map.
+                        if (keyboard_event.keyboard.radio_group_navigation) return;
                     }
                 }
             }
@@ -6022,8 +6308,8 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             const tree = self.treeForViewLabel(drag_event.view_label);
             const live_template = if (tree) |value| value.msgFor(source.id, .drag) else null;
             const layout: ?canvas.WidgetLayoutTree = runtime.canvasWidgetLayout(drag_event.window_id, drag_event.view_label) catch null;
-            const live_view_size: ?geometry.SizeF = if (layout) |value| if (value.nodes.len > 0) blk: {
-                const root = value.nodes[0].frame.normalized();
+            const live_view_size: ?geometry.SizeF = if (layout) |value| if (canvas.widgetLayoutRootBounds(value)) |root_value| blk: {
+                const root = root_value.normalized();
                 break :blk geometry.SizeF.init(root.width, root.height);
             } else null else null;
 
@@ -6406,6 +6692,22 @@ fn effectsHideWindowByLabel(context: *anyopaque, window_label: []const u8) bool 
     const window_id = effectsWindowIdByLabel(runtime, window_label) orelse return false;
     runtime.hideWindow(window_id) catch return false;
     return true;
+}
+
+fn effectsSetWindowFullscreenByLabel(context: *anyopaque, window_label: []const u8, fullscreen: bool) bool {
+    const runtime: *Runtime = @ptrCast(@alignCast(context));
+    const window_id = effectsWindowIdByLabel(runtime, window_label) orelse return false;
+    runtime.setWindowFullscreen(window_id, fullscreen) catch return false;
+    return true;
+}
+
+fn effectsWindowIsFullscreenByLabel(context: *anyopaque, window_label: []const u8) bool {
+    const runtime: *Runtime = @ptrCast(@alignCast(context));
+    var buffer: [platform.max_windows]platform.WindowInfo = undefined;
+    for (runtime.listWindows(&buffer)) |info| {
+        if (info.open and std.mem.eql(u8, info.label, window_label)) return info.fullscreen;
+    }
+    return false;
 }
 
 fn effectsShowWindowByLabel(context: *anyopaque, window_label: []const u8) bool {

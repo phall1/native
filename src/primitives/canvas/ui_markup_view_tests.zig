@@ -28,6 +28,16 @@ pub const Msg = union(enum) {
     toggle: u32,
     set_filter: Filter,
     draft: canvas.TextInputEvent,
+    drag: DragPayload,
+};
+
+pub const DragPayload = struct {
+    sourceId: usize,
+    phase: u8,
+    x: f32,
+    y: f32,
+    viewWidth: f32,
+    viewHeight: f32,
 };
 
 pub const Model = struct {
@@ -1208,6 +1218,35 @@ pub const context_menu_markup_source =
     \\</column>
 ;
 
+pub const drag_context_menu_markup_source =
+    \\<row on-drag="drag:{open_count}" label="Draggable row">
+    \\  <text>Drag me</text>
+    \\  <context-menu>
+    \\    <menu-item on-press="add">Duplicate</menu-item>
+    \\  </context-menu>
+    \\</row>
+;
+
+test "a drag-only layout element can host a context menu" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const model = testModel();
+
+    var parser = canvas.ui_markup.Parser.init(arena, drag_context_menu_markup_source);
+    try testing.expectEqual(@as(?canvas.ui_markup.MarkupErrorInfo, null), canvas.ui_markup.validate(try parser.parse()));
+
+    var view = try InboxMarkup.init(arena, drag_context_menu_markup_source);
+    var ui = InboxUi.init(arena);
+    const tree = try ui.finalize(try view.build(&ui, &model));
+    try testing.expect(tree.root.semantics.actions.drag);
+    try testing.expect(canvas.widgetIsHitTarget(tree.root));
+    try testing.expect(canvas.widgetClaimsPress(tree.root));
+    try testing.expectEqual(@as(usize, 1), tree.root.context_menu.len);
+    try testing.expectEqualStrings("Duplicate", tree.root.context_menu[0].label);
+    try testing.expectEqual(Msg.add, tree.msgForContextMenu(tree.root.id, 0).?);
+}
+
 test "markup context-menus lower to declared platform-menu items on their host" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
@@ -1417,6 +1456,12 @@ test "the registry's a11y name classes match the engine's control predicates" {
         // content whose missing label degrades but never blocks).
         if (entry.a11y_name == .image) {
             try testing.expect(kind == .avatar or kind == .media_surface or kind == .image);
+        }
+        // Radio-group is the one named container class: it is not a hit
+        // target, but its label supplies the shared question announced
+        // around the descendant radio choices.
+        if (entry.a11y_name == .radiogroup) {
+            try testing.expectEqual(canvas.WidgetKind.radio_group, kind);
         }
     }
 }
@@ -2169,10 +2214,10 @@ pub const catalog_markup_source =
     \\  </row>
     \\  <row gap="8">
     \\    <input text="{query}" placeholder="Name" autofocus="true" on-input="query_edit" on-submit="submit_query" grow="1" />
-    \\    <combobox text="{query}" placeholder="Search fruit" on-input="query_edit" />
+    \\    <combobox text="{query}" placeholder="Search fruit" on-input="query_edit" on-press="open_picker" on-submit="submit_query" />
     \\  </row>
-    \\  <radio-group gap="4">
-    \\    <radio checked="{bold}" on-toggle="toggle_bold" label="Bold" />
+    \\  <radio-group gap="4" label="Formatting">
+    \\    <radio checked="{bold}" on-change="toggle_bold" label="Bold" />
     \\  </radio-group>
     \\  <accordion text="Details" selected="{details_open}" on-toggle="toggle_details" padding="8">
     \\    <text>More info</text>
@@ -2299,10 +2344,10 @@ pub fn handCatalogView(ui: *CatalogUi, model: *const CatalogModel) CatalogUi.Nod
         }),
         ui.row(.{ .gap = 8 }, .{
             ui.el(.input, .{ .text = model.query, .placeholder = "Name", .autofocus = true, .on_input = CatalogUi.inputMsg(.query_edit), .on_submit = .submit_query, .grow = 1 }, .{}),
-            ui.el(.combobox, .{ .text = model.query, .placeholder = "Search fruit", .on_input = CatalogUi.inputMsg(.query_edit) }, .{}),
+            ui.el(.combobox, .{ .text = model.query, .placeholder = "Search fruit", .on_input = CatalogUi.inputMsg(.query_edit), .on_press = .open_picker, .on_submit = .submit_query }, .{}),
         }),
-        ui.el(.radio_group, .{ .gap = 4 }, .{
-            ui.el(.radio, .{ .checked = model.bold, .on_toggle = .toggle_bold }, .{}),
+        ui.el(.radio_group, .{ .gap = 4, .semantics = .{ .label = "Formatting" } }, .{
+            ui.el(.radio, .{ .checked = model.bold, .on_change = .toggle_bold }, .{}),
         }),
         ui.el(.accordion, .{ .text = "Details", .selected = model.details_open, .on_toggle = .toggle_details, .padding = 8 }, .{
             ui.text(.{}, "More info"),
@@ -2444,6 +2489,10 @@ test "catalog elements build the hand-written tree and dispatch typed messages" 
     try testing.expectEqualStrings("q", markup_tree.msgForKeyboard(input.id, typed).?.query_edit.insert_text);
     const submit = canvas.WidgetKeyboardEvent{ .phase = .key_down, .key = "enter" };
     try testing.expectEqual(CatalogMsg.submit_query, markup_tree.msgForKeyboard(input.id, submit).?);
+    const combobox = findByKind(markup_tree.root, .combobox).?;
+    try testing.expectEqual(CatalogMsg.submit_query, markup_tree.msgForKeyboard(combobox.id, submit).?);
+    try testing.expectEqual(CatalogMsg.open_picker, markup_tree.msgForKeyboard(combobox.id, .{ .phase = .key_down, .key = "space" }).?);
+    try testing.expectEqual(CatalogMsg.open_picker, markup_tree.msgForKeyboard(combobox.id, .{ .phase = .key_down, .key = "arrowdown" }).?);
 
     // The whole catalog lays out through the canvas engine.
     var nodes: [256]canvas.WidgetLayoutNode = undefined;
@@ -2797,6 +2846,9 @@ pub const ImageLeafModel = struct {
     /// A signed id field: bindings evaluate as i64, so a negative must
     /// reach the image seam as a value, never trap in the u64 cast.
     stale_image: i64 = -2,
+    source_x: f32 = 4,
+    source_width: f32 = 32,
+    invalid_source: []const u8 = "wide",
 
     /// A pub fn producing an ImageId binds like a field.
     pub fn thumbnail(model: *const ImageLeafModel) canvas.ImageId {
@@ -2806,7 +2858,7 @@ pub const ImageLeafModel = struct {
 
 pub const image_markup_source =
     \\<row gap="8">
-    \\  <image image="{cover}" width="120" height="80" label="Cover art" />
+    \\  <image image="{cover}" source-x="{source_x}" source-y="8" source-width="{source_width}" source-height="24" width="120" height="80" label="Cover art" />
     \\  <image image="{thumbnail}" width="48" height="48" label="" />
     \\</row>
 ;
@@ -2826,7 +2878,7 @@ pub const ImageLeafUi = canvas.Ui(ImageLeafMsg);
 /// shares.
 pub fn handImageLeafView(ui: *ImageLeafUi, model: *const ImageLeafModel) ImageLeafUi.Node {
     return ui.row(.{ .gap = 8 }, .{
-        ui.image(.{ .image = model.cover, .width = 120, .height = 80, .semantics = .{ .label = "Cover art" } }),
+        ui.image(.{ .image = model.cover, .image_src = geometry.RectF.init(model.source_x, 8, model.source_width, 24), .width = 120, .height = 80, .semantics = .{ .label = "Cover art" } }),
         ui.image(.{ .image = model.thumbnail(), .width = 48, .height = 48, .semantics = .{ .label = "" } }),
     });
 }
@@ -2853,13 +2905,16 @@ test "the image leaf binds a dynamic ImageId from model fields and fns" {
     try collectIds(hand_tree.root, &hand_ids, testing.allocator);
     try testing.expectEqualSlices(canvas.ObjectId, hand_ids.items, markup_ids.items);
 
-    // The field binding and the fn binding both land in image_id.
+    // The id and source-coordinate bindings land on the widget. The
+    // second image omits a crop and draws the whole registered image.
     const cover = markup_tree.root.children[0];
     try testing.expectEqual(canvas.WidgetKind.image, cover.kind);
     try testing.expectEqual(@as(canvas.ImageId, 42), cover.image_id);
+    try testing.expectEqualDeep(@as(?geometry.RectF, geometry.RectF.init(4, 8, 32, 24)), cover.image_src);
     try testing.expectEqualStrings("Cover art", cover.semantics.label);
     const thumbnail = markup_tree.root.children[1];
     try testing.expectEqual(@as(canvas.ImageId, 43), thumbnail.image_id);
+    try testing.expectEqual(@as(?geometry.RectF, null), thumbnail.image_src);
 
     // 0 is the "no image" sentinel: the leaf renders nothing (the
     // model simply has not loaded the image yet).
@@ -2895,6 +2950,29 @@ test "image leaf misuse fails the build with the teaching messages" {
             // the same construct as a compile error).
             .source = "<row>\n  <image image=\"{cover}\" label=\"Art\"><text>Caption</text></image>\n</row>",
             .message = canvas.ui_markup.image_children_message,
+        },
+        .{
+            // A source rectangle is atomic: omitting one coordinate is
+            // a typo, not an implicit zero/default.
+            .source = "<row>\n  <image image=\"{cover}\" source-x=\"0\" source-y=\"0\" source-width=\"16\" label=\"Art\" />\n</row>",
+            .message = canvas.ui_markup.image_source_complete_message,
+        },
+        .{
+            // Cropping without an image would be inert (avatar may omit
+            // image normally for its initials fallback).
+            .source = "<row>\n  <avatar source-x=\"0\" source-y=\"0\" source-width=\"16\" source-height=\"16\">CT</avatar>\n</row>",
+            .message = canvas.ui_markup.image_source_binding_message,
+        },
+        .{
+            // Only registered-image widgets consume source rectangles.
+            .source = "<row>\n  <badge source-x=\"0\" source-y=\"0\" source-width=\"16\" source-height=\"16\">3</badge>\n</row>",
+            .message = canvas.ui_markup.image_source_element_message,
+        },
+        .{
+            // Runtime model values still pass the numeric conversion
+            // gate; a string cannot become a source coordinate.
+            .source = "<row>\n  <image image=\"{cover}\" source-x=\"{invalid_source}\" source-y=\"0\" source-width=\"16\" source-height=\"16\" label=\"Art\" />\n</row>",
+            .message = "expected a number",
         },
         .{
             // Markup that skipped validation (hot reload) can reach the
@@ -4615,6 +4693,8 @@ pub const MirrorTextInputEvent = union(enum) {
     delete_forward,
     delete_word_backward,
     delete_word_forward,
+    delete_to_start,
+    delete_to_line_start,
     clear,
     move_caret: MirrorCaretMove,
     set_selection: MirrorSelection,
@@ -4642,6 +4722,8 @@ test "declaredTextInputUnion accepts the emitted mirror shape and rejects near-m
         delete_forward,
         delete_word_backward,
         delete_word_forward,
+        delete_to_start,
+        delete_to_line_start,
         clear,
         move_caret: MirrorCaretMove,
         set_selection: MirrorSelectionWithAffinity,
@@ -4658,6 +4740,8 @@ test "declaredTextInputUnion accepts the emitted mirror shape and rejects near-m
         delete_forward,
         delete_word_backward,
         delete_word_forward,
+        delete_to_start,
+        delete_to_line_start,
         clear,
         move_caret: MirrorCaretMove,
         set_selection: MirrorSelection,
@@ -4671,6 +4755,8 @@ test "declaredTextInputUnion accepts the emitted mirror shape and rejects near-m
         delete_forward,
         delete_word_backward,
         delete_word_forward,
+        delete_to_start,
+        delete_to_line_start,
         clear,
         move_caret: MirrorCaretMove,
         set_selection: MirrorSelection,
@@ -4686,6 +4772,8 @@ test "declaredTextInputUnion accepts the emitted mirror shape and rejects near-m
         delete_forward,
         delete_word_backward,
         delete_word_forward,
+        delete_to_start,
+        delete_to_line_start,
         clear,
         move_caret: struct { direction: WrongDirection, extend: bool },
         set_selection: MirrorSelection,
@@ -4939,6 +5027,8 @@ test "the interpreter binds on-input to a declared mirror union and translates e
     try testing.expectEqualStrings("abc", inserted.edit.insert_text);
     // Void verbs map by tag.
     try testing.expectEqual(MirrorTextInputEvent.delete_backward, tree.msgForTextEdit(field.id, .delete_backward).?.edit);
+    try testing.expectEqual(MirrorTextInputEvent.delete_to_start, tree.msgForTextEdit(field.id, .delete_to_start).?.edit);
+    try testing.expectEqual(MirrorTextInputEvent.delete_to_line_start, tree.msgForTextEdit(field.id, .delete_to_line_start).?.edit);
     // Caret moves translate the direction enum by member name.
     const moved = tree.msgForTextEdit(field.id, .{ .move_caret = .{ .direction = .previous_word, .extend = true } }).?;
     try testing.expectEqual(MirrorCaretDirection.previous_word, moved.edit.move_caret.direction);

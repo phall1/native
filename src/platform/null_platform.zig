@@ -45,6 +45,10 @@ const max_tray_title_bytes = types.max_tray_title_bytes;
 const max_tray_tooltip_bytes = types.max_tray_tooltip_bytes;
 const max_tray_item_label_bytes = types.max_tray_item_label_bytes;
 const max_tray_item_command_bytes = types.max_tray_item_command_bytes;
+const max_tray_segment_options = types.max_tray_segment_options;
+const max_tray_segment_label_bytes = types.max_tray_segment_label_bytes;
+const max_tray_chart_values = types.max_tray_chart_values;
+const max_tray_chart_text_bytes = types.max_tray_chart_text_bytes;
 const max_drop_paths_bytes = types.max_drop_paths_bytes;
 const max_drop_paths = types.max_drop_paths;
 const max_window_event_name_bytes = types.max_window_event_name_bytes;
@@ -76,6 +80,7 @@ const validateMenus = types.validateMenus;
 const validateMenuItem = types.validateMenuItem;
 const isValidShortcutKey = types.isValidShortcutKey;
 const WindowRestorePolicy = types.WindowRestorePolicy;
+const WindowInitialPlacement = types.WindowInitialPlacement;
 const WindowOptions = types.WindowOptions;
 const WindowState = types.WindowState;
 const WindowInfo = types.WindowInfo;
@@ -318,6 +323,16 @@ const NullStatusItem = struct {
     open_command_len: usize = 0,
     presentation: TrayPresentation = .{},
     items: [max_tray_items]TrayMenuItem = undefined,
+    segment_options: [max_tray_items * max_tray_segment_options]types.TraySegmentOption = undefined,
+    segment_option_label_storage: [max_tray_items * max_tray_segment_options][max_tray_segment_label_bytes]u8 = undefined,
+    segment_option_command_storage: [max_tray_items * max_tray_segment_options][max_tray_item_command_bytes]u8 = undefined,
+    metric_primary_storage: [max_tray_items][max_tray_item_label_bytes]u8 = undefined,
+    metric_secondary_storage: [max_tray_items][types.max_tray_item_detail_bytes]u8 = undefined,
+    metric_accessibility_storage: [max_tray_items][max_tray_chart_text_bytes]u8 = undefined,
+    chart_values: [max_tray_items * max_tray_chart_values]f32 = undefined,
+    chart_leading_caption_storage: [max_tray_items][max_tray_chart_text_bytes]u8 = undefined,
+    chart_trailing_summary_storage: [max_tray_items][max_tray_chart_text_bytes]u8 = undefined,
+    chart_accessibility_storage: [max_tray_items][max_tray_chart_text_bytes]u8 = undefined,
     item_count: usize = 0,
 };
 
@@ -377,11 +392,18 @@ pub const NullPlatform = struct {
     /// like `windows` — same seam-regression purpose as
     /// `window_resizable` (the startup create used to hardcode it).
     window_titlebar: [max_windows]WindowTitlebarStyle = [_]WindowTitlebarStyle{.standard} ** max_windows,
+    /// Captured independently from `restore_state`: persistence opt-in does
+    /// not mean a frame was actually found and restored.
+    window_placement: [max_windows]WindowInitialPlacement = [_]WindowInitialPlacement{.default} ** max_windows,
+    window_restore_policy: [max_windows]WindowRestorePolicy = [_]WindowRestorePolicy{.clamp_to_visible_screen} ** max_windows,
     window_transparent: [max_windows]bool = [_]bool{false} ** max_windows,
     window_always_on_top: [max_windows]bool = [_]bool{false} ** max_windows,
     window_click_through: [max_windows]bool = [_]bool{false} ** max_windows,
     window_activate_on_show: [max_windows]bool = [_]bool{true} ** max_windows,
     window_allows_fullscreen: [max_windows]bool = [_]bool{true} ** max_windows,
+    /// Fullscreen set calls per window (`set_window_fullscreen_fn`),
+    /// indexed like the windows array.
+    window_fullscreen_calls: [max_windows]u32 = @splat(0),
     /// Minimize calls per window (`minimize_window_fn`), indexed like
     /// `windows`: the observable seam for app-drawn minimize controls —
     /// the null platform has no Dock to genie into, so the count IS the
@@ -892,6 +914,7 @@ pub const NullPlatform = struct {
                 .close_window_fn = closeWindow,
                 .minimize_window_fn = minimizeWindow,
                 .hide_window_fn = hideWindow,
+                .set_window_fullscreen_fn = setWindowFullscreen,
                 .show_window_fn = showWindow,
                 .set_dock_presence_fn = setDockPresence,
                 .launch_at_login_status_fn = launchAtLoginStatus,
@@ -1157,6 +1180,8 @@ pub const NullPlatform = struct {
         self.windows[self.window_count] = info;
         self.window_resizable[self.window_count] = options.resizable;
         self.window_titlebar[self.window_count] = options.titlebar;
+        self.window_placement[self.window_count] = options.initial_placement;
+        self.window_restore_policy[self.window_count] = options.restore_policy;
         self.window_transparent[self.window_count] = options.transparent;
         self.window_always_on_top[self.window_count] = options.always_on_top;
         self.window_click_through[self.window_count] = options.click_through;
@@ -1269,6 +1294,16 @@ pub const NullPlatform = struct {
         self.windows[index].hidden = false;
         self.removeViewsForWindow(window_id);
         self.removeWebViewsForWindow(window_id);
+    }
+
+    fn setWindowFullscreen(context: ?*anyopaque, window_id: WindowId, fullscreen: bool) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        const index = self.findWindowIndex(window_id) orelse return error.WindowNotFound;
+        // The modeled host answers the request immediately; a real one
+        // confirms through its own window event, which is why the
+        // runtime keeps no fullscreen bookkeeping of its own.
+        self.windows[index].fullscreen = fullscreen;
+        self.window_fullscreen_calls[index] += 1;
     }
 
     fn minimizeWindow(context: ?*anyopaque, window_id: WindowId) anyerror!void {
@@ -1782,7 +1817,42 @@ pub const NullPlatform = struct {
         const self: *NullPlatform = @ptrCast(@alignCast(context.?));
         const status_item = self.findStatusItem(status_item_id) orelse return error.InvalidTrayOptions;
         if (items.len > status_item.items.len) return error.InvalidTrayOptions;
-        for (items, 0..) |item, index| status_item.items[index] = item;
+        for (items, 0..) |item, index| {
+            status_item.items[index] = item;
+            if (item.segmented) |segmented| {
+                const start = index * max_tray_segment_options;
+                for (segmented.options, 0..) |option, option_index| {
+                    const flat_index = start + option_index;
+                    status_item.segment_options[flat_index] = .{
+                        .id = option.id,
+                        .label = try copyInto(&status_item.segment_option_label_storage[flat_index], option.label),
+                        .command = try copyInto(&status_item.segment_option_command_storage[flat_index], option.command),
+                        .selected = option.selected,
+                        .enabled = option.enabled,
+                    };
+                }
+                status_item.items[index].segmented = .{ .options = status_item.segment_options[start .. start + segmented.options.len] };
+            }
+            if (item.metric) |metric| {
+                status_item.items[index].metric = .{
+                    .primary_text = try copyInto(&status_item.metric_primary_storage[index], metric.primary_text),
+                    .secondary_text = try copyInto(&status_item.metric_secondary_storage[index], metric.secondary_text),
+                    .accessibility_label = try copyInto(&status_item.metric_accessibility_storage[index], metric.accessibility_label),
+                };
+            }
+            if (item.chart) |chart| {
+                const start = index * max_tray_chart_values;
+                @memcpy(status_item.chart_values[start .. start + chart.values.len], chart.values);
+                status_item.items[index].chart = .{
+                    .values = status_item.chart_values[start .. start + chart.values.len],
+                    .min_value = chart.min_value,
+                    .max_value = chart.max_value,
+                    .leading_caption = try copyInto(&status_item.chart_leading_caption_storage[index], chart.leading_caption),
+                    .trailing_summary = try copyInto(&status_item.chart_trailing_summary_storage[index], chart.trailing_summary),
+                    .accessibility_label = try copyInto(&status_item.chart_accessibility_storage[index], chart.accessibility_label),
+                };
+            }
+        }
         status_item.item_count = items.len;
         self.tray_update_count += 1;
     }
@@ -2420,11 +2490,11 @@ pub const NullPlatform = struct {
     /// Deterministic decode seam for tests (see `image_decode`): parses
     /// the strict PNG subset the canvas writer emits. Off by default so
     /// the null platform models codec-less hosts.
-    fn decodeImage(context: ?*anyopaque, bytes: []const u8, buffer: []u8) anyerror!types.DecodedImage {
+    fn decodeImage(context: ?*anyopaque, bytes: []const u8, buffer: []u8, max_pixels: usize) anyerror!types.DecodedImage {
         const self: *NullPlatform = @ptrCast(@alignCast(context.?));
         if (!self.image_decode) return error.UnsupportedService;
         self.image_decode_count += 1;
-        const decoded = canvas.png.decodeRgba8(bytes, buffer) catch |err| return switch (err) {
+        const decoded = canvas.png.decodeRgba8Fitted(bytes, buffer, max_pixels, types.max_decoded_image_dimension) catch |err| return switch (err) {
             error.PngPixelBufferTooSmall => error.ImageTooLarge,
             else => error.ImageDecodeFailed,
         };
@@ -2927,6 +2997,18 @@ pub const NullPlatform = struct {
 
     /// Test seam: show calls observed for a window (the un-hide verb's
     /// pinned observable, like `minimizeCountForWindow`).
+    /// Fullscreen SET calls the modeled host received for a window.
+    pub fn fullscreenCountForWindow(self: *const NullPlatform, window_id: WindowId) u32 {
+        const index = self.findWindowIndex(window_id) orelse return 0;
+        return self.window_fullscreen_calls[index];
+    }
+
+    /// The modeled host's current fullscreen state for a window.
+    pub fn windowIsFullscreen(self: *const NullPlatform, window_id: WindowId) bool {
+        const index = self.findWindowIndex(window_id) orelse return false;
+        return self.windows[index].fullscreen;
+    }
+
     pub fn showCountForWindow(self: *const NullPlatform, window_id: WindowId) u32 {
         const index = self.findWindowIndex(window_id) orelse return 0;
         return self.window_show_count[index];
@@ -2962,6 +3044,8 @@ pub const NullPlatform = struct {
             self.windows[cursor] = self.windows[cursor + 1];
             self.window_resizable[cursor] = self.window_resizable[cursor + 1];
             self.window_titlebar[cursor] = self.window_titlebar[cursor + 1];
+            self.window_placement[cursor] = self.window_placement[cursor + 1];
+            self.window_restore_policy[cursor] = self.window_restore_policy[cursor + 1];
             self.window_transparent[cursor] = self.window_transparent[cursor + 1];
             self.window_always_on_top[cursor] = self.window_always_on_top[cursor + 1];
             self.window_click_through[cursor] = self.window_click_through[cursor + 1];

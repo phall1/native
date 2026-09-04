@@ -48,7 +48,7 @@ The runtime owns the rest: install, presentation, resize, typed event dispatch, 
 | `dropdown-menu` | menu surface | vertical; children are `menu-item`s. `anchor="below\|above"` floats it against its parent's frame: a late z-pass above the whole tree, window-clipped (never cropped by a scroll pane), auto-flipping at the window edges, zero flow space — pair with `on-dismiss` so Escape/click-outside close model-side |
 | `accordion` | accordion | header via the `text` attribute; children show while `selected`, dispatch `on-toggle` |
 | `alert`, `bubble` | surfaces | `alert` title via the `text` attribute; children stack inside. `bubble` hugs its message up to 80% of the thread (`ghost` exempt; explicit `width` wins) and takes one `<reactions>` child — the reaction pill straddling its bottom edge, one text run, dock via `text-alignment` (default `end`); `text=` on bubble itself is a teaching error (that channel belongs to the pill) |
-| `dialog`, `drawer`, `sheet` | modal surfaces | rendered in place — title via `text`, wrap in `<if>` to show conditionally |
+| `dialog`, `drawer`, `sheet` | modal surfaces | root-relative and unaffected by ancestor scroll or clipping: dialogs center in the viewport, drawers span its width and dock to the bottom, and sheets span its height and dock to the right — title via `text`, wrap in `<if>` to show conditionally |
 | `resizable` | resizable panel | engine-managed drag handle; `width` sets the initial width |
 | `split` | two-pane splitter | exactly two element children (nest splits for more panes); the engine synthesizes the draggable divider between them. `value` binds the model-owned first-pane fraction, `on-resize` names an f32 Msg variant dispatched with each applied fraction (echo it back through `value`), `min-width` on the panes bounds the drag, `gap` sets the divider band thickness; the focused divider takes Left/Right (Shift for bigger steps) and Home/End. `resize-duration` (milliseconds, split only) animates model-driven value moves — the runtime eases the rendered fraction to the new value one presented frame at a time instead of snapping, and reduced-motion appearances snap automatically; `resize-easing` (`linear`/`standard`/`emphasized`/`spring`) shapes the ramp and needs a nonzero duration beside it |
 | `tree` | disclosure tree | vertical container whose descendant rows with `role="treeitem"` form one roving keyboard focus set: Up/Down walk visible rows (selection follows focus via `on-change` when bound, otherwise `on-press`), Left collapses or moves to the parent row, Right expands or moves to the first child row, Home/End jump to the edges, Enter/Space activate; nested rows derive hierarchy structurally, while flat `<for>` rows declare their one-based `tree-level`; expandable rows bind `expanded` and `on-toggle`, and the model owns both states |
@@ -248,7 +248,7 @@ pub fn draft(model: *const Model) []const u8 {
 
 On a `list-item`, `on-submit` grows a second home beyond text entry: with a submit handler bound, plain Enter on a ring-focused row dispatches it as the row's PRIMARY action (open the record, play the track — the desktop list convention), while Space keeps the row's select activation (`on-press`). Rows without a submit handler resolve Enter exactly as before — both activation keys select. It is the keyboard mirror of `on-double-press`: bind both to the same Msg and pointer and keyboard users share one primary action (the soundboard's Zig track rows bind `on_press` select, `on_double_press` play, `on_submit` play). How Enter reaches the row at all — and why arrows may not — is [keyboard routing](#keyboard-routing-focus-registers-quiet-list-rows-and-the-app-level-fallback).
 
-Presses follow one rule: a click lands on the nearest pressable widget under the pointer — plain text, icons, images, badges, and layout containers let it fall through to their closest pressable ancestor, and dragging still selects text. Any element with a bound `on-press`, `on-double-press`, or `on-toggle` is pressable (the handler makes it a hit target), so a pressable row is just `<panel on-press="open:{id}">` — or `<row on-press=...>` — with plain text children: no overlays, no duplicated handlers. Nested pressables resolve to the deepest one (a button inside a pressable row wins); editable text fields, scroll containers, and modal surfaces always claim their own presses. Value/text handlers (`on-change`, `on-submit`, `on-input`) still belong on controls only — the validator, both engines, and the LSP reject them on layout/decoration elements with a teaching error.
+Presses follow one rule: a click lands on the nearest press-claiming widget under the pointer — plain text, icons, images, badges, and layout containers let it fall through to their closest interactive ancestor, and dragging still selects text. Any element with `on-press`, `on-double-press`, `on-toggle`, `on-hold`, or `on-drag` becomes a hit target and press claimer, so a row can bind `on-press` for clicks or `on-drag` for spatial dragging and child text still resolves to that row without overlays or duplicated handlers. Nested claimers resolve to the deepest one; editable text fields, scroll containers, and modal surfaces always claim their own presses. Value/text handlers (`on-change`, `on-submit`, `on-input`) still belong on controls only — the validator, both engines, and the LSP reject them on layout/decoration elements with a teaching error.
 
 ## Keyboard routing: focus registers, quiet list rows, and the app-level fallback
 
@@ -320,7 +320,7 @@ export function dropMsg(drop: FileDropEvent): Msg | null {
 }
 ```
 
-The platform event is journaled before either route, so record/replay delivers the identical source, point, and path bytes. A host that cannot resolve the target view leaves `viewLabel` empty and `point` null.
+The platform event is journaled before either route, so record/replay delivers the identical source, point, and path bytes. The macOS system host reports labeled, view-local points for canvas and WebView drops; an unlabeled window region keeps an empty `viewLabel` and reports a window-content point. A host that cannot resolve either leaves `viewLabel` empty and `point` null.
 
 ## Native scrolling and context menus
 
@@ -328,7 +328,7 @@ On macOS, every non-virtualized `scroll` region is driven by an invisible `NSScr
 
 Scroll regions pin at their content edges by default on every path — no rubber-band bounce; kinetic motion stops cleanly at the boundary. Bouncing is a per-region opt-in: `overscroll="rubber_band"` in markup or `ElementOptions.overscroll = .rubber_band` in Zig views (the native macOS scroller gets elastic edges, the engine physics overscroll under resistance and spring back). The `ScrollPhysics.overscroll` design token flips the app-wide default; per-region values override it, and `overscroll="none"` pins a region regardless of the token.
 
-Right/ctrl-click presents a real OS context menu at the pointer: `NSMenu` on macOS, `TrackPopupMenu` on Windows, `GtkPopoverMenu` on Linux. Authors declare ONE menu and the platform decides presentation: hosts without a native menu presenter (the mobile toolkit hosts and embed hosts today) mount the same declared items as an anchored canvas surface at the click point automatically — never two authored menus, never a canvas imitation where the OS menu exists. In markup, the menu is a `<context-menu>` child of the pressable element it answers, holding `menu-item`s (`on-press` required, `disabled` optional) and `separator`s, with `if`/`else`/`for` to swap or repeat items:
+Right/ctrl-click presents a real OS context menu at the pointer: `NSMenu` on macOS, `TrackPopupMenu` on Windows, `GtkPopoverMenu` on Linux. Authors declare ONE menu and the platform decides presentation: hosts without a native menu presenter (the mobile toolkit hosts and embed hosts today) mount the same declared items as an anchored canvas surface at the click point automatically — never two authored menus, never a canvas imitation where the OS menu exists. In markup, the menu is a `<context-menu>` child of the interactive element it answers — a hit-target kind or an element made interactive by `on-press`, `on-double-press`, `on-toggle`, `on-hold`, or `on-drag` — holding `menu-item`s (`on-press` required, `disabled` optional) and `separator`s, with `if`/`else`/`for` to swap or repeat items:
 
 ```html
 <list-item on-press="open:{entry.id}" label="{entry.title}">
@@ -478,13 +478,19 @@ case "build_finished":
 
 </CodeToggle>
 
+Handing a URL to the user's default handler is the same fire-and-forget shape: `fx.openUrl(url)` from a Zig `update_fx` arm asks the OS to open it — the browser for `http`/`https`, the mail client for `mailto` — through the platform verb the [bridge](/docs/bridge/builtin-commands) exposes to web content as `native-sdk.os.openUrl`. The URL is treated as hostile, because cores build them from terminal output, fetch bodies, and pastes: schemes are an allowlist (`http`, `https`, `mailto`, matched case-insensitively), and an empty URL, one past the 4 KiB bound, one carrying a NUL or any other control byte, or one naming an unvetted scheme — `file:` and `javascript:` included — is refused whole rather than trimmed into something openable. Unlike `runtime.openExternalUrl`, it is not gated on the webview external-link policy: that policy governs links *web content* follows, while this call comes from the app's own `update`. Fake execution and session replay never open anything.
+
+```zig
+.open_docs => fx.openUrl("https://example.com/docs/start"),
+```
+
 Failure and overflow are always visible: a spawn that cannot run delivers an exit Msg with reason `rejected`, a fetch that cannot run delivers a response Msg with outcome `rejected`, and a file effect that cannot run delivers a result Msg with outcome `rejected`; dropped or truncated lines carry counts and flags; `cancel` kills and reaps the process and always ends in exactly one `cancelled` exit Msg, with no further line Msgs after it. Tests use the fake executor (`effects.executor = .fake`) to assert on spawn, fetch, and file requests and feed synthetic lines, stderr (`feedStderr`, collect spawns), exits, responses, and file results back deterministically — set it before the first frame and `init_fx` boot spawns are recorded too. See `examples/effects-probe`.
 
 For timestamps, the facade owns the clocks (Zig 0.16 puts `std.time` behind `std.Io`, which `update` never sees): `native_sdk.nowMs()` / `nowNanoseconds()` read the wall clock and `monotonicMs()` / `monotonicNanoseconds()` the duration clock. Time-dependent logic stores the `native_sdk.Clock` seam in the model (`.system` by default) so tests substitute a deterministic `native_sdk.TestClock` and advance it by hand.
 
 ## Secondary windows
 
-In a default TypeScript app, export `windows(model): readonly WindowDescriptor[]` and put each possible window's markup at `src/windows/<label>.native`; the generated launcher compiles those files, maps descriptor labels to them, and includes shared components they import from nested paths under `src/windows/`. Construct descriptors with `windowDescriptor`. `closePolicy: "quit"` routes `onCloseCommand` through `commandMsg`; `"hide"` retains the window and dispatches no close command. `titlebar` includes `"chromeless"` for fully skinned windows. `examples/system-monitor-ts` is the complete default-path reference.
+In a default TypeScript app, export `windows(model): readonly WindowDescriptor[]` and put each possible window's markup at `src/windows/<label>.native`; the generated launcher compiles those files, maps descriptor labels to them, and includes shared components they import from nested paths under `src/windows/`. Construct descriptors with `windowDescriptor`. `restorePolicy: "center_on_primary"` centers a fresh descriptor with no `x`/`y` on macOS; Windows and Linux currently keep their native default placement. The default policy is `"clamp_to_visible_screen"`. `closePolicy: "quit"` routes `onCloseCommand` through `commandMsg`; `"hide"` retains the window and dispatches no close command. `titlebar` includes `"chromeless"` for fully skinned windows. `examples/system-monitor-ts` is the complete default-path reference.
 
 In Zig cores and custom wiring, windows are model-declared exactly like the tray: `Options.windows_fn` returns the window descriptors that should exist right now (presence IS liveness), and `Options.window_view` builds each declared window's whole canvas tree, keyed by the descriptor's window label. After every dispatched Msg the runtime reconciles: windows the model started declaring are created (a source-less native window wearing one `gpu_surface` view with the descriptor's `canvas_label`, inheriting the main canvas's gpu options), windows it stopped declaring close, and every open window's view rebuilds from the same model — a theme picked in the settings window restyles the main window on the same dispatch. There is no `visible` flag: transient visibility is host state changed through `hideWindow`/`showWindow` or a `.hide` close policy; stop declaring a window to really close it and release its retained views.
 
@@ -573,9 +579,27 @@ ui.image(.{ .image = model.chart_image, .width = 120, .height = 80, .semantics =
 <avatar image="{avatar_image}" label="Octocat">OC</avatar>
 ```
 
+One registered image can be a texture atlas. `ElementOptions.image_src` is an optional `geometry.RectF` in decoded-image pixel coordinates; Native markup spells the same rectangle with all four source attributes. The widget frame stays the destination, a source rectangle crossing the registered image bounds is clipped, and cropped widgets use nearest sampling so adjacent atlas regions cannot bleed into the tile:
+
+```zig
+ui.image(.{
+    .image = model.atlas_image,
+    .image_src = geometry.RectF.init(64, 32, 24, 24),
+    .width = 48,
+    .height = 48,
+    .semantics = .{ .label = "Warning badge" },
+})
+```
+
+```html
+<image image="{atlas_image}" source-x="64" source-y="32"
+  source-width="24" source-height="24" width="48" height="48"
+  label="Warning badge" />
+```
+
 `fx.registerImage(id, width, height, rgba8)` registers already-decoded pixels (the runtime copies them; your buffer is free on return), `fx.registerImageBytes(id, bytes)` decodes through the platform codec first, and `fx.unregisterImage(id)` frees the slot. Re-registering an id replaces its pixels and every view repaints — GPU caches re-upload off the changed content fingerprint, no invalidation calls. For caches, mint fresh ids (effect-key style, monotonically increasing) and unregister the evictee — never re-key different content onto a live id. Outside `UiApp`, the same registry is `Runtime.registerCanvasImage`/`registerCanvasImageBytes`/`unregisterCanvasImage`.
 
-Capacities are fixed and loud (`canvas_limits`): `max_registered_canvas_images` slots (16) of `max_registered_canvas_image_pixel_bytes` each (1 MiB — 512×512 RGBA8, avatar/icon scale), with `error.ImageRegistryFull`, `error.ImageTooLarge`, `error.ImageDecodeFailed`, and `error.UnsupportedService` (a platform without a codec) never silent. Registered images render everywhere the canvas does: live presentation (GPU packet and software paths), `renderCanvasScreenshot`, and automation screenshots. A draw referencing an id that is not (or no longer) registered skips — a pure view cannot fail presentation with a transient loading state. In tests, the null platform's `image_decode` flag enables a deterministic decoder for the strict PNG subset `canvas.png.writeRgba8` emits, so raw RGBA fixtures exercise the full decode→register→draw path without bundling a codec.
+Capacities are fixed and loud (`canvas_limits`): 16 slots with a 1 MiB decoded-pixel target by default. Encoded photos decode aspect-preservingly to fit, while raw `fx.registerImage` pixels remain strict. Image-centric apps may raise the startup-frozen target through app.zon `.images.max_image_pixel_bytes`, up to 8 MiB; storage is lazy per used slot, but filling all 16 ceiling-sized slots is a declared 128 MiB high-water. Every encoded entry point, including direct `fx.registerImageBytes`, shares the flat 8 MiB source bound. `error.ImageRegistryFull`, `error.ImageTooLarge` (encoded source, raw pixels, or a codec-contract violation), `error.ImageDecodeFailed`, and `error.UnsupportedService` are never silent. Registered images render everywhere the canvas does: live presentation, screenshots, and automation. A missing id simply draws its fallback. In tests, the null platform's deterministic strict-PNG decoder also pins exact decode-to-fit dimensions and pixels.
 
 ## Rich text: inline spans and markdown
 
@@ -736,6 +760,8 @@ Every interactive element needs an accessible name — the text a screen reader 
 This is a machine check, not a review item. An unnamed control, an icon-only control without a label (the icon name is a drawing instruction, not a label), or a misused role (`role="tree"` on an element that can never hold rows) is a validation error in `native markup check`, both view engines, and the LSP — the rubric is whether a screen reader user is fully blocked. Unnamed images and labels that duplicate the text they shadow degrade rather than block, so they report as warnings (`--strict` promotes them); the explicit `label=""` marks an image decorative on purpose.
 
 Zig-built views get the same discipline at tree level: `canvas.expectA11yAuditSweepClean` lays out the real tree and reports interactive widgets announced with no name (including dynamic labels that resolve empty at runtime), focusable widgets keyboard traversal can never reach, and identically labeled sibling controls — adopt it in your test suite next to `canvas.expectLayoutAuditSweepClean`. Contrast checking and focus-visible styling checks are not part of the audit yet.
+
+Zig views also carry two flags that are easy to confuse, and the engine keeps them strictly apart. `semantics.decorative` is the accessibility one: the widget and its subtree leave the semantic tree and can never take focus, while painting, layout, hit-testing, and event routing are untouched. It is the `aria-hidden` counterpart, and the right flag for chrome drawn for the eye alone — a search field's magnifier glyph, a rendered caret, a leading rule beside a labeled control. `semantics.hidden` is the VISIBILITY one: the widget keeps its layout box — the space stays reserved and siblings do not reflow — but drops out of painting, hit-testing, focus, and the semantic tree. That is the flag for an empty reserved slot (a fixed-width space held for an affordance that is not currently shown) and for `ui.nav`'s retained-but-inactive pages. A `hidden` icon paints nothing, so reaching for it to quiet a screen reader leaves a blank gap where the glyph should be; `decorative` is what that case wants.
 
 ## Tooling
 

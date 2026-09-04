@@ -718,14 +718,17 @@ fn spliceInlineSeparatorsComptime(comptime source: []const u8, comptime children
 }
 
 /// Surface the parser's diagnostic (already positioned by the shared
-/// helpers) as a compile error. The error value parameter exists so call
-/// sites read like the runtime parser's `try`/`return self.fail(...)`.
+/// helpers) as a compile error. The error value names the parser's own
+/// classification beside the positioned message, and is read rather than
+/// discarded: Zig 0.16 refuses `_ = err` on an error value, and that refusal
+/// used to replace every comptime markup diagnostic with "error set is
+/// discarded" pointing here instead of at the author's markup.
 fn failComptime(comptime parser: *const Parser, comptime err: ParseError) noreturn {
-    _ = err;
-    @compileError(std.fmt.comptimePrint("markup error at line {d}, column {d}: {s}", .{
+    @compileError(std.fmt.comptimePrint("markup error at line {d}, column {d}: {s} ({s})", .{
         parser.diagnostic.line,
         parser.diagnostic.column,
         parser.diagnostic.message,
+        @errorName(err),
     }));
 }
 
@@ -1149,11 +1152,11 @@ pub const anchor_offset_value_message = "anchor-offset takes a literal number: t
 pub const anchor_dependent_attr_message = "anchor-alignment and anchor-offset only apply together with anchor - add anchor=\"below\" (or \"above\") to float this surface";
 
 /// Elements whose widget KIND the engine never hit-tests: layout and
-/// decoration only. A bound `on-press`/`on-double-press`/`on-toggle`
-/// makes any element a hit target (widget-level: the handler stamps the
-/// press/toggle action, and presses on non-interactive content inside it
-/// fall through to it), so those three are legal everywhere; the
-/// remaining value/text handlers
+/// decoration only. A bound `on-press`/`on-double-press`/`on-toggle`/
+/// `on-hold`/`on-drag` makes any element a hit target (widget-level: the
+/// handler stamps a press/toggle/drag action, and presses on
+/// non-interactive content inside it fall through to it), so those are
+/// legal everywhere; the remaining value/text handlers
 /// (`on-change`/`on-submit`/`on-input`) have no behavior to bind to on
 /// these elements and stay validation errors. Registry-derived from the
 /// `hit_target` element predicate, which mirrors the engine's kind
@@ -1177,7 +1180,7 @@ pub const autofocus_element_message = "autofocus is only supported on focusable 
 
 pub const submit_on_enter_element_message = "submit-on-enter is only supported on textarea - it makes plain Enter dispatch on-submit while Shift+Enter inserts a newline; single-line fields already submit on Enter, and other elements have no multiline Enter policy";
 
-pub const non_hit_target_handler_message = "on-change/on-submit/on-input never fire here: this element has no control or text behavior - put them on a control (input, checkbox, slider) inside it (on-press/on-double-press/on-toggle are fine anywhere: a bound press handler makes any element pressable, and clicks on plain text or icons inside it fall through to it)";
+pub const non_hit_target_handler_message = "on-change/on-submit/on-input never fire here: this element has no control or text behavior - put them on a control (input, checkbox, slider) inside it (on-press/on-double-press/on-toggle/on-hold/on-drag are fine anywhere: they make any element interactive, and presses on plain text or icons inside it fall through to it)";
 
 /// Elements whose widget kind layers its children on top of each other
 /// (every child gets the full content box), so `gap` can never space
@@ -1269,6 +1272,14 @@ pub const tooltip_delay_dependent_attr_message = "tooltip-delay needs anchor on 
 
 pub const image_binding_message = "image takes one {binding} to a u64 ImageId the app registered at runtime (Cmd.imageLoad, fx.loadImage, fx.registerImageBytes) - runtime image ids are model data, not markup literals; 0 renders nothing (an avatar falls back to its initials)";
 pub const image_binding_element_message = "image is only supported on avatar and image - the remaining image-bearing widget (icon-button) stays a Zig view (ElementOptions.image)";
+pub const image_source_element_message = "source-x, source-y, source-width, and source-height are only supported on avatar and image - they crop a runtime-registered image in decoded-image pixel coordinates";
+pub const image_source_binding_message = "source-x, source-y, source-width, and source-height require the element's image binding - without a registered image the source rectangle is inert";
+pub const image_source_complete_message = "source-x, source-y, source-width, and source-height must be declared together - they form one source rectangle in decoded-image pixel coordinates";
+pub const image_source_attr_names = [_][]const u8{ "source-x", "source-y", "source-width", "source-height" };
+
+pub fn imageSourceAttrName(name: []const u8) bool {
+    return nameInList(name, &image_source_attr_names);
+}
 pub const image_missing_image_message = "image requires image={binding} naming the u64 ImageId the app registered at runtime - without one the leaf can never draw anything (dead markup, same policy as icon without name)";
 pub const image_children_message = "image is a leaf - it takes no children";
 
@@ -1419,7 +1430,7 @@ pub fn dismissEventElement(name: []const u8) bool {
 // operated blind; a role that cannot mean what it says lies to the
 // bridge), and a WARNING when the experience degrades but remains
 // navigable (an unnamed image, a label duplicating the text it shadows).
-// Which elements are controls/editables/images is registry data
+// Which elements are controls/editables/radiogroups/images is registry data
 // (`schema.ElementInfo.a11y_name`); the judgment about name sources and
 // severities lives here. Both engines and the validator call the same
 // predicates, so the lint cannot drift between check time and build time.
@@ -1429,6 +1440,8 @@ pub const a11y_unlabeled_control_message = "this control has no accessible name 
 pub const a11y_icon_only_message = "icon-only control: the icon name is a drawing instruction, not a label - a screen reader announces an unnamed control; add label=\"...\" naming the action (e.g. <button icon=\"trash\" label=\"Delete\"/>)";
 
 pub const a11y_unlabeled_editable_message = "this text control has no accessible name - a screen reader user cannot tell what to type; add label=\"...\" (or placeholder=\"...\", which the accessibility bridges announce as the fallback name)";
+
+pub const a11y_unlabeled_radiogroup_message = "this radiogroup has no accessible name - a screen reader announces the choices without their shared question; add label=\"...\" naming the shared choice";
 
 pub const a11y_unknown_role_message = "unknown role: role takes a canvas.WidgetRole name (button, link, tree, treeitem, list, listitem, tab, checkbox, ...)";
 
@@ -1445,6 +1458,13 @@ pub const a11y_redundant_label_message = "this label duplicates the element's te
 /// the validator and both engines; comptime-callable.
 pub fn a11yNameError(node: MarkupNode) ?[]const u8 {
     const entry = schema.elementByName(node.name) orelse return null;
+    // A literal role override can create a radiogroup on any container;
+    // enforce the role's name contract in addition to the element-kind
+    // registry. Dynamic roles resolve at runtime, where the tree audit
+    // applies the same requirement to the effective semantic role.
+    if (nodeHasLiteralRole(node, "radiogroup") and !attrNonBlank(node, "label")) {
+        return a11y_unlabeled_radiogroup_message;
+    }
     switch (entry.a11y_name) {
         .none, .image => return null,
         .control => {
@@ -1462,7 +1482,20 @@ pub fn a11yNameError(node: MarkupNode) ?[]const u8 {
             if (entry.takes_text and a11yNodeHasName(node)) return null;
             return a11y_unlabeled_editable_message;
         },
+        .radiogroup => {
+            if (attrNonBlank(node, "label")) return null;
+            return a11y_unlabeled_radiogroup_message;
+        },
     }
+}
+
+fn nodeHasLiteralRole(node: MarkupNode, role: []const u8) bool {
+    const value = node.attr("role") orelse return false;
+    const expression = parseAttrExpression(value) orelse return false;
+    return switch (expression) {
+        .literal => |literal| std.mem.eql(u8, literal, role),
+        else => false,
+    };
 }
 
 /// The role-misuse ERROR for an element node: an unknown literal role, or
@@ -1572,12 +1605,17 @@ fn inlineSeparatorNode(source: []const u8, start: usize, end: usize) MarkupNode 
 }
 
 /// Whether an element can HOST a context-menu: right-click resolution
-/// walks the hit route, so the host must be a hit target — or carry a
-/// bound on-press/on-hold, which makes any element pressable. Shared by
-/// the validator and both engines; comptime-callable.
+/// walks the hit route, so the host must be a hit target — or carry any
+/// handler that stamps a press/toggle/drag action and therefore makes an
+/// otherwise structural element a hit target. Shared by the validator
+/// and both engines; comptime-callable.
 pub fn contextMenuHostEligible(node: MarkupNode) bool {
     if (!nameInList(node.name, &known_non_hit_target_element_names)) return true;
-    return node.attr("on-press") != null or node.attr("on-hold") != null;
+    return node.attr("on-press") != null or
+        node.attr("on-double-press") != null or
+        node.attr("on-toggle") != null or
+        node.attr("on-hold") != null or
+        node.attr("on-drag") != null;
 }
 
 fn a11yNodeHasName(node: MarkupNode) bool {
@@ -1645,7 +1683,7 @@ fn collectNodeA11yWarnings(node: MarkupNode, storage: []MarkupErrorInfo, len: *u
 
 /// The a11y ERRORS for a document, all of them: the same findings
 /// `validate` fails on one at a time (unnamed controls, icon-only
-/// controls, unnamed text entry, and role misuse), collected per node so
+/// controls, unnamed text entry/radiogroups, and role misuse), collected per node so
 /// a checker can report every offender in one pass instead of one per
 /// re-run. Positions match `validate`'s emission exactly: the element
 /// for name errors, the role attribute for role errors.
@@ -1900,7 +1938,7 @@ pub const series_color_message = "series color takes a literal color token name 
 pub const series_label_message = "series label expects text (a literal or one {binding}) - it names the series in the chart's semantics summary";
 pub const series_children_message = "series is a leaf - it takes no children; the values binding carries its data";
 pub const context_menu_parent_message = "context-menu must be a DIRECT child of the element whose right-click it answers - a conditional menu goes inside: wrap the menu-items in if/else, not the context-menu itself";
-pub const context_menu_host_message = "context-menu attaches to the element that takes the right-click, and this element is never a hit target - put the menu on the pressable element (list-item, button, panel, ...) or bind on-press on this one";
+pub const context_menu_host_message = "context-menu attaches to the element that takes the right-click, and this element is never a hit target - put the menu on an interactive element (list-item, button, panel, ...) or bind on-press/on-double-press/on-toggle/on-hold/on-drag on this one";
 pub const context_menu_single_message = "an element takes at most one context-menu - one right-click, one menu; swap its items with if/else INSIDE the menu";
 pub const context_menu_attrs_message = "context-menu takes no attributes - presentation belongs to the platform (the OS menu where the host has one, the anchored fallback surface elsewhere)";
 pub const context_menu_children_message = "context-menu takes menu-item and separator children (if/else/for around them are fine) - the items present through the platform's menu, so other elements cannot render there";
@@ -3323,6 +3361,27 @@ fn validateNode(document: MarkupDocument, node: MarkupNode, parent_element: ?[]c
                     const expression = parseAttrExpression(attribute.value);
                     if (expression == null or expression.? != .binding) {
                         return attrError(node, attribute, image_binding_message);
+                    }
+                    continue;
+                }
+                if (imageSourceAttrName(attribute.name)) {
+                    // A registered-image crop is one atomic rectangle in
+                    // decoded-image pixel coordinates. Partial declarations
+                    // and crops without an image would otherwise become
+                    // silently inert data.
+                    if (!std.mem.eql(u8, node.name, "avatar") and !std.mem.eql(u8, node.name, "image")) {
+                        return attrError(node, attribute, image_source_element_message);
+                    }
+                    if (node.attr("image") == null) {
+                        return attrError(node, attribute, image_source_binding_message);
+                    }
+                    for (image_source_attr_names) |name| {
+                        if (node.attr(name) == null) {
+                            return attrError(node, attribute, image_source_complete_message);
+                        }
+                    }
+                    if (attrExpressionError(attribute.value, invalid_expression_message)) |message| {
+                        return attrError(node, attribute, message);
                     }
                     continue;
                 }

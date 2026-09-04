@@ -535,6 +535,10 @@ pub fn Ui(comptime Msg: type) type {
             text: []const u8 = "",
             placeholder: []const u8 = "",
             value: f32 = 0,
+            /// Axis for a `split`: `.horizontal` preserves the original
+            /// left/right behavior; `.vertical` stacks top/bottom. The
+            /// synthesized divider inherits it for input and semantics.
+            split_axis: canvas.SplitAxis = .horizontal,
             /// HORIZONTAL scroll offset for a horizontal-capable
             /// `scroll` container (markup `value-x`) — the sideways
             /// counterpart of `value`. Follows the same source-wins
@@ -579,6 +583,14 @@ pub fn Ui(comptime Msg: type) type {
             /// shape, one bit of the id space apart (see
             /// `canvas.media_surface_image_id_bit`).
             image: canvas.ImageId = 0,
+            /// Optional source rectangle in image pixel coordinates for
+            /// image-bearing widgets. Null draws the whole registered
+            /// image; a rectangle draws only that sub-region, clipped to
+            /// the registered image bounds — the texture-atlas path.
+            /// Crops use nearest sampling so filtering cannot bleed an
+            /// adjacent atlas region. The destination remains the
+            /// widget's resolved frame.
+            image_src: ?geometry.RectF = null,
             /// Vector icon name drawn inside icon-bearing controls
             /// (`button`, `toggle_button`, `icon_button`, `list_item`,
             /// `menu_item`): a built-in registry name
@@ -621,10 +633,14 @@ pub fn Ui(comptime Msg: type) type {
             width: f32 = 0,
             /// Definite height; same contract as `width`.
             height: f32 = 0,
+            /// Height floor WITHOUT the definite-max side of `height`.
+            /// Vertical split panes use it to constrain divider travel.
+            min_height: f32 = 0,
+            /// Height ceiling WITHOUT the definite-min side of `height`.
+            max_height: f32 = 0,
             /// Width floor WITHOUT the definite-max side of `width`:
             /// the widget may grow past it but never shrink below.
-            /// Split panes use it to constrain the divider drag (the
-            /// clamp band derives from both panes' floors).
+            /// Horizontal split panes use it to constrain divider travel.
             min_width: f32 = 0,
             /// Width ceiling WITHOUT the definite-min side of `width`:
             /// the widget fills or hugs normally until this bound, then
@@ -915,6 +931,13 @@ pub fn Ui(comptime Msg: type) type {
             /// authored menu, platform-appropriate presentation. Markup
             /// authors declare this with a `<context-menu>` child element.
             context_menu: []const ContextMenuItem = &.{},
+            /// Which context menus this widget permits. `.automatic` keeps
+            /// the backward-compatible declared-menu-then-SDK-default
+            /// behavior. `.declared_only` suppresses SDK-provided defaults
+            /// while preserving `context_menu`; `.disabled` suppresses all
+            /// menu handling and leaves secondary-button input on the
+            /// ordinary routed/captured pointer path.
+            context_menu_policy: canvas.WidgetContextMenuPolicy = .automatic,
         };
 
         /// One `ElementOptions.context_menu` entry: the chrome-menu item
@@ -1044,6 +1067,8 @@ pub fn Ui(comptime Msg: type) type {
                         .delete_forward => @unionInit(Payload, "delete_forward", {}),
                         .delete_word_backward => @unionInit(Payload, "delete_word_backward", {}),
                         .delete_word_forward => @unionInit(Payload, "delete_word_forward", {}),
+                        .delete_to_start => @unionInit(Payload, "delete_to_start", {}),
+                        .delete_to_line_start => @unionInit(Payload, "delete_to_line_start", {}),
                         .clear => @unionInit(Payload, "clear", {}),
                         .move_caret => |move| blk: {
                             const Move = @FieldType(Payload, "move_caret");
@@ -1409,8 +1434,22 @@ pub fn Ui(comptime Msg: type) type {
             /// widget resolves through the engine's semantic intent model
             /// (press, then toggle, then select) to the matching handler.
             pub fn msgForPointer(self: Tree, target_id: ObjectId, phase: canvas.WidgetPointerPhase) ?Msg {
+                return self.msgForPointerSelection(target_id, phase, null);
+            }
+
+            fn msgForPointerSelection(self: Tree, target_id: ObjectId, phase: canvas.WidgetPointerPhase, radio_selection_changed: ?bool) ?Msg {
                 if (phase != .up) return null;
                 const widget = self.findWidget(target_id) orelse return null;
+                // A radio press is selection, regardless of which legacy
+                // handlers are also bound. Resolve it through the same
+                // canonical order as keyboard and a11y selection before
+                // the generic press/toggle/select action walk can choose
+                // an explicitly stamped on_toggle action first.
+                if (widget.kind == .radio) {
+                    const intent = canvas.widgetSemanticControlIntent(widget, .select) orelse return null;
+                    _ = intent;
+                    return self.msgForRadioSelection(target_id, radio_selection_changed);
+                }
                 const semantic_actions = [_]canvas.WidgetSemanticAction{ .press, .toggle, .select };
                 for (semantic_actions) |action| {
                     const intent = canvas.widgetSemanticControlIntent(widget, action) orelse continue;
@@ -1430,7 +1469,18 @@ pub fn Ui(comptime Msg: type) type {
                 if (phase == .up and click_count == 2) {
                     if (self.msgFor(target_id, .double_press)) |msg| return msg;
                 }
-                return self.msgForPointer(target_id, phase);
+                return self.msgForPointerSelection(target_id, phase, null);
+            }
+
+            /// Runtime pointer dispatch with the retained radio-selection
+            /// outcome preserved. Direct tests and consumers can keep using
+            /// `msgForPointerClick`; the runtime uses this form so reselecting
+            /// an already-checked radio does not synthesize `on_change`.
+            pub fn msgForPointerEvent(self: Tree, target_id: ObjectId, pointer: canvas.WidgetPointerEvent) ?Msg {
+                if (pointer.phase == .up and pointer.click_count == 2) {
+                    if (self.msgFor(target_id, .double_press)) |msg| return msg;
+                }
+                return self.msgForPointerSelection(target_id, pointer.phase, pointer.radio_selection_changed);
             }
 
             /// Typed dispatch for keyboard events: engine control intents
@@ -1446,16 +1496,21 @@ pub fn Ui(comptime Msg: type) type {
                 if (widget.semantics.role == .treeitem and keyboard.focus_moved) {
                     if (self.msgFor(target_id, .change)) |msg| return msg;
                 }
-                // A list row prefers a bound submit handler on plain
-                // Enter: Enter is the row's PRIMARY action (open the
-                // record, play the track — the desktop list convention),
-                // while Space keeps the select activation below. Only
-                // rows that bind `on_submit` take this branch; everything
-                // else resolves exactly as before.
-                if (widget.kind == .list_item and isSubmitKeyboard(widget, keyboard)) {
+                // List rows and comboboxes prefer a bound submit handler
+                // on plain Enter before their activation intent: Enter is
+                // the row's PRIMARY action or commits the combobox text,
+                // while Space and the combobox open arrows keep the
+                // activation below. Only widgets that bind `on_submit`
+                // return from this branch; everything else resolves
+                // exactly as before.
+                if ((widget.kind == .list_item or widget.kind == .combobox) and isSubmitKeyboard(widget, keyboard)) {
                     if (self.msgFor(target_id, .submit)) |msg| return msg;
                 }
                 if (canvas.widgetKeyboardControlIntent(widget, keyboard)) |intent| {
+                    if (widget.kind == .radio and intent.kind == .select) {
+                        if (self.msgForRadioSelection(target_id, keyboard.radio_selection_changed)) |msg| return msg;
+                        return null;
+                    }
                     if (self.msgForIntent(target_id, intent)) |msg| return msg;
                 }
                 if (isSubmitKeyboard(widget, keyboard)) {
@@ -1481,7 +1536,7 @@ pub fn Ui(comptime Msg: type) type {
                     } else {
                         const locally_derived = canvas.widgetCodeTabTextEditEvent(widget, keyboard) orelse
                             canvas.widgetKeyboardNewlineTextEditEvent(widget, keyboard) orelse
-                            keyboard.textEditEvent();
+                            canvas.widgetKeyboardTextEditEventForWidget(widget, keyboard);
                         if (locally_derived) |text_edit| {
                             // Direct Tree consumers still sanitize locally:
                             // these bytes have not crossed the runtime seam.
@@ -1498,7 +1553,18 @@ pub fn Ui(comptime Msg: type) type {
                 return switch (intent.kind) {
                     .press => self.msgFor(id, .press),
                     .toggle => self.msgFor(id, .toggle),
-                    .select => self.msgFor(id, .press),
+                    // Radio selection has one canonical handler order on
+                    // every input path: on_change, then the historical
+                    // on_toggle markup convention, then on_press for
+                    // backwards compatibility. Pointer, Space/Enter, and
+                    // radio-group focus arrivals all resolve here.
+                    .select => if (self.findWidget(id)) |widget|
+                        if (widget.kind == .radio)
+                            self.msgForRadioSelection(id, null)
+                        else
+                            self.msgFor(id, .press)
+                    else
+                        null,
                     .set_value => blk: {
                         if (intent.value) |value| {
                             if (self.msgForValue(id, value)) |msg| break :blk msg;
@@ -1507,6 +1573,19 @@ pub fn Ui(comptime Msg: type) type {
                     },
                     .scroll_by, .scroll_to_start, .scroll_to_end => null,
                 };
+            }
+
+            fn msgForRadioSelection(self: Tree, id: ObjectId, stamped_changed: ?bool) ?Msg {
+                const widget = self.findWidget(id) orelse return null;
+                if (widget.kind != .radio) return null;
+                // Runtime input carries the exact retained mutation. A
+                // direct Tree consumer has no retained mirror, so derive
+                // the same ordinary case from the source snapshot.
+                const changed = stamped_changed orelse !(widget.state.selected or widget.value >= 0.5);
+                if (changed) {
+                    if (self.msgFor(id, .change)) |msg| return msg;
+                }
+                return self.msgFor(id, .toggle) orelse self.msgFor(id, .press);
             }
         };
 
@@ -3703,7 +3782,9 @@ pub fn Ui(comptime Msg: type) type {
                 .autofocus = options.autofocus,
                 .submit_on_enter = options.submit_on_enter,
                 .image_id = options.image,
+                .image_src = options.image_src,
                 .value = options.value,
+                .runtime_flags = .{ .split_axis = options.split_axis },
                 .value_x = options.value_x,
                 .tree_level = options.tree_level,
                 .terminal = .{ .pty = options.pty, .scrollback = options.scrollback },
@@ -3735,18 +3816,25 @@ pub fn Ui(comptime Msg: type) type {
                     .virtual_anchor_index = options.virtual_anchor_index,
                     .virtual_anchor_extent = options.virtual_anchor_extent,
                     .virtual_total_extent = options.virtual_total_extent,
-                    .min_size = .{ .width = @max(options.width, options.min_width), .height = options.height },
+                    .min_size = .{
+                        .width = @max(options.width, options.min_width),
+                        .height = @max(options.height, options.min_height),
+                    },
                     // Explicit sizes are definite (min AND max). Resizable
                     // is the exception: width documents the initial width
                     // and the engine's drag handle keeps writing larger
                     // frames past it.
                     .max_size = if (kind == .resizable) .{} else .{
                         .width = if (options.width > 0) options.width else options.max_width,
-                        .height = options.height,
+                        .height = if (options.height > 0) options.height else options.max_height,
                     },
                 },
                 .style = options.style,
-                .semantics = options.semantics,
+                .semantics = semantics: {
+                    var semantics = options.semantics;
+                    semantics.context_menu_policy = options.context_menu_policy;
+                    break :semantics semantics;
+                },
                 .window_drag = options.window_drag,
                 .overscroll = options.overscroll,
                 .resize_duration_ms = options.resize_duration,
@@ -3768,6 +3856,7 @@ pub fn Ui(comptime Msg: type) type {
                 .kind = .split_divider,
                 .id = structuralId(split_widget.id, .split_divider, UiKey{ .str = "divider" }),
                 .value = split_widget.value,
+                .runtime_flags = .{ .split_axis = split_widget.runtime_flags.split_axis },
                 .state = .{ .disabled = split_widget.state.disabled },
                 .semantics = .{ .label = "Split divider" },
             };

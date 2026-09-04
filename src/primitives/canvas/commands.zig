@@ -3,6 +3,7 @@ const geometry = @import("geometry");
 const canvas = @import("root.zig");
 const chart_model = @import("chart.zig");
 const drawing_model = @import("drawing.zig");
+const cell_grid_model = @import("cell_grid.zig");
 const text_model = @import("text.zig");
 const render_model = @import("render.zig");
 const frame_model = @import("frame.zig");
@@ -25,6 +26,8 @@ const DrawImage = drawing_model.DrawImage;
 const Shadow = drawing_model.Shadow;
 const Blur = drawing_model.Blur;
 const DrawText = text_model.DrawText;
+const CellGrid = cell_grid_model.CellGrid;
+const Cell = cell_grid_model.Cell;
 const GlyphAtlasEntry = text_model.GlyphAtlasEntry;
 const GlyphAtlasPlan = text_model.GlyphAtlasPlan;
 const GlyphAtlasPlanner = text_model.GlyphAtlasPlanner;
@@ -62,6 +65,10 @@ pub const CanvasCommand = union(enum) {
     stroke_path: StrokePath,
     draw_image: DrawImage,
     draw_text: DrawText,
+    /// A whole terminal screen as ONE command (see `cell_grid.zig`):
+    /// a packed cell lattice every renderer expands itself. The one
+    /// command whose cost is linear in AREA rather than in shapes.
+    cell_grid: CellGrid,
     shadow: Shadow,
     blur: Blur,
 
@@ -76,6 +83,7 @@ pub const CanvasCommand = union(enum) {
             .stroke_path => |value| value.id,
             .draw_image => |value| value.id,
             .draw_text => |value| value.id,
+            .cell_grid => |value| value.id,
             .shadow => |value| value.id,
             .blur => |value| value.id,
             .pop_clip, .push_opacity, .pop_opacity, .transform => 0,
@@ -95,6 +103,10 @@ pub const CanvasCommand = union(enum) {
             .stroke_path => |value| if (drawing_model.pathBounds(value.elements)) |rect| drawing_model.strokeBounds(rect, value.stroke.width) else null,
             .draw_image => |value| value.dst.normalized(),
             .draw_text => |value| text_model.textBounds(value),
+            // Exact by construction: every cell's ink is clipped to its
+            // own cell, so unlike a text run a grid can never paint past
+            // the lattice it declares.
+            .cell_grid => |value| value.bounds(),
             .shadow => |value| drawing_model.shadowBounds(value),
             .blur => |value| value.rect.normalized().inflate(geometry.InsetsF.all(nonNegative(value.radius))),
         };
@@ -375,7 +387,60 @@ fn nonNegative(value: f32) f32 {
 /// `max_canvas_text_bytes_per_view` draw-text budget — a lockstep test
 /// keeps the two from drifting — so the store can only overflow on a
 /// frame the per-view display-list copy would refuse anyway.
-pub const max_display_list_text_bytes: usize = 32768;
+///
+/// Raised 32 KiB -> 64 KiB with the terminal work: a full-width
+/// terminal viewport is ONE widget whose every visible cell is a
+/// presented byte (a 300x100 grid is ~30 KB before any chrome, and a
+/// split of two such panes doubles it), so the old store made a wide
+/// screen degrade to fewer painted rows while 96% of the command budget
+/// sat unused. See `canvas_limits.max_canvas_text_bytes_per_view` for
+/// the memory accounting.
+pub const max_display_list_text_bytes: usize = 65536;
+
+/// Commands one view's display list may hold. Mirrors the runtime's
+/// per-view `max_canvas_commands_per_view` — a lockstep test keeps the
+/// two from drifting — so canvas-tier emitters that must size their own
+/// degradation against the frame ceiling (the terminal grid painter and
+/// its tests) can read it without importing the runtime.
+pub const max_display_list_commands: usize = 2048;
+
+/// Cells one frame's `cell_grid` commands may hold between them.
+///
+/// The budget that replaced the terminal's command budget: a screen
+/// costs CELLS now, and `cell_grid.Cell` is 20 bytes, so this is 640 KB
+/// of builder-owned storage and the same again in each view's retained
+/// copy. 32768 covers a 300x100 viewport (30,000) with room over, and
+/// two 160x100 split panes exactly. Mirrors the runtime's per-view
+/// `max_canvas_cells_per_view`, which a lockstep test pins.
+pub const max_display_list_cells: usize = 32768;
+
+/// A per-view store an emitter can run out of mid-frame.
+pub const DisplayListStore = enum { commands, text_bytes, path_elements, glyphs, cells };
+
+/// Content an emitter DROPPED because a per-view store ran out.
+///
+/// Almost every emitter fails the frame loudly instead
+/// (`error.DisplayListFull` and friends). The terminal grid painter is
+/// the deliberate exception: a screen denser than the display list can
+/// express paints fewer COMPLETE rows so the rest of the frame still
+/// reaches the glass. Degrading is the right call; degrading SILENTLY
+/// is not — a user staring at a half-blank terminal has no way to learn
+/// that a budget, not the program, ate the bottom of the screen. So the
+/// painter records what it dropped here, `Builder.reset` clears it, and
+/// the runtime turns a change in this record into one teaching log line
+/// (canvas_widget_display.zig). Direct painter callers read it off the
+/// builder, or take the richer `terminal_grid.paintReport` return.
+pub const DisplayListDegradation = struct {
+    /// The emitter's identity — the terminal widget's id (the value
+    /// handed to `terminal_grid.paintIdBase`), 0 for anonymous paints.
+    id: ObjectId = 0,
+    /// The store that ran out.
+    store: DisplayListStore,
+    /// Units the emitter placed and units it was handed, in the
+    /// emitter's own terms (a terminal grid counts ROWS).
+    produced: usize = 0,
+    requested: usize = 0,
+};
 
 pub const Builder = struct {
     commands: []CanvasCommand,
@@ -412,9 +477,32 @@ pub const Builder = struct {
     /// its forced clip contains the fallback.
     text_bytes: [max_display_list_text_bytes]u8 = undefined,
     text_byte_len: usize = 0,
+    /// Builder-owned storage for `cell_grid` cells, same lifetime rule
+    /// as `path_elements`: an emitted grid's slice stays valid for the
+    /// builder's life, so a display list accumulated across several
+    /// emit calls keeps every grid intact.
+    cells: [max_display_list_cells]cell_grid_model.Cell = undefined,
+    cell_len: usize = 0,
+    /// What this frame's emitters could NOT place (see
+    /// `DisplayListDegradation`). Null is the healthy frame; the last
+    /// emitter to run short wins, which is the one an author must fix
+    /// first. Never an error channel — the frame it describes is a
+    /// complete, presentable frame that is missing content.
+    degradation: ?DisplayListDegradation = null,
 
     pub fn init(commands: []CanvasCommand) Builder {
         return .{ .commands = commands };
+    }
+
+    /// Re-point an EXISTING builder at a command buffer without
+    /// materialising a fresh one. `Builder` carries its stores inline
+    /// (text bytes, path elements, a frame's worth of packed cells), so
+    /// `builder.* = Builder.init(...)` builds a multi-megabyte temporary
+    /// on the caller's stack and copies it — enough to overflow a
+    /// thread. This is the in-place form for pooled builders.
+    pub fn initAt(self: *Builder, commands: []CanvasCommand) void {
+        self.commands = commands;
+        self.reset();
     }
 
     pub fn reset(self: *Builder) void {
@@ -422,6 +510,15 @@ pub const Builder = struct {
         self.path_element_len = 0;
         self.label_byte_len = 0;
         self.text_byte_len = 0;
+        self.cell_len = 0;
+        self.degradation = null;
+    }
+
+    /// Record dropped content on the frame being built (see
+    /// `DisplayListDegradation`). Emitters call this INSTEAD of failing
+    /// when their contract is to degrade.
+    pub fn noteDegradation(self: *Builder, value: DisplayListDegradation) void {
+        self.degradation = value;
     }
 
     /// Reserve `count` path elements in the builder-owned store. The
@@ -454,6 +551,16 @@ pub const Builder = struct {
         self.text_byte_len += text.len;
         @memcpy(self.text_bytes[start..self.text_byte_len], text);
         return self.text_bytes[start..self.text_byte_len];
+    }
+
+    /// Reserve `count` cells in the builder-owned store. The returned
+    /// slice is caller-filled and stays valid for the life of the
+    /// builder (until `reset`), the `allocPathElements` contract.
+    pub fn allocCells(self: *Builder, count: usize) error{CellGridCellListFull}![]cell_grid_model.Cell {
+        if (self.cell_len + count > self.cells.len) return error.CellGridCellListFull;
+        const start = self.cell_len;
+        self.cell_len += count;
+        return self.cells[start..self.cell_len];
     }
 
     pub fn displayList(self: *const Builder) DisplayList {
@@ -516,6 +623,10 @@ pub const Builder = struct {
 
     pub fn drawText(self: *Builder, value: DrawText) error{DisplayListFull}!void {
         try self.append(.{ .draw_text = value });
+    }
+
+    pub fn cellGrid(self: *Builder, value: CellGrid) error{DisplayListFull}!void {
+        try self.append(.{ .cell_grid = value });
     }
 
     pub fn shadow(self: *Builder, value: Shadow) error{DisplayListFull}!void {

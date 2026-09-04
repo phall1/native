@@ -199,6 +199,42 @@ export function statusItem(model: Model): StatusItemState {
   assert.ok(structs.includes("StatusItemMenuItem"), `structs: ${structs.join(", ")}`);
   assert.ok(structs.includes("StatusItemPresentation"), `structs: ${structs.join(", ")}`);
   assert.ok(structs.includes("StatusItemModifiers"), `structs: ${structs.join(", ")}`);
+  assert.ok(structs.includes("StatusItemSegmentedRow"), `structs: ${structs.join(", ")}`);
+  assert.ok(structs.includes("StatusItemSegmentOption"), `structs: ${structs.join(", ")}`);
+  assert.ok(structs.includes("StatusItemMetricRow"), `structs: ${structs.join(", ")}`);
+  assert.ok(structs.includes("StatusItemChartRow"), `structs: ${structs.join(", ")}`);
+  const presentation = (doc.types as { structs: { name: string; fields: { name: string; type: unknown }[] }[] }).structs
+    .find((record) => record.name === "StatusItemPresentation");
+  assert.ok(presentation);
+  assert.deepEqual(presentation.fields.slice(-2), [
+    { name: "fontSize", type: { kind: "optional", inner: { kind: "i64" } } },
+    { name: "fontWeight", type: { kind: "optional", inner: { kind: "enum", name: "StatusItemFontWeight" } } },
+  ]);
+});
+
+test("themeState projects optional pack, scheme, and string accent as a launcher-bound record", () => {
+  const doc = contractOf(`
+import { type ThemeState } from "@native-sdk/core/events";
+export interface Model { dark: boolean; }
+export type Msg = { kind: "toggle" } | { kind: "noop" };
+export function initialModel(): Model { return { dark: false }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+export function themeState(model: Model): ThemeState {
+  return model.dark ? { colorScheme: "dark", accent: "#df2670" } : { colorScheme: "system" };
+}
+`);
+  const helpers = doc.model_helpers as { name: string; returns: { kind: string; name: string } }[];
+  assert.deepEqual(helpers.map((helper) => helper.name), ["themeState"]);
+  assert.deepEqual(helpers[0].returns, { kind: "value", name: "ThemeState" });
+  assert.deepEqual(doc.model_unbound, ["themeState"]);
+  const state = (doc.types as { structs: { name: string; fields: { name: string; type: unknown }[] }[] }).structs
+    .find((record) => record.name === "ThemeState");
+  assert.ok(state);
+  assert.deepEqual(state.fields, [
+    { name: "pack", type: { kind: "optional", inner: { kind: "enum", name: "ThemeStatePack" } } },
+    { name: "colorScheme", type: { kind: "optional", inner: { kind: "enum", name: "ThemeStateColorScheme" } } },
+    { name: "accent", type: { kind: "optional", inner: { kind: "bytes" } } },
+  ]);
 });
 
 test("statusItems is projected as a launcher-bound descriptor slice", () => {

@@ -872,6 +872,38 @@ test "widget layout diff separates paint and semantics dirtiness" {
     try expectRect(geometry.RectF.init(8, 12, 80, 48), image_invalidations[0].dirty_bounds);
 }
 
+test "context menu policy-only changes publish semantics invalidation" {
+    const previous_child = [_]Widget{.{
+        .id = 2,
+        .kind = .terminal,
+        .frame = geometry.RectF.init(10, 10, 100, 30),
+    }};
+    const disabled_child = [_]Widget{.{
+        .id = 2,
+        .kind = .terminal,
+        .frame = geometry.RectF.init(10, 10, 100, 30),
+        .semantics = .{ .context_menu_policy = .disabled },
+    }};
+    var previous_nodes: [2]WidgetLayoutNode = undefined;
+    var disabled_nodes: [2]WidgetLayoutNode = undefined;
+    const previous = try layoutWidgetTree(.{ .kind = .stack, .children = &previous_child }, geometry.RectF.init(0, 0, 140, 80), &previous_nodes);
+    const disabled = try layoutWidgetTree(.{ .kind = .stack, .children = &disabled_child }, geometry.RectF.init(0, 0, 140, 80), &disabled_nodes);
+
+    var invalidations_buffer: [2]WidgetInvalidation = undefined;
+    const invalidations = try WidgetLayoutTree.diff(previous, disabled, &invalidations_buffer);
+    try std.testing.expectEqual(@as(usize, 1), invalidations.len);
+    try std.testing.expect(!invalidations[0].layout_dirty);
+    try std.testing.expect(!invalidations[0].paint_dirty);
+    try std.testing.expect(invalidations[0].semantics_dirty);
+    try std.testing.expect(invalidations[0].dirty_bounds == null);
+}
+
+test "context menu policy storage stays within the v0.8.1 Widget size budget" {
+    if (@sizeOf(usize) == 8) {
+        try std.testing.expect(@sizeOf(Widget) <= 776);
+    }
+}
+
 test "widget layout diff marks style changes as paint dirty" {
     const previous_child = [_]Widget{.{
         .id = 2,
@@ -1750,11 +1782,13 @@ test "widget emitter applies button variants" {
     try emitWidgetTree(&builder, .{ .id = 23, .kind = .button, .frame = geometry.RectF.init(0, 120, 120, 32), .text = "Ghost", .variant = .ghost }, tokens);
     try emitWidgetTree(&builder, .{ .id = 24, .kind = .button, .frame = geometry.RectF.init(0, 160, 120, 32), .text = "Delete", .variant = .destructive }, tokens);
 
-    // Every variant is FLAT (no shadow command): 5 x (fill + border +
-    // label). Destructive is the quiet red chip — the destructive hue
-    // as a 10% wash under destructive-red text, borderless.
+    // Every variant is FLAT (no shadow command): primary, secondary, and
+    // outline each emit fill + border + label; borderless ghost and
+    // destructive each emit only fill + label. Destructive is the quiet
+    // red chip — the destructive hue as a 10% wash under destructive-red
+    // text. No dead zero-width stroke commands enter the list.
     const display_list = builder.displayList();
-    try std.testing.expectEqual(@as(usize, 15), display_list.commandCount());
+    try std.testing.expectEqual(@as(usize, 13), display_list.commandCount());
     switch (display_list.commands[0]) {
         .fill_rounded_rect => |fill| try expectFillColor(tokens.colors.accent, fill.fill),
         else => return error.TestUnexpectedResult,
@@ -1775,19 +1809,13 @@ test "widget emitter applies button variants" {
         .fill_rounded_rect => |fill| try expectFillColor(transparentColor(), fill.fill),
         else => return error.TestUnexpectedResult,
     }
-    switch (display_list.commands[10]) {
-        .stroke_rect => |stroke| try std.testing.expectEqual(@as(f32, 0), stroke.stroke.width),
-        else => return error.TestUnexpectedResult,
-    }
-    switch (display_list.commands[12]) {
+    try std.testing.expect(display_list.findCommandById(widgetPartId(23, 2)) == null);
+    switch (display_list.commands[11]) {
         .fill_rounded_rect => |fill| try expectFillColor(colorWithAlpha(tokens.colors.destructive, 0.10), fill.fill),
         else => return error.TestUnexpectedResult,
     }
-    switch (display_list.commands[13]) {
-        .stroke_rect => |stroke| try std.testing.expectEqual(@as(f32, 0), stroke.stroke.width),
-        else => return error.TestUnexpectedResult,
-    }
-    switch (display_list.commands[14]) {
+    try std.testing.expect(display_list.findCommandById(widgetPartId(24, 2)) == null);
+    switch (display_list.commands[12]) {
         .draw_text => |text| try std.testing.expectEqualDeep(tokens.colors.destructive, text.color),
         else => return error.TestUnexpectedResult,
     }

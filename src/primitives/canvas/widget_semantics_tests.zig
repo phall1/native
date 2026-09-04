@@ -829,7 +829,7 @@ test "widget image emits draw image and exposes image semantics" {
         .image_id = 42,
         .image_src = geometry.RectF.init(0, 0, 320, 192),
         .image_fit = .cover,
-        .image_sampling = .nearest,
+        .image_sampling = .linear,
         .image_opacity = 0.75,
         .semantics = .{ .label = "Deployment preview" },
     };
@@ -864,6 +864,8 @@ test "widget image emits draw image and exposes image semantics" {
             try expectRect(geometry.RectF.init(0, 0, 320, 192), draw.src);
             try expectRect(geometry.RectF.init(12, 14, 80, 48), draw.dst);
             try std.testing.expectEqual(ImageFit.cover, draw.fit);
+            // Atlas crops force nearest sampling at the widget seam so
+            // packet hosts cannot filter outside the source rectangle.
             try std.testing.expectEqual(ImageSampling.nearest, draw.sampling);
             try std.testing.expectEqual(@as(f32, 0.75), draw.opacity);
         },
@@ -2083,10 +2085,14 @@ test "text editing affordance colors resolve tokens and per-widget overrides" {
     try std.testing.expectEqual(Color.rgb8(4, 5, 6).r, styled_wash.r);
     try std.testing.expectApproxEqAbs(@as(f32, 0.3), styled_wash.a, 0.001);
 
-    // A disabled field's ink mutes with its text.
+    // A disabled field keeps its resolved text identity at the shared
+    // disabled-wash strength instead of swapping to a flat gray.
     var disabled = field;
     disabled.state.disabled = true;
-    try std.testing.expectEqualDeep(tokens.colors.text_muted, textEditingInkColor(disabled, tokens));
+    try std.testing.expectEqualDeep(
+        Color.rgba(tokens.colors.text.r, tokens.colors.text.g, tokens.colors.text.b, tokens.states.disabled_alpha),
+        textEditingInkColor(disabled, tokens),
+    );
 }
 
 test "widget text fields render wrapped selection geometry" {
@@ -2703,4 +2709,102 @@ test "widget list layout groups list items semantically" {
     try std.testing.expect(semantics[2].list.present);
     try std.testing.expectEqual(@as(u32, 1), semantics[2].list.item_index);
     try std.testing.expectEqual(@as(u32, 2), semantics[2].list.item_count);
+}
+
+test "hidden reserves an unpainted slot while decorative paints without announcing" {
+    // The two flags the engine deliberately keeps apart:
+    //   hidden     - laid out (the box, and with it the reserved space,
+    //                survives), paints nothing, announces nothing. The
+    //                empty fixed-width slot.
+    //   decorative - laid out AND painted, announces nothing. The
+    //                aria-hidden counterpart for chrome an author draws
+    //                for the eye alone: a search field's magnifier
+    //                glyph, a rendered caret, a leading rule.
+    const tokens = DesignTokens{};
+
+    const decorative_leaf = Widget{
+        .id = 2,
+        .kind = .text,
+        .frame = geometry.RectF.init(0, 0, 48, 16),
+        .text = "12:00",
+        .semantics = .{ .decorative = true },
+    };
+    var decorative_commands: [8]CanvasCommand = undefined;
+    var decorative_builder = Builder.init(&decorative_commands);
+    try emitWidgetTree(&decorative_builder, decorative_leaf, tokens);
+    try std.testing.expect(decorative_builder.displayList().commandCount() > 0);
+
+    var hidden_leaf = decorative_leaf;
+    hidden_leaf.semantics = .{ .hidden = true };
+    var hidden_commands: [8]CanvasCommand = undefined;
+    var hidden_builder = Builder.init(&hidden_commands);
+    try emitWidgetTree(&hidden_builder, hidden_leaf, tokens);
+    try std.testing.expectEqual(@as(usize, 0), hidden_builder.displayList().commandCount());
+
+    // `hidden` is not `display: none`. The flagged slot keeps its
+    // definite box, so the label beside it lands at the same x under
+    // either flag — the property a fixed-width "marker not currently
+    // showing" spacer depends on.
+    var label_x: ?f32 = null;
+    inline for ([_]WidgetSemantics{ .{ .hidden = true }, .{ .decorative = true } }) |slot_semantics| {
+        const children = [_]Widget{
+            .{
+                .id = 2,
+                .kind = .stack,
+                .layout = .{
+                    .min_size = .{ .width = 24, .height = 16 },
+                    .max_size = .{ .width = 24, .height = 16 },
+                },
+                .semantics = slot_semantics,
+            },
+            .{ .id = 3, .kind = .text, .text = "Terminal" },
+        };
+        const root = Widget{ .id = 1, .kind = .row, .children = &children };
+        var nodes: [4]WidgetLayoutNode = undefined;
+        const layout = try layoutWidgetTree(root, geometry.RectF.init(0, 0, 240, 32), &nodes);
+        try std.testing.expectEqual(@as(ObjectId, 2), layout.nodes[1].widget.id);
+        try std.testing.expectEqual(@as(f32, 24), layout.nodes[1].frame.normalized().width);
+        try std.testing.expectEqual(@as(ObjectId, 3), layout.nodes[2].widget.id);
+        const x = layout.nodes[2].frame.normalized().x;
+        if (label_x) |first| try std.testing.expectEqual(first, x) else label_x = x;
+    }
+
+    // Announcement: `decorative` drops the node AND its subtree, the way
+    // `aria-hidden` does, so a decorative wrapper cannot leak a labeled
+    // child back into the tree.
+    const nested = [_]Widget{
+        .{ .id = 4, .kind = .button, .text = "Nested" },
+    };
+    const semantic_children = [_]Widget{
+        .{
+            .id = 2,
+            .kind = .stack,
+            .semantics = .{ .decorative = true },
+            .children = &nested,
+        },
+        .{ .id = 3, .kind = .button, .text = "Real" },
+    };
+    const semantic_root = Widget{
+        .id = 1,
+        .kind = .row,
+        .semantics = .{ .label = "Tab strip" },
+        .children = &semantic_children,
+    };
+    var semantic_nodes: [8]WidgetLayoutNode = undefined;
+    const semantic_layout = try layoutWidgetTree(semantic_root, geometry.RectF.init(0, 0, 240, 32), &semantic_nodes);
+    var semantics_buffer: [8]WidgetSemanticsNode = undefined;
+    const semantics = try semantic_layout.collectSemantics(&semantics_buffer);
+    try std.testing.expectEqual(@as(usize, 2), semantics.len);
+    try std.testing.expectEqual(@as(ObjectId, 1), semantics[0].id);
+    try std.testing.expectEqual(@as(ObjectId, 3), semantics[1].id);
+
+    // A node the collector never emits cannot be a keyboard focus stop
+    // either, or Tab would land where nothing can be announced.
+    try std.testing.expect(canvas.widgetIsFocusable(.{ .id = 5, .kind = .button, .text = "Save" }));
+    try std.testing.expect(!canvas.widgetIsFocusable(.{
+        .id = 5,
+        .kind = .button,
+        .text = "Save",
+        .semantics = .{ .decorative = true },
+    }));
 }

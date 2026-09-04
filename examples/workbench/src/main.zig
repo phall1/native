@@ -227,7 +227,10 @@ pub const CompiledWorkbenchView = canvas.CompiledMarkupView(Model, Msg, workbenc
 /// The web pane: snapped to the markup's anchor column every presented
 /// frame — the split divider reflows live web content. Setting `url`
 /// navigates; bumping `reload_token` reloads the same URL.
-pub fn webPanes(model: *const Model, out: []WorkbenchApp.WebViewPane) usize {
+pub fn webPanes(model: *const Model, context: WorkbenchApp.ChromeContext, out: []WorkbenchApp.WebViewPane) usize {
+    // The browser pane belongs to the main window's scene; any other
+    // window owns no pane.
+    if (!context.is_main) return 0;
     out[0] = .{
         .label = web_view_label,
         .anchor = web_pane_anchor,
@@ -257,7 +260,6 @@ const shell_windows = [_]native_sdk.ShellWindow{.{
     .height = window_height,
     .min_width = window_min_width,
     .min_height = window_min_height,
-    .restore_state = false,
     // The Ghostty-clean chrome: hidden-inset titlebar, no status bar —
     // the traffic lights float over the terminal pane's own band.
     .titlebar = .hidden_inset,
@@ -294,7 +296,6 @@ pub fn main(init: std.process.Init) !void {
         .window_title = "Workbench",
         .bundle_id = "dev.native_sdk.workbench",
         .default_frame = geometry.RectF.init(0, 0, window_width, window_height),
-        .restore_state = false,
         .js_window_api = false,
         .security = .{
             .permissions = &app_permissions,

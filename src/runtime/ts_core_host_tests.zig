@@ -2857,6 +2857,14 @@ test "an accessory launch composes with a TypeScript dock-presence promotion" {
             return true;
         }
 
+        fn setFullscreen(_: *anyopaque, _: []const u8, _: bool) bool {
+            return true;
+        }
+
+        fn isFullscreen(_: *anyopaque, _: []const u8) bool {
+            return false;
+        }
+
         fn dock(context: *anyopaque, visible: bool) bool {
             const host: *platform.NullPlatform = @ptrCast(@alignCast(context));
             host.platform().services.setDockPresence(visible) catch return false;
@@ -2876,6 +2884,8 @@ test "an accessory launch composes with a TypeScript dock-presence promotion" {
         .close_fn = Actions.window,
         .minimize_fn = Actions.window,
         .hide_fn = Actions.window,
+        .fullscreen_fn = Actions.setFullscreen,
+        .fullscreen_state_fn = Actions.isFullscreen,
         .show_fn = Actions.window,
         .dock_presence_fn = Actions.dock,
         .quit_fn = Actions.quit,

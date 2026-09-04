@@ -45,7 +45,11 @@ pub fn collectWidgetSemantics(layout: anytype, output: []WidgetSemanticsNode, sc
         }
 
         const role = semanticRole(node.widget);
-        if (node.widget.semantics.hidden) {
+        // `hidden` (not painted at all) and `decorative` (painted, but
+        // deliberately outside the accessibility tree) both drop the node
+        // AND everything under it, the way `aria-hidden` does — a
+        // decorative wrapper cannot leak its children back into the tree.
+        if (node.widget.semantics.concealedFromAccessibility()) {
             hidden_depth = node.depth;
             continue;
         }
@@ -114,7 +118,8 @@ fn nearestSemanticParent(stack: []const ?usize) ?usize {
 pub fn semanticRole(widget: Widget) WidgetRole {
     if (widget.semantics.role != .none) return widget.semantics.role;
     return switch (widget.kind) {
-        .stack, .row, .column, .grid, .scroll_view, .breadcrumb, .button_group, .pagination, .radio_group, .tabs, .toggle_group, .accordion, .bubble, .resizable, .alert, .card, .panel => .group,
+        .stack, .row, .column, .grid, .scroll_view, .breadcrumb, .button_group, .pagination, .tabs, .toggle_group, .accordion, .bubble, .resizable, .alert, .card, .panel => .group,
+        .radio_group => .radiogroup,
         .data_grid, .table => .grid,
         .data_row => .row,
         .dialog, .drawer, .sheet, .popover => .dialog,
@@ -519,6 +524,10 @@ fn widgetScrollContentExtent(layout: anytype, scroll_index: usize, viewport: geo
     var index = scroll_index + 1;
     while (index < layout.nodes.len and layout.nodes[index].depth > scroll_depth) {
         const node = layout.nodes[index];
+        if (widget_tree.widgetIsRootRelativeModal(node.widget)) {
+            index = skipSubtree(layout, index);
+            continue;
+        }
         // A subtree anchored DIRECTLY to the scroll region stays
         // stationary under scrolling (its anchor base never moves), so
         // `frame + offset` is not a content-space position for it —
@@ -551,7 +560,7 @@ fn widgetScrollContentExtent(layout: anytype, scroll_index: usize, viewport: geo
 /// The horizontal content reach for a horizontal scroll view's
 /// semantics — the sideways mirror of `widgetScrollContentExtent`, with
 /// the honest-range exclusions the engine's clamp/driver walker applies
-/// (`canvasWidgetLayoutScrollContentExtentX`): anchored floating
+/// (`canvasWidgetLayoutScrollContentExtentX`): window-level floating
 /// subtrees are out of flow, a nested clip scope bounds its own
 /// children, and disclosure content counts only while settled open.
 fn widgetScrollContentExtentX(layout: anytype, scroll_index: usize, viewport: geometry.RectF) f32 {
@@ -562,7 +571,7 @@ fn widgetScrollContentExtentX(layout: anytype, scroll_index: usize, viewport: ge
     var index = scroll_index + 1;
     while (index < layout.nodes.len and layout.nodes[index].depth > scroll_depth) {
         const node = layout.nodes[index];
-        if (node.widget.layout.anchor != null) {
+        if (widget_tree.widgetEscapesAncestorClips(node.widget)) {
             index = skipSubtree(layout, index);
             continue;
         }

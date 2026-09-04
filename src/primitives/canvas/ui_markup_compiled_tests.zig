@@ -99,6 +99,38 @@ const zero_card_padding_markup =
 ;
 const ZeroCardPaddingCompiled = canvas.CompiledMarkupView(fixture.Model, fixture.Msg, zero_card_padding_markup);
 
+const selection_label_content_markup =
+    \\<column gap="8">
+    \\  <checkbox checked="true" on-toggle="add">Done</checkbox>
+    \\  <checkbox on-toggle="add" text="Later" />
+    \\  <radio-group label="Density">
+    \\    <radio checked="true" on-change="add">Default</radio>
+    \\    <radio on-change="add" text="Compact" />
+    \\  </radio-group>
+    \\</column>
+;
+const SelectionLabelContentCompiled = canvas.CompiledMarkupView(fixture.Model, fixture.Msg, selection_label_content_markup);
+
+test "checkbox and radio element content builds identically in both markup engines" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const model = fixture.testModel();
+
+    var interpreter = try InboxInterpreter.init(arena, selection_label_content_markup);
+    var interpreter_ui = InboxUi.init(arena);
+    const interpreted = try interpreter_ui.finalize(try interpreter.build(&interpreter_ui, &model));
+    var compiled_ui = InboxUi.init(arena);
+    const compiled = try compiled_ui.finalize(SelectionLabelContentCompiled.build(&compiled_ui, &model));
+
+    try expectSameTree(fixture.Msg, interpreted, compiled);
+    try expectSameTexts(interpreted.root, compiled.root);
+    try testing.expect(fixture.findByText(compiled.root, .checkbox, "Done") != null);
+    try testing.expect(fixture.findByText(compiled.root, .checkbox, "Later") != null);
+    try testing.expect(fixture.findByText(compiled.root, .radio, "Default") != null);
+    try testing.expect(fixture.findByText(compiled.root, .radio, "Compact") != null);
+}
+
 test "explicit zero card padding survives interpreted and compiled markup" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
@@ -130,6 +162,26 @@ fn compileInbox(arena: std.mem.Allocator, model: *const fixture.Model) !InboxUi.
 }
 
 const ContextMenuCompiled = canvas.CompiledMarkupView(fixture.Model, fixture.Msg, fixture.context_menu_markup_source);
+const DragContextMenuCompiled = canvas.CompiledMarkupView(fixture.Model, fixture.Msg, fixture.drag_context_menu_markup_source);
+
+test "compiled drag-only context-menu host matches the interpreter" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const model = fixture.testModel();
+
+    var interpreter_view = try InboxInterpreter.init(arena, fixture.drag_context_menu_markup_source);
+    var interpreter_ui = InboxUi.init(arena);
+    const interpreted = try interpreter_ui.finalize(try interpreter_view.build(&interpreter_ui, &model));
+    var compiled_ui = InboxUi.init(arena);
+    const compiled = try compiled_ui.finalize(DragContextMenuCompiled.build(&compiled_ui, &model));
+
+    try expectSameTree(fixture.Msg, interpreted, compiled);
+    try expectSameTexts(interpreted.root, compiled.root);
+    try testing.expect(compiled.root.semantics.actions.drag);
+    try testing.expect(canvas.widgetClaimsPress(compiled.root));
+    try testing.expectEqual(fixture.Msg.add, compiled.msgForContextMenu(compiled.root.id, 0).?);
+}
 
 test "compiled context-menus build the interpreter's declared items and handler entries exactly" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
@@ -941,6 +993,9 @@ test "compiled catalog elements match the interpreter and the hand-written view"
         interpreted.msgForKeyboard(input.id, submit).?,
         compiled.msgForKeyboard(input.id, submit).?,
     );
+    const combobox = fixture.findByKind(compiled.root, .combobox).?;
+    try testing.expectEqual(fixture.CatalogMsg.submit_query, compiled.msgForKeyboard(combobox.id, submit).?);
+    try testing.expectEqual(fixture.CatalogMsg.open_picker, compiled.msgForKeyboard(combobox.id, .{ .phase = .key_down, .key = "space" }).?);
 }
 
 test "compiled catalog stays in parity when conditional surfaces flip" {
@@ -1351,12 +1406,14 @@ test "compiled image leaf binding matches the interpreter and the hand-written v
     try expectSameTree(fixture.ImageLeafMsg, hand, interpreted);
     try expectSameTree(fixture.ImageLeafMsg, hand, compiled);
 
-    // The field binding and the fn binding both resolve to the
-    // widget's image id at comptime-unrolled access.
+    // The field binding, source-coordinate bindings, and id fn all
+    // resolve through comptime-unrolled access.
     const cover = compiled.root.children[0];
     try testing.expectEqual(canvas.WidgetKind.image, cover.kind);
     try testing.expectEqual(@as(canvas.ImageId, 42), cover.image_id);
+    try testing.expectEqualDeep(@as(?geometry.RectF, geometry.RectF.init(4, 8, 32, 24)), cover.image_src);
     try testing.expectEqual(@as(canvas.ImageId, 43), compiled.root.children[1].image_id);
+    try testing.expectEqual(@as(?geometry.RectF, null), compiled.root.children[1].image_src);
 
     // 0 draws nothing in both engines — the not-loaded-yet state.
     const empty_model = fixture.ImageLeafModel{};

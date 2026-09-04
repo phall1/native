@@ -4,9 +4,10 @@ const geometry = @import("geometry");
 const platform_mod = @import("../root.zig");
 const policy_values = @import("../policy_values.zig");
 const security = @import("../../security/root.zig");
+const canvas = @import("canvas");
 // The packaging pipeline's one-image icon machinery: dev runs borrow its
 // macOS mask/inset render so the Dock tile matches `native package`.
-const app_icon = @import("canvas").app_icon;
+const app_icon = canvas.app_icon;
 
 pub const Error = error{
     CallbackFailed,
@@ -56,6 +57,10 @@ const AppKitEvent = extern struct {
     y: f64,
     open: c_int,
     focused: c_int,
+    /// WINDOW_FRAME: nonzero while the window occupies its own
+    /// fullscreen Space (read from the style mask, so user-started and
+    /// app-started transitions report identically).
+    fullscreen: c_int,
     /// WINDOW_FRAME: nonzero while the window is alive but hidden by
     /// its close_policy (`open` stays 1 for the whole hidden stretch).
     hidden: c_int,
@@ -153,13 +158,23 @@ const AppKitBridgeCallback = *const fn (context: ?*anyopaque, window_id: u64, we
 /// anything else one dropped frame.
 const AppKitVideoSinkPush = *const fn (context: ?*anyopaque, width: usize, height: usize, pixels: [*c]const u8, len: usize) callconv(.c) c_int;
 
+extern fn native_sdk_test_imageio_thumbnail_dimensions(
+    bytes: [*]const u8,
+    bytes_len: usize,
+    source_width: usize,
+    source_height: usize,
+    max_pixels: usize,
+    out_width: *usize,
+    out_height: *usize,
+) c_int;
+
 const shortcut_modifier_primary: u32 = 1 << 0;
 const shortcut_modifier_command: u32 = 1 << 1;
 const shortcut_modifier_control: u32 = 1 << 2;
 const shortcut_modifier_option: u32 = 1 << 3;
 const shortcut_modifier_shift: u32 = 1 << 4;
 
-extern fn native_sdk_appkit_create(app_name: [*]const u8, app_name_len: usize, display_name: [*]const u8, display_name_len: usize, version: [*]const u8, version_len: usize, about_description: [*]const u8, about_description_len: usize, has_web_content: c_int, dock_visible: c_int, window_title: [*]const u8, window_title_len: usize, bundle_id: [*]const u8, bundle_id_len: usize, icon_path: [*]const u8, icon_path_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int, resizable: c_int, titlebar_style: c_int, show_policy: c_int, window_flags: u32) ?*AppKitHost;
+extern fn native_sdk_appkit_create(app_name: [*]const u8, app_name_len: usize, display_name: [*]const u8, display_name_len: usize, version: [*]const u8, version_len: usize, about_description: [*]const u8, about_description_len: usize, has_web_content: c_int, dock_visible: c_int, window_title: [*]const u8, window_title_len: usize, bundle_id: [*]const u8, bundle_id_len: usize, icon_path: [*]const u8, icon_path_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int, initial_placement: c_int, restore_policy: c_int, resizable: c_int, titlebar_style: c_int, show_policy: c_int, window_flags: u32) ?*AppKitHost;
 extern fn native_sdk_appkit_destroy(host: *AppKitHost) void;
 extern fn native_sdk_appkit_set_dock_icon_rgba(host: *AppKitHost, pixels: [*]const u8, width: usize, height: usize) void;
 extern fn native_sdk_appkit_set_dock_icon_file(host: *AppKitHost, path: [*]const u8, path_len: usize) void;
@@ -177,12 +192,13 @@ extern fn native_sdk_appkit_set_security_policy(host: *AppKitHost, allowed_origi
 extern fn native_sdk_appkit_set_menus(host: *AppKitHost, menu_titles: [*]const [*]const u8, menu_title_lens: [*]const usize, menu_count: usize, item_menu_indices: [*]const u32, item_labels: [*]const [*]const u8, item_label_lens: [*]const usize, item_commands: [*]const [*]const u8, item_command_lens: [*]const usize, item_keys: [*]const [*]const u8, item_key_lens: [*]const usize, item_modifiers: [*]const u32, item_separators: [*]const c_int, item_enabled: [*]const c_int, item_checked: [*]const c_int, item_count: usize) void;
 extern fn native_sdk_appkit_set_shortcuts(host: *AppKitHost, ids: [*]const [*]const u8, id_lens: [*]const usize, keys: [*]const [*]const u8, key_lens: [*]const usize, modifiers: [*]const u32, count: usize) void;
 extern fn native_sdk_appkit_request_frame(host: *AppKitHost) void;
-extern fn native_sdk_appkit_create_window(host: *AppKitHost, window_id: u64, window_title: [*]const u8, window_title_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int, resizable: c_int, titlebar_style: c_int, show_policy: c_int, window_flags: u32) c_int;
+extern fn native_sdk_appkit_create_window(host: *AppKitHost, window_id: u64, window_title: [*]const u8, window_title_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int, initial_placement: c_int, restore_policy: c_int, resizable: c_int, titlebar_style: c_int, show_policy: c_int, window_flags: u32) c_int;
 extern fn native_sdk_appkit_set_window_content_min_size(host: *AppKitHost, window_id: u64, min_width: f64, min_height: f64) c_int;
 extern fn native_sdk_appkit_focus_window(host: *AppKitHost, window_id: u64) c_int;
 extern fn native_sdk_appkit_close_window(host: *AppKitHost, window_id: u64) c_int;
 extern fn native_sdk_appkit_minimize_window(host: *AppKitHost, window_id: u64) c_int;
 extern fn native_sdk_appkit_hide_window(host: *AppKitHost, window_id: u64) c_int;
+extern fn native_sdk_appkit_set_window_fullscreen(host: *AppKitHost, window_id: u64, fullscreen: c_int) c_int;
 extern fn native_sdk_appkit_show_window(host: *AppKitHost, window_id: u64) c_int;
 extern fn native_sdk_appkit_set_dock_presence(host: *AppKitHost, visible: c_int) c_int;
 extern fn native_sdk_appkit_launch_at_login_status(host: *AppKitHost) c_int;
@@ -244,7 +260,7 @@ extern fn native_sdk_appkit_measure_text_advances(font_id: u64, size: f64, text:
 extern fn native_sdk_appkit_register_font(font_id: u64, bytes: [*]const u8, bytes_len: usize, out_token: *u64) c_int;
 extern fn native_sdk_appkit_unregister_font(font_id: u64, token: u64) c_int;
 extern fn native_sdk_appkit_register_bundled_fonts() void;
-extern fn native_sdk_appkit_decode_image(bytes: [*]const u8, bytes_len: usize, pixels: [*]u8, pixels_len: usize, out_width: *usize, out_height: *usize) c_int;
+extern fn native_sdk_appkit_decode_image(bytes: [*]const u8, bytes_len: usize, pixels: [*]u8, pixels_len: usize, max_pixels: usize, out_width: *usize, out_height: *usize) c_int;
 extern fn native_sdk_appkit_clipboard_write(host: *AppKitHost, text: [*]const u8, text_len: usize) void;
 extern fn native_sdk_appkit_clipboard_read_data(host: *AppKitHost, mime_type: [*]const u8, mime_type_len: usize, buffer: [*]u8, buffer_len: usize) usize;
 extern fn native_sdk_appkit_clipboard_write_data(host: *AppKitHost, mime_type: [*]const u8, mime_type_len: usize, bytes: [*]const u8, bytes_len: usize) c_int;
@@ -337,6 +353,7 @@ const AppKitMessageDialogOpts = extern struct {
 
 const AppKitWidgetAccessibilityNode = extern struct {
     id: u64,
+    parent_id: u64,
     role: c_int,
     label: [*]const u8,
     label_len: usize,
@@ -402,15 +419,50 @@ const widget_action_drop_files: u32 = 1 << 9;
 const widget_action_dismiss: u32 = 1 << 10;
 
 const AppKitTrayCallback = *const fn (context: ?*anyopaque, status_item_id: u32, item_id: u32) callconv(.c) void;
+const AppKitTraySegmentOption = extern struct {
+    item_id: u32,
+    label: [*]const u8,
+    label_len: usize,
+    selected: c_int,
+    enabled: c_int,
+};
+const AppKitTraySegmentedRow = extern struct {
+    row_index: usize,
+    options: [*]const AppKitTraySegmentOption,
+    option_count: usize,
+};
+const AppKitTrayMetricRow = extern struct {
+    row_index: usize,
+    primary_text: [*]const u8,
+    primary_text_len: usize,
+    secondary_text: [*]const u8,
+    secondary_text_len: usize,
+    accessibility_label: [*]const u8,
+    accessibility_label_len: usize,
+};
+const AppKitTrayChartRow = extern struct {
+    row_index: usize,
+    values: [*]const f32,
+    value_count: usize,
+    min_value: f64,
+    max_value: f64,
+    leading_caption: [*]const u8,
+    leading_caption_len: usize,
+    trailing_summary: [*]const u8,
+    trailing_summary_len: usize,
+    accessibility_label: [*]const u8,
+    accessibility_label_len: usize,
+};
 
 extern fn native_sdk_appkit_show_open_dialog(host: *AppKitHost, opts: *const AppKitOpenDialogOpts, buffer: [*]u8, buffer_len: usize) AppKitOpenDialogResult;
 extern fn native_sdk_appkit_show_save_dialog(host: *AppKitHost, opts: *const AppKitSaveDialogOpts, buffer: [*]u8, buffer_len: usize) usize;
 extern fn native_sdk_appkit_show_message_dialog(host: *AppKitHost, opts: *const AppKitMessageDialogOpts) c_int;
-extern fn native_sdk_appkit_create_tray(host: *AppKitHost, status_item_id: u32, icon_path: [*]const u8, icon_path_len: usize, title: [*]const u8, title_len: usize, tooltip: [*]const u8, tooltip_len: usize, visible: c_int, width: f64, tone: c_int, icon_opacity: f64, monospaced: c_int, activation_command: [*]const u8, activation_command_len: usize, alternate_activation_command: [*]const u8, alternate_activation_command_len: usize, open_command: [*]const u8, open_command_len: usize) void;
+extern fn native_sdk_appkit_create_tray(host: *AppKitHost, status_item_id: u32, icon_path: [*]const u8, icon_path_len: usize, title: [*]const u8, title_len: usize, tooltip: [*]const u8, tooltip_len: usize, visible: c_int, width: f64, tone: c_int, icon_opacity: f64, monospaced: c_int, font_size: f64, font_weight: c_int, activation_command: [*]const u8, activation_command_len: usize, alternate_activation_command: [*]const u8, alternate_activation_command_len: usize, open_command: [*]const u8, open_command_len: usize) void;
 extern fn native_sdk_appkit_update_tray_shell(host: *AppKitHost, status_item_id: u32, icon_path: [*]const u8, icon_path_len: usize, tooltip: [*]const u8, tooltip_len: usize, visible: c_int, activation_command: [*]const u8, activation_command_len: usize, alternate_activation_command: [*]const u8, alternate_activation_command_len: usize, open_command: [*]const u8, open_command_len: usize) void;
 extern fn native_sdk_appkit_update_tray_menu(host: *AppKitHost, status_item_id: u32, item_ids: [*]const u32, labels: [*]const [*]const u8, label_lens: [*]const usize, separators: [*]const c_int, enabled_flags: [*]const c_int, details: [*]const [*]const u8, detail_lens: [*]const usize, roles: [*]const c_int, keys: [*]const [*]const u8, key_lens: [*]const usize, modifiers: [*]const u32, count: usize) void;
+extern fn native_sdk_appkit_update_tray_rich_rows(host: *AppKitHost, status_item_id: u32, segmented_rows: [*]const AppKitTraySegmentedRow, segmented_count: usize, metric_rows: [*]const AppKitTrayMetricRow, metric_count: usize, chart_rows: [*]const AppKitTrayChartRow, chart_count: usize) void;
 extern fn native_sdk_appkit_update_tray_title(host: *AppKitHost, status_item_id: u32, title: [*]const u8, title_len: usize) void;
-extern fn native_sdk_appkit_update_tray_presentation(host: *AppKitHost, status_item_id: u32, title: [*]const u8, title_len: usize, width: f64, tone: c_int, icon_opacity: f64, monospaced: c_int) void;
+extern fn native_sdk_appkit_update_tray_presentation(host: *AppKitHost, status_item_id: u32, title: [*]const u8, title_len: usize, width: f64, tone: c_int, icon_opacity: f64, monospaced: c_int, font_size: f64, font_weight: c_int) void;
 extern fn native_sdk_appkit_remove_tray(host: *AppKitHost, status_item_id: u32) void;
 extern fn native_sdk_appkit_set_tray_callback(host: *AppKitHost, callback: AppKitTrayCallback, context: ?*anyopaque) void;
 
@@ -628,7 +680,7 @@ pub const MacPlatform = struct {
         // the classic load byte-for-byte.
         const dock_icon = planDockIcon(app_info.icon_path);
         const icon_path = if (dock_icon == .host_file) app_info.icon_path else "";
-        const host = native_sdk_appkit_create(app_info.app_name.ptr, app_info.app_name.len, display_name.ptr, display_name.len, app_info.version.ptr, app_info.version.len, app_info.description.ptr, app_info.description.len, if (app_info.has_web_content) 1 else 0, if (app_info.dock_visible) 1 else 0, window_title.ptr, window_title.len, app_info.bundle_id.ptr, app_info.bundle_id.len, icon_path.ptr, icon_path.len, window_options.label.ptr, window_options.label.len, frame.x, frame.y, frame.width, frame.height, if (window_options.restore_state) 1 else 0, if (window_options.resizable) 1 else 0, titlebarStyleInt(window_options.titlebar), showModeInt(window_options.show), windowFlags(window_options)) orelse return error.CreateFailed;
+        const host = native_sdk_appkit_create(app_info.app_name.ptr, app_info.app_name.len, display_name.ptr, display_name.len, app_info.version.ptr, app_info.version.len, app_info.description.ptr, app_info.description.len, if (app_info.has_web_content) 1 else 0, if (app_info.dock_visible) 1 else 0, window_title.ptr, window_title.len, app_info.bundle_id.ptr, app_info.bundle_id.len, icon_path.ptr, icon_path.len, window_options.label.ptr, window_options.label.len, frame.x, frame.y, frame.width, frame.height, if (window_options.restore_state) 1 else 0, initialPlacementInt(window_options.initial_placement), restorePolicyInt(window_options.restore_policy), if (window_options.resizable) 1 else 0, titlebarStyleInt(window_options.titlebar), showModeInt(window_options.show), windowFlags(window_options)) orelse return error.CreateFailed;
         switch (dock_icon) {
             .host_file => {},
             .masked_render => spawnDevDockIconRender(host, app_info.icon_path),
@@ -718,6 +770,7 @@ pub const MacPlatform = struct {
                 .close_window_fn = closeWindow,
                 .minimize_window_fn = minimizeWindow,
                 .hide_window_fn = hideWindow,
+                .set_window_fullscreen_fn = setWindowFullscreen,
                 .show_window_fn = showWindow,
                 .set_dock_presence_fn = setDockPresence,
                 .launch_at_login_status_fn = launchAtLoginStatus,
@@ -950,6 +1003,7 @@ fn appkitCallback(context: ?*anyopaque, event: *const AppKitEvent) callconv(.c) 
                 .open = event.open != 0,
                 .focused = event.focused != 0,
                 .hidden = event.hidden != 0,
+                .fullscreen = event.fullscreen != 0,
             } });
         },
         .view_focused => state.emit(.{ .view_focused = .{
@@ -987,11 +1041,7 @@ fn appkitCallback(context: ?*anyopaque, event: *const AppKitEvent) callconv(.c) 
         .wake => state.emit(.wake),
         .files_dropped => {
             var paths_buffer: [platform_mod.max_drop_paths][]const u8 = undefined;
-            const paths = platform_mod.splitDropPaths(event.drop_paths[0..event.drop_paths_len], paths_buffer[0..]);
-            state.emit(.{ .files_dropped = .{
-                .window_id = event.window_id,
-                .paths = paths,
-            } });
+            state.emit(.{ .files_dropped = fileDropEventFromAppKitEvent(event, paths_buffer[0..]) });
         },
         .gpu_surface_frame => state.emit(.{ .gpu_surface_frame = .{
             .window_id = event.window_id,
@@ -1129,6 +1179,17 @@ fn gpuSurfaceInputEventFromAppKitEvent(event: *const AppKitEvent) platform_mod.G
     };
 }
 
+fn fileDropEventFromAppKitEvent(event: *const AppKitEvent, paths_buffer: [][]const u8) platform_mod.FileDropEvent {
+    return .{
+        .window_id = event.window_id,
+        .view_label = appKitEventBytes(event.view_label, event.view_label_len),
+        // AppKit's system host converts every accepted drop to the same
+        // top-left-origin view space as gpu-surface input before emitting.
+        .point = geometry.PointF.init(@floatCast(event.x), @floatCast(event.y)),
+        .paths = platform_mod.splitDropPaths(appKitEventBytes(event.drop_paths, event.drop_paths_len), paths_buffer),
+    };
+}
+
 fn readClipboard(context: ?*anyopaque, buffer: []u8) anyerror![]const u8 {
     const self: *MacPlatform = @ptrCast(@alignCast(context.?));
     const len = native_sdk_appkit_clipboard_read(self.host, buffer.ptr, buffer.len);
@@ -1179,15 +1240,87 @@ fn measureTextAdvances(context: ?*anyopaque, font_id: u64, size: f32, text: []co
 
 /// System image decoding (ImageIO raster codecs plus NSImage's SVG
 /// rasterizer) into straight-alpha RGBA8.
-fn decodeImage(context: ?*anyopaque, bytes: []const u8, buffer: []u8) anyerror!platform_mod.DecodedImage {
+fn decodeImage(context: ?*anyopaque, bytes: []const u8, buffer: []u8, max_pixels: usize) anyerror!platform_mod.DecodedImage {
     _ = context;
     var width: usize = 0;
     var height: usize = 0;
-    return switch (native_sdk_appkit_decode_image(bytes.ptr, bytes.len, buffer.ptr, buffer.len, &width, &height)) {
+    return switch (native_sdk_appkit_decode_image(bytes.ptr, bytes.len, buffer.ptr, buffer.len, max_pixels, &width, &height)) {
         1 => .{ .width = width, .height = height, .rgba8 = buffer[0 .. width * height * 4] },
         -1 => error.ImageTooLarge,
         else => error.ImageDecodeFailed,
     };
+}
+
+test "mac image decoder keeps ImageIO thumbnail rounding inside the pixel cap" {
+    // The Objective-C probe is compiled and linked only for macOS test
+    // artifacts (build.zig's target-gated image_fit_test.m source). Keep
+    // every other host from referencing its symbol at link time.
+    if (comptime builtin.os.tag != .macos) return error.SkipZigTest;
+
+    // ImageIO derives the minor dimension from ThumbnailMaxPixelSize and
+    // rounds it. 537x503 at the default 262,144-pixel target used to ask
+    // for a 529px major side and return 529x496 = 262,384 pixels, which
+    // the runtime correctly rejected as ImageTooLarge. The host must leave
+    // enough headroom for that platform rounding before it asks ImageIO.
+    const source_width: usize = 537;
+    const source_height: usize = 503;
+    const source_pixels = try std.testing.allocator.alloc(u8, source_width * source_height * 4);
+    defer std.testing.allocator.free(source_pixels);
+    var offset: usize = 0;
+    while (offset < source_pixels.len) : (offset += 4) {
+        source_pixels[offset..][0..4].* = .{ 23, 91, 177, 255 };
+    }
+
+    const encoded_len = try canvas.png.encodedRgba8ByteLen(source_width, source_height);
+    const encoded = try std.testing.allocator.alloc(u8, encoded_len);
+    defer std.testing.allocator.free(encoded);
+    var writer = std.Io.Writer.fixed(encoded);
+    try canvas.png.writeRgba8(&writer, source_width, source_height, source_pixels);
+
+    const max_pixels: usize = 512 * 512;
+    var decoded_width: usize = 0;
+    var decoded_height: usize = 0;
+    try std.testing.expectEqual(@as(c_int, 1), native_sdk_test_imageio_thumbnail_dimensions(
+        writer.buffered().ptr,
+        writer.buffered().len,
+        source_width,
+        source_height,
+        max_pixels,
+        &decoded_width,
+        &decoded_height,
+    ));
+    try std.testing.expect(decoded_width > 0 and decoded_height > 0);
+    try std.testing.expect(decoded_width * decoded_height <= max_pixels);
+
+    // A source panorama may exceed the decoded-axis ceiling. The host must
+    // request a bounded thumbnail instead of rejecting the source metadata.
+    const panorama_width = platform_mod.max_decoded_image_dimension + 1;
+    const panorama_pixels = try std.testing.allocator.alloc(u8, panorama_width * 4);
+    defer std.testing.allocator.free(panorama_pixels);
+    offset = 0;
+    while (offset < panorama_pixels.len) : (offset += 4) {
+        panorama_pixels[offset..][0..4].* = .{ 47, 113, 191, 255 };
+    }
+    const panorama_encoded_len = try canvas.png.encodedRgba8ByteLen(panorama_width, 1);
+    const panorama_encoded = try std.testing.allocator.alloc(u8, panorama_encoded_len);
+    defer std.testing.allocator.free(panorama_encoded);
+    var panorama_writer = std.Io.Writer.fixed(panorama_encoded);
+    try canvas.png.writeRgba8(&panorama_writer, panorama_width, 1, panorama_pixels);
+
+    decoded_width = 0;
+    decoded_height = 0;
+    try std.testing.expectEqual(@as(c_int, 1), native_sdk_test_imageio_thumbnail_dimensions(
+        panorama_writer.buffered().ptr,
+        panorama_writer.buffered().len,
+        panorama_width,
+        1,
+        max_pixels,
+        &decoded_width,
+        &decoded_height,
+    ));
+    try std.testing.expect(decoded_width <= platform_mod.max_decoded_image_dimension);
+    try std.testing.expect(decoded_height > 0);
+    try std.testing.expect(decoded_width * decoded_height <= max_pixels);
 }
 
 fn writeClipboard(context: ?*anyopaque, text: []const u8) anyerror!void {
@@ -1263,6 +1396,21 @@ fn titlebarStyleInt(style: platform_mod.WindowTitlebarStyle) c_int {
     };
 }
 
+fn initialPlacementInt(placement: platform_mod.WindowInitialPlacement) c_int {
+    return switch (placement) {
+        .restored => 0,
+        .explicit => 1,
+        .default => 2,
+    };
+}
+
+fn restorePolicyInt(policy: platform_mod.WindowRestorePolicy) c_int {
+    return switch (policy) {
+        .clamp_to_visible_screen => 0,
+        .center_on_primary => 1,
+    };
+}
+
 fn showModeInt(mode: platform_mod.WindowShowMode) c_int {
     return switch (mode) {
         .immediate => 0,
@@ -1317,13 +1465,16 @@ fn createWindow(context: ?*anyopaque, options: platform_mod.WindowOptions) anyer
     try refuseUnsupportedTransparentWindow(self.web_engine, options);
     const title = options.resolvedTitle(self.app_info.app_name);
     const frame = options.default_frame;
-    if (native_sdk_appkit_create_window(self.host, options.id, title.ptr, title.len, options.label.ptr, options.label.len, frame.x, frame.y, frame.width, frame.height, if (options.restore_state) 1 else 0, if (options.resizable) 1 else 0, titlebarStyleInt(options.titlebar), showModeInt(options.show), windowFlags(options)) == 0) return error.CreateFailed;
+    if (native_sdk_appkit_create_window(self.host, options.id, title.ptr, title.len, options.label.ptr, options.label.len, frame.x, frame.y, frame.width, frame.height, if (options.restore_state) 1 else 0, initialPlacementInt(options.initial_placement), restorePolicyInt(options.restore_policy), if (options.resizable) 1 else 0, titlebarStyleInt(options.titlebar), showModeInt(options.show), windowFlags(options)) == 0) return error.CreateFailed;
     applyWindowContentMinSize(self.host, options.id, options.min_width, options.min_height);
     applyWindowClosePolicy(self.host, options.id, options.close_policy);
     return .{
         .id = options.id,
         .label = options.label,
         .title = title,
+        // Placement can alter the origin synchronously in AppKit; the host's
+        // window_frame_changed event reports that actual frame immediately
+        // after startup/create and replaces this requested-frame placeholder.
         .frame = frame,
         .scale_factor = 1,
         .open = true,
@@ -1350,6 +1501,11 @@ fn minimizeWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerr
 fn hideWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!void {
     const self: *MacPlatform = @ptrCast(@alignCast(context.?));
     if (native_sdk_appkit_hide_window(self.host, window_id) == 0) return error.WindowNotFound;
+}
+
+fn setWindowFullscreen(context: ?*anyopaque, window_id: platform_mod.WindowId, fullscreen: bool) anyerror!void {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    if (native_sdk_appkit_set_window_fullscreen(self.host, window_id, if (fullscreen) 1 else 0) == 0) return error.WindowNotFound;
 }
 
 fn showWindow(context: ?*anyopaque, window_id: platform_mod.WindowId) anyerror!void {
@@ -1984,6 +2140,7 @@ fn updateWidgetAccessibility(context: ?*anyopaque, snapshot: platform_mod.Widget
     for (snapshot.nodes, 0..) |node, index| {
         nodes[index] = .{
             .id = node.id,
+            .parent_id = node.parent_id orelse 0,
             .role = @intFromEnum(node.role),
             .label = node.label.ptr,
             .label_len = node.label.len,
@@ -2074,6 +2231,7 @@ fn appKitCursor(cursor: platform_mod.Cursor) c_int {
         .pointing_hand => 1,
         .text => 2,
         .resize_horizontal => 3,
+        .resize_vertical => 4,
     };
 }
 
@@ -2580,6 +2738,8 @@ fn createTray(context: ?*anyopaque, status_item_id: platform_mod.StatusItemId, o
         @intFromEnum(presentation.tone),
         presentation.icon_opacity,
         if (presentation.monospaced) 1 else 0,
+        presentation.font_size,
+        @intFromEnum(presentation.font_weight),
         options.activation_command.ptr,
         options.activation_command.len,
         options.alternate_activation_command.ptr,
@@ -2629,6 +2789,65 @@ fn updateTrayMenu(context: ?*anyopaque, status_item_id: platform_mod.StatusItemI
             (@as(u32, @intFromBool(item.modifiers.shift)) << 4);
     }
     native_sdk_appkit_update_tray_menu(self.host, status_item_id, &ids, &labels, &label_lens, &separators, &enabled_flags, &details, &detail_lens, &roles, &keys, &key_lens, &modifiers, count);
+
+    var segment_options: [max_tray_items * platform_mod.max_tray_segment_options]AppKitTraySegmentOption = undefined;
+    var segmented_rows: [max_tray_items]AppKitTraySegmentedRow = undefined;
+    var metric_rows: [max_tray_items]AppKitTrayMetricRow = undefined;
+    var chart_rows: [max_tray_items]AppKitTrayChartRow = undefined;
+    var option_count: usize = 0;
+    var segmented_count: usize = 0;
+    var metric_count: usize = 0;
+    var chart_count: usize = 0;
+    for (items[0..count], 0..) |item, row_index| {
+        if (item.segmented) |segmented| {
+            const start = option_count;
+            for (segmented.options) |option| {
+                segment_options[option_count] = .{
+                    .item_id = option.id,
+                    .label = option.label.ptr,
+                    .label_len = option.label.len,
+                    .selected = if (option.selected) 1 else 0,
+                    .enabled = if (option.enabled) 1 else 0,
+                };
+                option_count += 1;
+            }
+            segmented_rows[segmented_count] = .{
+                .row_index = row_index,
+                .options = segment_options[start..option_count].ptr,
+                .option_count = option_count - start,
+            };
+            segmented_count += 1;
+        }
+        if (item.metric) |metric| {
+            metric_rows[metric_count] = .{
+                .row_index = row_index,
+                .primary_text = metric.primary_text.ptr,
+                .primary_text_len = metric.primary_text.len,
+                .secondary_text = metric.secondary_text.ptr,
+                .secondary_text_len = metric.secondary_text.len,
+                .accessibility_label = metric.accessibility_label.ptr,
+                .accessibility_label_len = metric.accessibility_label.len,
+            };
+            metric_count += 1;
+        }
+        if (item.chart) |chart| {
+            chart_rows[chart_count] = .{
+                .row_index = row_index,
+                .values = chart.values.ptr,
+                .value_count = chart.values.len,
+                .min_value = chart.min_value,
+                .max_value = chart.max_value,
+                .leading_caption = chart.leading_caption.ptr,
+                .leading_caption_len = chart.leading_caption.len,
+                .trailing_summary = chart.trailing_summary.ptr,
+                .trailing_summary_len = chart.trailing_summary.len,
+                .accessibility_label = chart.accessibility_label.ptr,
+                .accessibility_label_len = chart.accessibility_label.len,
+            };
+            chart_count += 1;
+        }
+    }
+    native_sdk_appkit_update_tray_rich_rows(self.host, status_item_id, &segmented_rows, segmented_count, &metric_rows, metric_count, &chart_rows, chart_count);
 }
 
 fn updateTrayTitle(context: ?*anyopaque, status_item_id: platform_mod.StatusItemId, title: []const u8) anyerror!void {
@@ -2638,7 +2857,7 @@ fn updateTrayTitle(context: ?*anyopaque, status_item_id: platform_mod.StatusItem
 
 fn updateTrayPresentation(context: ?*anyopaque, status_item_id: platform_mod.StatusItemId, presentation: platform_mod.TrayPresentation) anyerror!void {
     const self: *MacPlatform = @ptrCast(@alignCast(context.?));
-    native_sdk_appkit_update_tray_presentation(self.host, status_item_id, presentation.title.ptr, presentation.title.len, presentation.width, @intFromEnum(presentation.tone), presentation.icon_opacity, if (presentation.monospaced) 1 else 0);
+    native_sdk_appkit_update_tray_presentation(self.host, status_item_id, presentation.title.ptr, presentation.title.len, presentation.width, @intFromEnum(presentation.tone), presentation.icon_opacity, if (presentation.monospaced) 1 else 0, presentation.font_size, @intFromEnum(presentation.font_weight));
 }
 
 fn removeTray(context: ?*anyopaque, status_item_id: platform_mod.StatusItemId) anyerror!void {
@@ -2711,6 +2930,17 @@ test "mac status lifecycle hooks emit tray commands" {
     }
 }
 
+test "mac typed tray rows cross the AppKit ABI without text conventions" {
+    for ([_][]const u8{ @embedFile("appkit_host.m"), @embedFile("cef_host.mm") }) |source| {
+        try std.testing.expect(std.mem.indexOf(u8, source, "TraySegmentedView") != null);
+        try std.testing.expect(std.mem.indexOf(u8, source, "NSSegmentedControl") != null);
+        try std.testing.expect(std.mem.indexOf(u8, source, "TrayChartView") != null);
+        try std.testing.expect(std.mem.indexOf(u8, source, "native_sdk_appkit_update_tray_rich_rows") != null);
+        try std.testing.expect(std.mem.indexOf(u8, source, "range_selected") == null);
+        try std.testing.expect(std.mem.indexOf(u8, source, "chart|") == null);
+    }
+}
+
 test "mac status menu updates preserve the menu being opened" {
     for ([_][]const u8{ @embedFile("appkit_host.m"), @embedFile("cef_host.mm") }) |host_source| {
         try std.testing.expect(std.mem.indexOf(u8, host_source, "NSMenu *menu = entry.menu;") != null);
@@ -2745,11 +2975,36 @@ test "mac unrestored secondary windows cascade within the active screen" {
         try std.testing.expect(std.mem.indexOf(u8, host_source, "NSWindow *referenceWindow = NSApp.keyWindow ?: self.window;") != null);
         try std.testing.expect(std.mem.indexOf(u8, host_source, "NSMinX(referenceFrame) + 24.0") != null);
         try std.testing.expect(std.mem.indexOf(u8, host_source, "NSMaxY(referenceFrame) - 24.0") != null);
-        try std.testing.expect(std.mem.indexOf(u8, host_source, "if (!makeMain && referenceWindow)") != null);
+        // Only fresh/default windows under the default clamp policy cascade.
+        // center_on_primary deliberately keeps the preceding center placement.
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "if (initialPlacement == 2 && restorePolicy == 0 && !makeMain && referenceWindow)") != null);
         try std.testing.expect(std.mem.indexOf(u8, host_source, "NSRect visibleFrame = referenceScreen.visibleFrame;") != null);
         try std.testing.expect(std.mem.indexOf(u8, host_source, "NSMaxX(visibleFrame) - NSWidth(cascadedFrame)") != null);
         try std.testing.expect(std.mem.indexOf(u8, host_source, "NSMaxY(visibleFrame) - NSHeight(cascadedFrame)") != null);
         try std.testing.expect(std.mem.indexOf(u8, host_source, "[window setFrame:cascadedFrame display:NO]") != null);
+    }
+}
+
+test "both mac hosts distinguish restored explicit and default placement" {
+    for ([_][]const u8{ @embedFile("appkit_host.m"), @embedFile("cef_host.mm") }) |host_source| {
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "const BOOL restoredPlacement = initialPlacement == 0") != null);
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "initialPlacement == 2 || (restoredPlacement && restorePolicy == 1)") != null);
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "NativeSdkConstrainFrameToScreen(NSMakeRect(0, 0, width, height), primaryScreen)") != null);
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "NativeSdkConstrainFrame(NSMakeRect(x, y, width, height))") != null);
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "return [NSScreen screens].firstObject ?: [NSScreen mainScreen]") != null);
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "[window frameRectForContentRect:restoredContentFrame]") != null);
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "[window setFrame:restoredWindowFrame display:NO]") != null);
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "[window setFrame:NativeSdkCenterFrameOnScreen(window.frame, primaryScreen) display:NO]") != null);
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "initialPlacement == 2 && restorePolicy == 0 && !makeMain && referenceWindow") != null);
+    }
+}
+
+test "both mac hosts preserve valid secondary-display frames" {
+    for ([_][]const u8{ @embedFile("appkit_host.m"), @embedFile("cef_host.mm") }) |host_source| {
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "static NSScreen *NativeSdkScreenForFrame(NSRect frame)") != null);
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "NSArray<NSScreen *> *screens = [NSScreen screens]") != null);
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "NSIntersectionRect(frame, screen.visibleFrame)") != null);
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "NativeSdkConstrainFrameToScreen(frame, NativeSdkScreenForFrame(frame))") != null);
     }
 }
 
@@ -3039,6 +3294,62 @@ test "mac gpu surface input preserves key and text" {
     try std.testing.expectEqualStrings("\n", input.text);
     try std.testing.expect(input.modifiers.primary);
     try std.testing.expect(input.modifiers.shift);
+}
+
+test "mac file drop bridge preserves view label point and paths" {
+    const label = "kanban-canvas";
+    const paths = "/tmp/spec.txt\x00/tmp/design.pdf";
+    var event = std.mem.zeroes(AppKitEvent);
+    event.kind = .files_dropped;
+    event.window_id = 7;
+    event.view_label = label.ptr;
+    event.view_label_len = label.len;
+    event.x = 42.5;
+    event.y = 91.25;
+    event.drop_paths = paths.ptr;
+    event.drop_paths_len = paths.len;
+
+    var paths_buffer: [platform_mod.max_drop_paths][]const u8 = undefined;
+    const drop = fileDropEventFromAppKitEvent(&event, paths_buffer[0..]);
+    try std.testing.expectEqual(@as(platform_mod.WindowId, 7), drop.window_id);
+    try std.testing.expectEqualStrings("kanban-canvas", drop.view_label);
+    try std.testing.expectEqualDeep(geometry.PointF.init(42.5, 91.25), drop.point.?);
+    try std.testing.expectEqual(@as(usize, 2), drop.paths.len);
+    try std.testing.expectEqualStrings("/tmp/spec.txt", drop.paths[0]);
+    try std.testing.expectEqualStrings("/tmp/design.pdf", drop.paths[1]);
+}
+
+test "mac file drops and pointer input share the host y-down conversion" {
+    const host_source = @embedFile("appkit_host.m");
+    try std.testing.expectEqual(@as(usize, 5), std.mem.count(u8, host_source, "NativeSdkViewLocalYDownPoint("));
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        host_source,
+        "if (!view.isFlipped) point.y = view.bounds.size.height - point.y;",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        host_source,
+        "const NSPoint yDownPoint = NativeSdkViewLocalYDownPoint(self, point);",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        host_source,
+        "NativeSdkViewLocalYDownPoint(self, [self convertPoint:sender.draggingLocation fromView:nil])",
+    ) != null);
+
+    const label = "canvas";
+    var event = std.mem.zeroes(AppKitEvent);
+    event.view_label = label.ptr;
+    event.view_label_len = label.len;
+    event.x = 128.5;
+    event.y = 73.25;
+
+    var paths_buffer: [platform_mod.max_drop_paths][]const u8 = undefined;
+    const drop = fileDropEventFromAppKitEvent(&event, paths_buffer[0..]);
+    const input = gpuSurfaceInputEventFromAppKitEvent(&event);
+    try std.testing.expectEqual(input.x, drop.point.?.x);
+    try std.testing.expectEqual(input.y, drop.point.?.y);
 }
 
 test "mac gpu surface input preserves ime composition cursor" {

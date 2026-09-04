@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const geometry = @import("geometry");
 const canvas = @import("root.zig");
 const text_model = @import("text.zig");
@@ -27,6 +28,8 @@ pub const WidgetHit = struct {
     depth: usize,
     index: usize,
     state: WidgetState,
+    /// Relevant for divider cursor/input semantics; horizontal elsewhere.
+    split_axis: canvas.SplitAxis = .horizontal,
     /// Semantic role of the hit widget (kind alone cannot distinguish a
     /// link hotspot from plain text, and links want a pointer cursor).
     role: WidgetRole = .none,
@@ -71,6 +74,13 @@ pub const WidgetPointerEvent = struct {
     /// Shift on pointer-down to extend from the existing selection
     /// anchor instead of replacing it with a collapsed caret.
     modifiers: WidgetKeyboardModifiers = .{},
+    /// Runtime-stamped outcome for a release that selected a radio:
+    /// true when retained selection actually changed, false when the
+    /// already-selected radio was activated again, null when this event
+    /// was not a radio selection (or never crossed the runtime seam).
+    /// Typed dispatch uses the stamp to keep `on_change` edge-triggered
+    /// while preserving the legacy toggle/press activation fallbacks.
+    radio_selection_changed: ?bool = null,
 };
 
 pub const WidgetKeyboardPhase = enum {
@@ -105,6 +115,24 @@ pub const WidgetKeyboardEvent = struct {
     /// it to tell "selection followed focus onto me" (dispatch select)
     /// from "an arrow landed on me in place" (collapse/expand intent).
     focus_moved: bool = false,
+    /// True when the nearest `radio_group` scope owns this
+    /// Arrow/Home/End key. Unlike `focus_moved`, this stays true when the
+    /// target is already at the requested edge or is the group's only
+    /// focusable radio, so the key cannot leak to an app-level fallback.
+    /// Bare radios deliberately leave this false: they retain their
+    /// legacy focus-only spatial navigation.
+    radio_group_navigation: bool = false,
+    /// Whether this radio-group navigation should select the routed
+    /// target. A real focus move always selects; an in-place move selects
+    /// only when the current radio was unchecked, avoiding duplicate
+    /// change dispatches for Home-on-first / End-on-last.
+    radio_group_selection: bool = false,
+    /// Runtime-stamped outcome for a radio select intent. Space/Enter and
+    /// radio-group navigation set this to the retained mutation result;
+    /// null means the event was not a radio selection (or was routed by a
+    /// direct Tree consumer). This keeps `on_change` tied to a transition,
+    /// not merely to an activation key.
+    radio_selection_changed: ?bool = null,
     edit: ?TextInputEvent = null,
     /// True when the runtime clamped a clipboard paste to fit capacity
     /// before building `edit`; apps that care about lost bytes must check
@@ -515,6 +543,7 @@ fn widgetKeyboardKeyDownTextEditEvent(event: WidgetKeyboardEvent) ?TextInputEven
     if (widgetKeyboardCommandTextNavigationEvent(event)) |edit| return edit;
     if (widgetKeyboardWordTextNavigationEvent(event)) |edit| return edit;
     if (widgetKeyboardWordDeleteTextEditEvent(event)) |edit| return edit;
+    if (widgetKeyboardLineDeleteTextEditEvent(event)) |edit| return edit;
     if (event.modifiers.hasNavigationModifier()) return null;
     if (std.ascii.eqlIgnoreCase(event.key, "backspace")) return .delete_backward;
     if (std.ascii.eqlIgnoreCase(event.key, "delete")) return .delete_forward;
@@ -541,11 +570,47 @@ fn widgetKeyboardWordTextNavigationEvent(event: WidgetKeyboardEvent) ?TextInputE
 }
 
 fn widgetKeyboardWordDeleteTextEditEvent(event: WidgetKeyboardEvent) ?TextInputEvent {
-    if (event.modifiers.super or event.modifiers.shift) return null;
+    return widgetKeyboardWordDeleteTextEditEventForPlatform(builtin.os.tag, event);
+}
+
+fn widgetKeyboardWordDeleteTextEditEventForPlatform(comptime os_tag: @TypeOf(builtin.os.tag), event: WidgetKeyboardEvent) ?TextInputEvent {
+    // Ctrl-primary hosts project Ctrl into BOTH `control` and `super`.
+    // Accept that folded shape off macOS so Ctrl+Backspace keeps its
+    // platform word-delete meaning; a bare Super/Meta chord stays inert.
+    if (event.modifiers.shift) return null;
+    if (event.modifiers.super) {
+        if (comptime os_tag == .macos) return null;
+        if (!event.modifiers.control) return null;
+    }
     if (event.modifiers.alt == event.modifiers.control) return null;
     if (std.ascii.eqlIgnoreCase(event.key, "backspace")) return .delete_word_backward;
     if (std.ascii.eqlIgnoreCase(event.key, "delete")) return .delete_word_forward;
     return null;
+}
+
+fn widgetKeyboardLineDeleteTextEditEvent(event: WidgetKeyboardEvent) ?TextInputEvent {
+    return widgetKeyboardLineDeleteTextEditEventForPlatform(builtin.os.tag, event);
+}
+
+fn widgetKeyboardLineDeleteTextEditEventForPlatform(comptime os_tag: @TypeOf(builtin.os.tag), event: WidgetKeyboardEvent) ?TextInputEvent {
+    // Command+Backspace is Cocoa's deleteToBeginningOfLine:. Keep it
+    // macOS-only: elsewhere Primary is Ctrl and belongs to word delete.
+    // Textareas deliberately use the hard newline boundary in v1; visual
+    // soft-wrap deletion can layer on runtime geometry in a follow-up.
+    if (comptime os_tag != .macos) return null;
+    if (!event.modifiers.super or event.modifiers.control or event.modifiers.alt) return null;
+    if (std.ascii.eqlIgnoreCase(event.key, "backspace")) return .delete_to_line_start;
+    return null;
+}
+
+/// Resolve the generic keyboard vocabulary against a concrete editor kind.
+/// A single-line field presents model-provided line breaks as spaces, so its
+/// Command+Backspace target is always offset 0; a textarea keeps the hard-line
+/// boundary carried by `.delete_to_line_start`.
+pub fn widgetKeyboardTextEditEventForWidget(widget: Widget, event: WidgetKeyboardEvent) ?TextInputEvent {
+    const edit = event.textEditEvent() orelse return null;
+    if (edit == .delete_to_line_start and widgetKindSingleLineTextEntry(widget.kind)) return .delete_to_start;
+    return edit;
 }
 
 fn widgetKeyboardSelectAllTextEditEvent(event: WidgetKeyboardEvent) ?TextInputEvent {
@@ -562,6 +627,9 @@ pub fn widgetKeyboardControlIntent(widget: Widget, keyboard: WidgetKeyboardEvent
     // kind switch.
     if (widget.semantics.role == .treeitem) {
         if (widgetTreeItemKeyboardControlIntent(widget, keyboard)) |intent| return intent;
+    }
+    if (widget.kind == .radio) {
+        if (widgetRadioKeyboardControlIntent(widget, keyboard)) |intent| return intent;
     }
     return switch (widget.kind) {
         .button, .icon_button => if (isWidgetActivationKey(keyboard.key))
@@ -605,11 +673,10 @@ pub fn widgetKeyboardControlIntent(widget: Widget, keyboard: WidgetKeyboardEvent
             }
         else
             null,
-        // The split divider is the ARIA separator: horizontal arrows
-        // adjust the parent split's fraction, Home/End jump to the
-        // clamp edges (the runtime clamps against the panes' min
-        // widths when it applies the value).
-        .split_divider => if (widgetSplitDividerKeyboardValue(widget.value, keyboard)) |next_value|
+        // The split divider is the ARIA separator: arrows along its axis
+        // adjust the parent split's fraction, Home/End jump to the clamp
+        // edges (the runtime clamps against the panes' main-axis minimums).
+        .split_divider => if (widgetSplitDividerKeyboardValueForAxis(widget.value, widget.runtime_flags.split_axis, keyboard)) |next_value|
             .{
                 .kind = .set_value,
                 .actions = .{
@@ -682,6 +749,9 @@ fn widgetSemanticPressControlIntent(widget: Widget, actions: WidgetActions) Widg
 }
 
 pub fn isWidgetActivationKey(key: []const u8) bool {
+    // Host adapters normalize the physical Return key to "enter" before
+    // it reaches this canonical event vocabulary. AppKit maps both its
+    // carriage-return key event and insertNewline: selector to that name.
     return std.ascii.eqlIgnoreCase(key, "space") or std.ascii.eqlIgnoreCase(key, "enter");
 }
 
@@ -697,6 +767,43 @@ pub fn isWidgetTextEntry(widget: Widget) bool {
         .input, .text_field, .search_field, .combobox, .textarea => true,
         else => false,
     };
+}
+
+test "line delete is macOS-only and folded Ctrl-primary remains word delete elsewhere" {
+    const command_backspace = WidgetKeyboardEvent{
+        .phase = .key_down,
+        .key = "backspace",
+        .modifiers = .{ .super = true },
+    };
+    try std.testing.expectEqual(TextInputEvent.delete_to_line_start, widgetKeyboardLineDeleteTextEditEventForPlatform(.macos, command_backspace).?);
+    try std.testing.expect(widgetKeyboardLineDeleteTextEditEventForPlatform(.linux, command_backspace) == null);
+    try std.testing.expect(widgetKeyboardLineDeleteTextEditEventForPlatform(.windows, command_backspace) == null);
+
+    const folded_control_backspace = WidgetKeyboardEvent{
+        .phase = .key_down,
+        .key = "backspace",
+        .modifiers = .{ .super = true, .control = true },
+    };
+    try std.testing.expect(widgetKeyboardWordDeleteTextEditEventForPlatform(.macos, folded_control_backspace) == null);
+    try std.testing.expectEqual(TextInputEvent.delete_word_backward, widgetKeyboardWordDeleteTextEditEventForPlatform(.linux, folded_control_backspace).?);
+    try std.testing.expectEqual(TextInputEvent.delete_word_backward, widgetKeyboardWordDeleteTextEditEventForPlatform(.windows, folded_control_backspace).?);
+
+    const shifted_command_backspace = WidgetKeyboardEvent{
+        .phase = .key_down,
+        .key = "backspace",
+        .modifiers = .{ .super = true, .shift = true },
+    };
+    try std.testing.expectEqual(TextInputEvent.delete_to_line_start, widgetKeyboardLineDeleteTextEditEventForPlatform(.macos, shifted_command_backspace).?);
+
+    // Widget-kind resolution is downstream of platform recognition. Stamp
+    // the recognized semantic edit so these assertions stay host-neutral;
+    // the explicit-platform assertions above own the macOS chord mapping.
+    const recognized_line_delete = WidgetKeyboardEvent{
+        .phase = .key_down,
+        .edit = .delete_to_line_start,
+    };
+    try std.testing.expectEqual(TextInputEvent.delete_to_start, widgetKeyboardTextEditEventForWidget(.{ .kind = .input }, recognized_line_delete).?);
+    try std.testing.expectEqual(TextInputEvent.delete_to_line_start, widgetKeyboardTextEditEventForWidget(.{ .kind = .textarea }, recognized_line_delete).?);
 }
 
 /// The arrow keys that open a closed select/combobox trigger's picker
@@ -719,17 +826,29 @@ pub fn widgetSliderKeyboardValue(current: f32, keyboard: WidgetKeyboardEvent) ?f
     return null;
 }
 
-/// Fraction steps for the split divider: the slider's step sizes, on the
-/// horizontal axis only (the vertical arrows stay free for tree/list
-/// focus travel around the divider).
-pub fn widgetSplitDividerKeyboardValue(current: f32, keyboard: WidgetKeyboardEvent) ?f32 {
+/// Fraction steps for a split divider: the slider's step sizes along the
+/// split's axis. Cross-axis arrows stay free for surrounding focus travel.
+pub fn widgetSplitDividerKeyboardValueForAxis(current: f32, axis: canvas.SplitAxis, keyboard: WidgetKeyboardEvent) ?f32 {
     if (keyboard.phase != .key_down or keyboard.modifiers.hasNavigationModifier()) return null;
     const step: f32 = if (keyboard.modifiers.shift) 0.1 else 0.05;
-    if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowleft")) return current - step;
-    if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowright")) return current + step;
+    switch (axis) {
+        .horizontal => {
+            if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowleft")) return current - step;
+            if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowright")) return current + step;
+        },
+        .vertical => {
+            if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowup")) return current - step;
+            if (std.ascii.eqlIgnoreCase(keyboard.key, "arrowdown")) return current + step;
+        },
+    }
     if (std.ascii.eqlIgnoreCase(keyboard.key, "home")) return 0;
     if (std.ascii.eqlIgnoreCase(keyboard.key, "end")) return 1;
     return null;
+}
+
+/// Original horizontal helper retained for source compatibility.
+pub fn widgetSplitDividerKeyboardValue(current: f32, keyboard: WidgetKeyboardEvent) ?f32 {
+    return widgetSplitDividerKeyboardValueForAxis(current, .horizontal, keyboard);
 }
 
 /// The ARIA tree-row keymap, resolved on the routed keyboard target:
@@ -776,6 +895,28 @@ fn widgetTreeItemKeyboardControlIntent(widget: Widget, keyboard: WidgetKeyboardE
         return .{ .kind = .toggle, .actions = .{ .toggle = true } };
     }
     return null;
+}
+
+/// A radio inside a `radio_group` follows focus for the group's
+/// Arrow/Home/End keymap. Space/Enter continue through the ordinary
+/// activation arm below; radios outside a group never receive the
+/// `radio_group_selection` stamp and keep their old behavior.
+fn widgetRadioKeyboardControlIntent(widget: Widget, keyboard: WidgetKeyboardEvent) ?WidgetControlIntent {
+    if (!keyboard.radio_group_selection) return null;
+    const navigation_key = std.ascii.eqlIgnoreCase(keyboard.key, "arrowup") or
+        std.ascii.eqlIgnoreCase(keyboard.key, "arrowdown") or
+        std.ascii.eqlIgnoreCase(keyboard.key, "arrowleft") or
+        std.ascii.eqlIgnoreCase(keyboard.key, "arrowright") or
+        std.ascii.eqlIgnoreCase(keyboard.key, "home") or
+        std.ascii.eqlIgnoreCase(keyboard.key, "end");
+    if (!navigation_key) return null;
+    return .{
+        .kind = .select,
+        .actions = .{
+            .select = true,
+            .press = widget.command.len > 0,
+        },
+    };
 }
 
 pub fn widgetScrollKeyboardIntent(widget: Widget, keyboard: WidgetKeyboardEvent) ?WidgetControlIntent {

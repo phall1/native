@@ -22,7 +22,7 @@ const snapTextRange = text_model.snapTextRange;
 pub fn cursorForWidgetHit(hit: ?WidgetHit) WidgetCursor {
     const target = hit orelse return .arrow;
     if (target.role == .link and !target.state.disabled) return .pointing_hand;
-    return cursorForWidgetTarget(target.kind, target.state);
+    return cursorForWidgetTargetOnAxis(target.kind, target.state, target.split_axis);
 }
 
 /// The kind-level half of the register: I-beam over editable text (a
@@ -31,25 +31,39 @@ pub fn cursorForWidgetHit(hit: ?WidgetHit) WidgetCursor {
 /// arrow over everything else — including sliders, which keep the arrow
 /// at rest AND during a drag on every native platform. The pointing hand
 /// never comes from a kind; it is role-driven (`cursorForWidgetHit`).
+///
+/// This original entry point preserves horizontal divider behavior.
 pub fn cursorForWidgetTarget(kind: WidgetKind, state: WidgetState) WidgetCursor {
+    return cursorForWidgetTargetOnAxis(kind, state, .horizontal);
+}
+
+pub fn cursorForWidgetTargetOnAxis(kind: WidgetKind, state: WidgetState, split_axis: widget_model.SplitAxis) WidgetCursor {
     if (state.disabled) return .arrow;
     return switch (kind) {
         // The terminal joins the editable-text register: a click
         // focuses the session's input, and the I-beam advertises it —
         // the platform terminals' own convention.
         .input, .text_field, .search_field, .combobox, .textarea, .terminal => .text,
-        .resizable, .split_divider => .resize_horizontal,
+        .resizable => .resize_horizontal,
+        .split_divider => switch (split_axis) {
+            .horizontal => .resize_horizontal,
+            .vertical => .resize_vertical,
+        },
         else => .arrow,
     };
 }
 
+/// Focus follows the ACCESSIBILITY tree, not the paint: a widget the
+/// collector never emits cannot be a ring-focus stop, or Tab would land
+/// on a node assistive tech has no way to announce. So `decorative`
+/// (painted, unannounced) stands down here exactly like `hidden` does.
 pub fn semanticFocusable(widget: Widget, actions: WidgetActions) bool {
-    if (widget.id == 0 or widget.state.disabled or widget.semantics.hidden) return false;
+    if (widget.id == 0 or widget.state.disabled or widget.semantics.concealedFromAccessibility()) return false;
     return widget.semantics.focusable or widget.semantics.actions.focus or actions.focus or defaultFocusable(widget);
 }
 
 pub fn isFocusable(widget: Widget) bool {
-    if (widget.id == 0 or widget.state.disabled or widget.semantics.hidden) return false;
+    if (widget.id == 0 or widget.state.disabled or widget.semantics.concealedFromAccessibility()) return false;
     return widget.semantics.focusable or widget.semantics.actions.focus or defaultFocusable(widget);
 }
 
@@ -174,15 +188,15 @@ pub fn widgetKindClaimsPress(kind: WidgetKind) bool {
 
 /// Whether a press gesture stops at this widget instead of falling
 /// through to the nearest claiming ancestor: an interactive kind
-/// (`widgetKindClaimsPress`), or ANY widget with a bound press/toggle
-/// handler (`on_press`/`on_toggle` stamp `semantics.actions`, and
+/// (`widgetKindClaimsPress`), or ANY widget with a bound press/toggle/drag
+/// handler (`on_press`/`on_toggle`/`on_drag` stamp `semantics.actions`, and
 /// engine-owned `command` dispatch only exists on kinds already claiming).
 /// Disabled widgets never claim — the hit test skips them too, so a press
 /// on a disabled control keeps today's behavior of landing on whatever is
 /// around it.
 pub fn widgetClaimsPress(widget: Widget) bool {
     if (widget.id == 0 or widget.state.disabled) return false;
-    if (widget.semantics.actions.press or widget.semantics.actions.toggle) return true;
+    if (widget.semantics.actions.press or widget.semantics.actions.toggle or widget.semantics.actions.drag) return true;
     return widgetKindClaimsPress(widget.kind);
 }
 

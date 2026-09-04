@@ -49,7 +49,6 @@ pub const shell_windows = [_]native_sdk.ShellWindow{.{
     .title = "Native SDK Canvas Preview",
     .width = window_width,
     .height = window_height,
-    .restore_state = false,
     .views = &shell_views,
 }};
 pub const shell_scene: native_sdk.ShellConfig = .{ .windows = &shell_windows };
@@ -132,7 +131,10 @@ pub fn view(ui: *PreviewUi, model: *const Model) PreviewUi.Node {
 
 // ------------------------------------------------------ webview pane seam
 
-pub fn panes(model: *const Model, out: []PreviewApp.WebViewPane) usize {
+pub fn panes(model: *const Model, context: PreviewApp.ChromeContext, out: []PreviewApp.WebViewPane) usize {
+    // The preview webview is declared in the main window's scene, so
+    // only the main window's rebuild has an anchor widget for it.
+    if (!context.is_main) return 0;
     out[0] = .{
         .label = webview_label,
         .anchor = pane_anchor,
@@ -196,7 +198,6 @@ pub fn main(init: std.process.Init) !void {
         .window_title = "Native SDK Canvas Preview",
         .bundle_id = "dev.native_sdk.canvas_preview",
         .default_frame = geometry.RectF.init(0, 0, window_width, window_height),
-        .restore_state = false,
         .js_window_api = false,
         .security = .{
             .navigation = .{ .allowed_origins = &.{ "zero://inline", "zero://app", "https://example.com", "https://native-sdk.dev" } },

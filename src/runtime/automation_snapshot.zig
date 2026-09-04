@@ -30,6 +30,8 @@ pub fn RuntimeAutomationSnapshot(comptime Runtime: type) type {
                     .windows = self.automation_windows[0..1],
                     .views = &.{},
                     .widgets = &.{},
+                    .commands = self.options.commands,
+                    .menus = self.options.menus,
                     .diagnostics = automationDiagnostics(self),
                     .frame_profile = automationFrameProfile(self),
                     .trays = automationTrays(self),
@@ -44,16 +46,31 @@ pub fn RuntimeAutomationSnapshot(comptime Runtime: type) type {
                     .text_layout_line_budget = canvas_limits.max_canvas_text_layout_lines_per_view,
                 };
             }
+            var window_count: usize = 0;
             var view_count: usize = 0;
             var widget_count: usize = 0;
             var menu_item_count: usize = 0;
-            for (self.windows[0..count], 0..) |window, index| {
-                self.automation_windows[index] = .{
+            // CLOSED windows are skipped, not reported. A closed window
+            // keeps its runtime table slot (with `info.open = false`)
+            // until its label or id is re-created — `removeWindowAt` runs
+            // at re-creation, not at close — so `self.windows[0..count]`
+            // still carries every window the app has ever declared. Their
+            // views are gone from `self.views` the moment they close, so
+            // an unfiltered pass published a window line with no views
+            // under it: a ghost that made every automation assertion on
+            // window COUNT (a settings window that must close, a
+            // reconciled window set) pass against a window that is not on
+            // screen. The output index advances only for the windows that
+            // survive the filter.
+            for (self.windows[0..count]) |window| {
+                if (!window.info.open) continue;
+                self.automation_windows[window_count] = .{
                     .id = window.info.id,
                     .title = if (window.info.title.len > 0) window.info.title else title,
                     .bounds = window.info.frame,
                     .focused = window.info.focused,
                 };
+                window_count += 1;
                 if (view_count < self.automation_views.len) {
                     const views = self.listViews(window.info.id, self.automation_views[view_count..]);
                     view_count += views.len;
@@ -61,9 +78,11 @@ pub fn RuntimeAutomationSnapshot(comptime Runtime: type) type {
                 appendAutomationWidgets(self, window.info.id, &widget_count, &menu_item_count);
             }
             return .{
-                .windows = self.automation_windows[0..count],
+                .windows = self.automation_windows[0..window_count],
                 .views = self.automation_views[0..view_count],
                 .widgets = self.automation_widgets[0..widget_count],
+                .commands = self.options.commands,
+                .menus = self.options.menus,
                 .diagnostics = automationDiagnostics(self),
                 .frame_profile = automationFrameProfile(self),
                 .trays = automationTrays(self),
@@ -99,6 +118,9 @@ pub fn RuntimeAutomationSnapshot(comptime Runtime: type) type {
                         .role = item.role,
                         .key = item.key,
                         .modifiers = item.modifiers,
+                        .segmented = item.segmented,
+                        .metric = item.metric,
+                        .chart = item.chart,
                     };
                 }
                 self.automation_trays[tray_count] = .{
@@ -246,6 +268,7 @@ pub fn RuntimeAutomationSnapshot(comptime Runtime: type) type {
                         .text_selection = canvasTextRange(node.text_selection),
                         .text_composition = canvasTextRange(node.text_composition),
                         .context_menu = automationWidgetContextMenu(self, layout, node.id, menu_item_count),
+                        .context_menu_policy = automationWidgetContextMenuPolicy(layout, node.id),
                     };
                     widget_count.* += 1;
                 }
@@ -273,6 +296,12 @@ pub fn RuntimeAutomationSnapshot(comptime Runtime: type) type {
             }
             menu_item_count.* = start + count;
             return self.automation_widget_menu_items[start .. start + count];
+        }
+
+        fn automationWidgetContextMenuPolicy(layout: canvas.WidgetLayoutTree, id: canvas.ObjectId) []const u8 {
+            const policy = layout.contextMenuPolicyById(id);
+            if (policy == .automatic) return "";
+            return @tagName(policy);
         }
 
         pub fn frameDiagnostics(self: *Runtime) FrameDiagnostics {
