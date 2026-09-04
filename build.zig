@@ -620,6 +620,17 @@ pub fn build(b: *std.Build) void {
         .windows => "windows",
     };
 
+    const appkit_cell_grid_host_test_run = if (b.graph.host.result.os.tag == .macos) blk: {
+        const run = b.addSystemCommand(&.{ "sh", "scripts/test-appkit-cell-grid-host.sh" });
+        run.setCwd(b.path("."));
+        const step = b.step(
+            "test-appkit-cell-grid-host",
+            "Run the real AppKit binary cell-grid decoder, CoreText raster, and cache tests",
+        );
+        step.dependOn(&run.step);
+        break :blk run;
+    } else null;
+
     const test_step = b.step("test", "Run package and framework tests");
     test_step.dependOn(&b.addRunArtifact(build_graph_tests).step);
     test_step.dependOn(&b.addRunArtifact(geometry_tests).step);
@@ -636,6 +647,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(canvas_tests).step);
     test_step.dependOn(&b.addRunArtifact(record_store_tests).step);
     test_step.dependOn(&file_crash_run.step);
+    if (appkit_cell_grid_host_test_run) |run| test_step.dependOn(&run.step);
     for (desktop_test_shards) |shard_tests| {
         test_step.dependOn(&b.addRunArtifact(shard_tests).step);
     }
