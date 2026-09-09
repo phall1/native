@@ -3203,44 +3203,298 @@ static const CGFloat NativeSdkCellItalicTangent = 0.2;
  * Mirrors `CellGrid.face`: real companions win, a half-family is used
  * for the half it covers, and only what is missing is faked. */
 typedef struct {
+    unsigned long long regular;
+    unsigned long long bold;
+    unsigned long long italic;
+    unsigned long long boldItalic;
+} NativeSdkCellFontIds;
+
+typedef struct {
     unsigned long long fontId;
     BOOL syntheticBold;
     BOOL syntheticItalic;
 } NativeSdkCellFace;
 
-static NativeSdkCellFace NativeSdkCellFaceFor(NSDictionary *grid, uint16_t flags) {
+static NativeSdkCellFace NativeSdkCellFaceFor(NativeSdkCellFontIds fonts, uint16_t flags) {
     const BOOL wantBold = (flags & NativeSdkCellFlagBold) != 0;
     const BOOL wantItalic = (flags & NativeSdkCellFlagItalic) != 0;
-    const unsigned long long regular = (unsigned long long)NativeSdkPacketNumber(grid[@"font"], 1);
-    const unsigned long long bold = (unsigned long long)NativeSdkPacketNumber(grid[@"boldFont"], 0);
-    const unsigned long long italic = (unsigned long long)NativeSdkPacketNumber(grid[@"italicFont"], 0);
-    const unsigned long long boldItalic = (unsigned long long)NativeSdkPacketNumber(grid[@"boldItalicFont"], 0);
-    NativeSdkCellFace face = {regular, NO, NO};
+    NativeSdkCellFace face = {fonts.regular, NO, NO};
     if (wantBold && wantItalic) {
-        if (boldItalic != 0) { face.fontId = boldItalic; return face; }
-        if (bold != 0) { face.fontId = bold; face.syntheticItalic = YES; return face; }
-        if (italic != 0) { face.fontId = italic; face.syntheticBold = YES; return face; }
+        if (fonts.boldItalic != 0) { face.fontId = fonts.boldItalic; return face; }
+        if (fonts.bold != 0) { face.fontId = fonts.bold; face.syntheticItalic = YES; return face; }
+        if (fonts.italic != 0) { face.fontId = fonts.italic; face.syntheticBold = YES; return face; }
         face.syntheticBold = YES;
         face.syntheticItalic = YES;
         return face;
     }
     if (wantBold) {
-        if (bold != 0) { face.fontId = bold; return face; }
+        if (fonts.bold != 0) { face.fontId = fonts.bold; return face; }
         face.syntheticBold = YES;
         return face;
     }
     if (wantItalic) {
-        if (italic != 0) { face.fontId = italic; return face; }
+        if (fonts.italic != 0) { face.fontId = fonts.italic; return face; }
         face.syntheticItalic = YES;
         return face;
     }
     return face;
 }
 
+#ifdef NATIVE_SDK_APPKIT_CELL_GRID_TESTING
+static NSUInteger NativeSdkCellGridFontResolutionCount = 0;
+#endif
+
+static NSFont *NativeSdkCellGridResolveFont(unsigned long long fontId, CGFloat size) {
+#ifdef NATIVE_SDK_APPKIT_CELL_GRID_TESTING
+    NativeSdkCellGridFontResolutionCount += 1;
+#endif
+    return NativeSdkFontForFontId(fontId, size);
+}
+
 static void NativeSdkCellFillRect(NSRect rect, NSColor *color) {
     if (!color || NSIsEmptyRect(rect)) return;
     [color setFill];
     NSRectFillUsingOperation(rect, NSCompositingOperationSourceOver);
+}
+
+typedef struct {
+    __unsafe_unretained NSArray *cells;
+    NSUInteger cols;
+    NSPoint origin;
+    CGFloat cellWidth;
+    CGFloat cellHeight;
+    CGFloat baseline;
+    CGFloat size;
+    CGFloat thickness;
+    NativeSdkCellFace faces[4];
+    __unsafe_unretained NSFont *regularFont;
+    __unsafe_unretained NSFont *boldFont;
+    __unsafe_unretained NSFont *italicFont;
+    __unsafe_unretained NSFont *boldItalicFont;
+} NativeSdkCellGridDrawState;
+
+static NSFont *NativeSdkCellGridFontForStyle(const NativeSdkCellGridDrawState *state, NSUInteger style) {
+    switch (style) {
+    case 1: return state->boldFont;
+    case 2: return state->italicFont;
+    case 3: return state->boldItalicFont;
+    default: return state->regularFont;
+    }
+}
+
+static void NativeSdkCellGridDrawBackgrounds(const NativeSdkCellGridDrawState *state, CGFloat opacity) {
+    id previousValue = nil;
+    NSColor *previousColor = nil;
+    BOOL havePrevious = NO;
+    NSUInteger index = 0;
+    for (id cellObject in state->cells) {
+        NSDictionary *cell = NativeSdkPacketDictionary(cellObject);
+        NSUInteger column = index++;
+        if (!cell || column >= state->cols) continue;
+        uint16_t flags = (uint16_t)NativeSdkPacketNumber(cell[@"flags"], 0);
+        if (!(flags & NativeSdkCellFlagHasBackground)) continue;
+        id value = cell[@"bg"];
+        if (!havePrevious || value != previousValue) {
+            previousValue = value;
+            previousColor = NativeSdkPacketColor(value, opacity);
+            havePrevious = YES;
+        }
+        if (!previousColor) continue;
+        NativeSdkCellFillRect(
+            NSMakeRect(
+                state->origin.x + (CGFloat)column * state->cellWidth,
+                state->origin.y,
+                state->cellWidth,
+                state->cellHeight),
+            previousColor);
+    }
+}
+
+static void NativeSdkCellGridDrawGlyph(
+    NSString *cluster,
+    NSPoint pen,
+    CGFloat baselineY,
+    NSDictionary *attributes,
+    NativeSdkCellFace face,
+    CGFloat size
+) {
+    if (face.syntheticItalic) {
+        /* Shear about the BASELINE, the same axis and the same tangent
+         * the reference renderer bakes into its glyph affine. */
+        CGContextRef context = NSGraphicsContext.currentContext.CGContext;
+        CGContextSaveGState(context);
+        CGContextTranslateCTM(context, 0, baselineY);
+        CGContextConcatCTM(context, CGAffineTransformMake(1, 0, NativeSdkCellItalicTangent, 1, 0, 0));
+        CGContextTranslateCTM(context, 0, -baselineY);
+        [cluster drawAtPoint:pen withAttributes:attributes];
+        if (face.syntheticBold) {
+            [cluster drawAtPoint:NSMakePoint(pen.x + NativeSdkCellBoldOffset(size), pen.y) withAttributes:attributes];
+        }
+        CGContextRestoreGState(context);
+        return;
+    }
+    [cluster drawAtPoint:pen withAttributes:attributes];
+    if (face.syntheticBold) {
+        [cluster drawAtPoint:NSMakePoint(pen.x + NativeSdkCellBoldOffset(size), pen.y) withAttributes:attributes];
+    }
+}
+
+static void NativeSdkCellGridDrawCurlyUnderline(
+    const NativeSdkCellGridDrawState *state,
+    NSRect line,
+    NSColor *color
+) {
+    const CGFloat amplitude = state->thickness;
+    const CGFloat period = MAX(4, round(state->size / 3));
+    for (CGFloat step = 0; step < line.size.width; step += 1) {
+        CGFloat phase = fmod(step, period) / period;
+        CGFloat ramp = phase < 0.5 ? phase * 2 : (1 - phase) * 2;
+        NativeSdkCellFillRect(
+            NSMakeRect(line.origin.x + step, line.origin.y - amplitude + ramp * amplitude * 2, 1, state->thickness),
+            color);
+    }
+}
+
+static void NativeSdkCellGridDrawSegmentedUnderline(
+    NSRect line,
+    NSColor *color,
+    uint8_t style
+) {
+    const CGFloat period = style == 4 ? MAX(2, round(line.size.height * 2)) : MAX(4, round(line.size.height * 6));
+    const CGFloat on = style == 4 ? MAX(1, round(period * 0.5)) : MAX(2, round(period * 0.6));
+    for (CGFloat start = 0; start < line.size.width; start += period) {
+        CGFloat width = MIN(on, line.size.width - start);
+        NativeSdkCellFillRect(NSMakeRect(line.origin.x + start, line.origin.y, width, line.size.height), color);
+    }
+}
+
+static void NativeSdkCellGridDrawDecorations(
+    const NativeSdkCellGridDrawState *state,
+    NSDictionary *cell,
+    uint16_t flags,
+    CGFloat x,
+    CGFloat inkWidth,
+    NSColor *foreground,
+    CGFloat opacity,
+    id *previousUnderlineValue,
+    NSColor **previousUnderlineColor,
+    BOOL *havePreviousUnderline
+) {
+    if (flags & NativeSdkCellFlagOverline) {
+        NativeSdkCellFillRect(NSMakeRect(x, state->origin.y, inkWidth, state->thickness), foreground);
+    }
+    if (flags & NativeSdkCellFlagStrikethrough) {
+        NativeSdkCellFillRect(
+            NSMakeRect(
+                x,
+                state->origin.y + round(state->cellHeight * 0.55) - state->thickness,
+                inkWidth,
+                state->thickness),
+            foreground);
+    }
+    const uint8_t underlineStyle = NativeSdkCellUnderlineStyle(flags);
+    if (underlineStyle == 0) return;
+
+    NSColor *underlineColor = foreground;
+    if (flags & NativeSdkCellFlagHasUnderlineColor) {
+        id value = cell[@"ul"];
+        if (!*havePreviousUnderline || value != *previousUnderlineValue) {
+            *previousUnderlineValue = value;
+            *previousUnderlineColor = NativeSdkPacketColor(value, opacity);
+            *havePreviousUnderline = YES;
+        }
+        if (*previousUnderlineColor) underlineColor = *previousUnderlineColor;
+    }
+    const NSRect line = NSMakeRect(
+        x,
+        state->origin.y + state->cellHeight - state->thickness * 2,
+        inkWidth,
+        state->thickness);
+    switch (underlineStyle) {
+    case 1: /* single */
+        NativeSdkCellFillRect(line, underlineColor);
+        break;
+    case 2: /* double */
+        NativeSdkCellFillRect(line, underlineColor);
+        NativeSdkCellFillRect(
+            NSMakeRect(x, state->origin.y + state->cellHeight - state->thickness * 4, inkWidth, state->thickness),
+            underlineColor);
+        break;
+    case 3: /* curly: one-point ticks tracing a triangle wave */
+        NativeSdkCellGridDrawCurlyUnderline(state, line, underlineColor);
+        break;
+    case 4:   /* dotted */
+    case 5:   /* dashed */
+        NativeSdkCellGridDrawSegmentedUnderline(line, underlineColor, underlineStyle);
+        break;
+    default:
+        break;
+    }
+}
+
+static void NativeSdkCellGridDrawInk(const NativeSdkCellGridDrawState *state, CGFloat opacity) {
+    id previousForegroundValue = nil;
+    NSColor *previousForeground = nil;
+    BOOL havePreviousForeground = NO;
+    NSUInteger previousStyle = NSUIntegerMax;
+    NSDictionary *previousAttributes = nil;
+    id previousUnderlineValue = nil;
+    NSColor *previousUnderlineColor = nil;
+    BOOL havePreviousUnderline = NO;
+
+    NSUInteger index = 0;
+    for (id cellObject in state->cells) {
+        NSDictionary *cell = NativeSdkPacketDictionary(cellObject);
+        NSUInteger column = index++;
+        if (!cell || column >= state->cols) continue;
+        uint16_t flags = (uint16_t)NativeSdkPacketNumber(cell[@"flags"], 0);
+        const uint8_t widthKind = NativeSdkCellWidthKind(flags);
+        if (widthKind == 2) continue; /* spacer */
+
+        id foregroundValue = cell[@"fg"];
+        if (!havePreviousForeground || foregroundValue != previousForegroundValue) {
+            previousForegroundValue = foregroundValue;
+            previousForeground = NativeSdkPacketColor(foregroundValue, opacity);
+            previousAttributes = nil;
+            havePreviousForeground = YES;
+        }
+        if (!previousForeground) continue;
+
+        const CGFloat x = state->origin.x + (CGFloat)column * state->cellWidth;
+        const CGFloat inkWidth = widthKind == 1 ? state->cellWidth * 2 : state->cellWidth;
+        NSString *cluster = [cell[@"text"] isKindOfClass:[NSString class]] ? cell[@"text"] : nil;
+        if (cluster.length > 0) {
+            const NSUInteger style = flags & (NativeSdkCellFlagBold | NativeSdkCellFlagItalic);
+            if (!previousAttributes || previousStyle != style) {
+                NSFont *font = NativeSdkCellGridFontForStyle(state, style);
+                previousAttributes = font ? @{
+                    NSFontAttributeName : font,
+                    NSForegroundColorAttributeName : previousForeground,
+                } : nil;
+                previousStyle = style;
+            }
+            if (previousAttributes) {
+                NativeSdkCellGridDrawGlyph(
+                    cluster,
+                    NSMakePoint(x, state->origin.y + state->baseline - state->size),
+                    state->origin.y + state->baseline,
+                    previousAttributes,
+                    state->faces[style],
+                    state->size);
+            }
+        }
+        NativeSdkCellGridDrawDecorations(
+            state,
+            cell,
+            flags,
+            x,
+            inkWidth,
+            previousForeground,
+            opacity,
+            &previousUnderlineValue,
+            &previousUnderlineColor,
+            &havePreviousUnderline);
+    }
 }
 
 static BOOL NativeSdkPacketDrawCellGrid(NSDictionary *grid, CGFloat opacity) {
@@ -3255,118 +3509,56 @@ static BOOL NativeSdkPacketDrawCellGrid(NSDictionary *grid, CGFloat opacity) {
     CGFloat baseline = NativeSdkPacketNumber(grid[@"baseline"], 0);
     CGFloat size = MAX(1, NativeSdkPacketNumber(grid[@"size"], 12));
     if (cellWidth <= 0 || cellHeight <= 0) return YES;
-    const CGFloat thickness = NativeSdkCellStrokeWidth(size);
 
-    /* Pass 1: backgrounds. */
-    NSUInteger index = 0;
-    for (id cellObject in cells) {
-        NSDictionary *cell = NativeSdkPacketDictionary(cellObject);
-        NSUInteger column = index++;
-        if (!cell || column >= cols) continue;
-        uint16_t flags = (uint16_t)NativeSdkPacketNumber(cell[@"flags"], 0);
-        if (!(flags & NativeSdkCellFlagHasBackground)) continue;
-        NSColor *background = NativeSdkPacketColor(cell[@"bg"], opacity);
-        if (!background) continue;
-        NativeSdkCellFillRect(NSMakeRect(origin.x + (CGFloat)column * cellWidth, origin.y, cellWidth, cellHeight), background);
-    }
-
-    /* Pass 2: ink and decorations. */
-    index = 0;
-    for (id cellObject in cells) {
-        NSDictionary *cell = NativeSdkPacketDictionary(cellObject);
-        NSUInteger column = index++;
-        if (!cell || column >= cols) continue;
-        uint16_t flags = (uint16_t)NativeSdkPacketNumber(cell[@"flags"], 0);
-        if (NativeSdkCellWidthKind(flags) == 2) continue; /* spacer */
-        NSColor *foreground = NativeSdkPacketColor(cell[@"fg"], opacity);
-        if (!foreground) continue;
-        const CGFloat x = origin.x + (CGFloat)column * cellWidth;
-        /* A wide cell inks and decorates across both of its columns. */
-        const CGFloat inkWidth = NativeSdkCellWidthKind(flags) == 1 ? cellWidth * 2 : cellWidth;
-
-        NSString *cluster = [cell[@"text"] isKindOfClass:[NSString class]] ? cell[@"text"] : nil;
-        if (cluster.length > 0) {
-            /* Face selection is per CELL, not per row: one row mixes
-             * regular, bold, and italic freely and every one of them
-             * inks at the same pen with the same advance. */
-            const NativeSdkCellFace face = NativeSdkCellFaceFor(grid, flags);
-            NSFont *cellFont = NativeSdkFontForFontId(face.fontId, size);
-            if (cellFont) {
-                const NSPoint pen = NSMakePoint(x, origin.y + baseline - size);
-                NSDictionary *attributes = @{
-                    NSFontAttributeName : cellFont,
-                    NSForegroundColorAttributeName : foreground,
-                };
-                if (face.syntheticItalic) {
-                    /* Shear about the BASELINE, the same axis and the
-                     * same tangent the reference renderer bakes into its
-                     * glyph affine. Saved/restored per cell so the shear
-                     * cannot leak into a neighbour's ink. */
-                    CGContextRef context = NSGraphicsContext.currentContext.CGContext;
-                    CGContextSaveGState(context);
-                    const CGFloat baselineY = origin.y + baseline;
-                    CGContextTranslateCTM(context, 0, baselineY);
-                    CGContextConcatCTM(context, CGAffineTransformMake(1, 0, NativeSdkCellItalicTangent, 1, 0, 0));
-                    CGContextTranslateCTM(context, 0, -baselineY);
-                    [cluster drawAtPoint:pen withAttributes:attributes];
-                    if (face.syntheticBold) {
-                        [cluster drawAtPoint:NSMakePoint(pen.x + NativeSdkCellBoldOffset(size), pen.y) withAttributes:attributes];
-                    }
-                    CGContextRestoreGState(context);
-                } else {
-                    [cluster drawAtPoint:pen withAttributes:attributes];
-                    if (face.syntheticBold) {
-                        [cluster drawAtPoint:NSMakePoint(pen.x + NativeSdkCellBoldOffset(size), pen.y) withAttributes:attributes];
-                    }
-                }
+    const NativeSdkCellFontIds fontIds = {
+        .regular = (unsigned long long)NativeSdkPacketNumber(grid[@"font"], 1),
+        .bold = (unsigned long long)NativeSdkPacketNumber(grid[@"boldFont"], 0),
+        .italic = (unsigned long long)NativeSdkPacketNumber(grid[@"italicFont"], 0),
+        .boldItalic = (unsigned long long)NativeSdkPacketNumber(grid[@"boldItalicFont"], 0),
+    };
+    NativeSdkCellFace faces[4] = {
+        NativeSdkCellFaceFor(fontIds, 0),
+        NativeSdkCellFaceFor(fontIds, NativeSdkCellFlagBold),
+        NativeSdkCellFaceFor(fontIds, NativeSdkCellFlagItalic),
+        NativeSdkCellFaceFor(fontIds, NativeSdkCellFlagBold | NativeSdkCellFlagItalic),
+    };
+    /* Font lookup is synchronized and formats a cache key. Resolve each
+     * DISTINCT row face once instead of repeating that work for every
+     * occupied cell while parallel row fills contend on the same table. */
+    NSFont *__strong faceFonts[4] = {nil, nil, nil, nil};
+    for (NSUInteger index = 0; index < 4; index += 1) {
+        BOOL reused = NO;
+        for (NSUInteger previous = 0; previous < index; previous += 1) {
+            if (faces[index].fontId == faces[previous].fontId) {
+                faceFonts[index] = faceFonts[previous];
+                reused = YES;
+                break;
             }
         }
-
-        if (flags & NativeSdkCellFlagOverline) {
-            NativeSdkCellFillRect(NSMakeRect(x, origin.y, inkWidth, thickness), foreground);
-        }
-        if (flags & NativeSdkCellFlagStrikethrough) {
-            NativeSdkCellFillRect(NSMakeRect(x, origin.y + round(cellHeight * 0.55) - thickness, inkWidth, thickness), foreground);
-        }
-        const uint8_t underlineStyle = NativeSdkCellUnderlineStyle(flags);
-        if (underlineStyle == 0) continue;
-        NSColor *underlineColor = (flags & NativeSdkCellFlagHasUnderlineColor)
-            ? NativeSdkPacketColor(cell[@"ul"], opacity)
-            : foreground;
-        if (!underlineColor) underlineColor = foreground;
-        const NSRect line = NSMakeRect(x, origin.y + cellHeight - thickness * 2, inkWidth, thickness);
-        switch (underlineStyle) {
-        case 1: /* single */
-            NativeSdkCellFillRect(line, underlineColor);
-            break;
-        case 2: /* double */
-            NativeSdkCellFillRect(line, underlineColor);
-            NativeSdkCellFillRect(NSMakeRect(x, origin.y + cellHeight - thickness * 4, inkWidth, thickness), underlineColor);
-            break;
-        case 3: { /* curly: one-point ticks tracing a triangle wave */
-            const CGFloat amplitude = thickness;
-            const CGFloat period = MAX(4, round(size / 3));
-            for (CGFloat step = 0; step < line.size.width; step += 1) {
-                CGFloat phase = fmod(step, period) / period;
-                CGFloat ramp = phase < 0.5 ? phase * 2 : (1 - phase) * 2;
-                NativeSdkCellFillRect(NSMakeRect(line.origin.x + step, line.origin.y - amplitude + ramp * amplitude * 2, 1, thickness), underlineColor);
-            }
-            break;
-        }
-        case 4:   /* dotted */
-        case 5: { /* dashed */
-            const CGFloat period = underlineStyle == 4 ? MAX(2, round(line.size.height * 2)) : MAX(4, round(line.size.height * 6));
-            const CGFloat on = underlineStyle == 4 ? MAX(1, round(period * 0.5)) : MAX(2, round(period * 0.6));
-            for (CGFloat start = 0; start < line.size.width; start += period) {
-                CGFloat width = MIN(on, line.size.width - start);
-                NativeSdkCellFillRect(NSMakeRect(line.origin.x + start, line.origin.y, width, line.size.height), underlineColor);
-            }
-            break;
-        }
-        default:
-            break;
+        if (!reused) {
+            faceFonts[index] = NativeSdkCellGridResolveFont(faces[index].fontId, size);
         }
     }
+    NativeSdkCellGridDrawState state = {
+        .cells = cells,
+        .cols = cols,
+        .origin = origin,
+        .cellWidth = cellWidth,
+        .cellHeight = cellHeight,
+        .baseline = baseline,
+        .size = size,
+        .thickness = NativeSdkCellStrokeWidth(size),
+        .faces = {faces[0], faces[1], faces[2], faces[3]},
+        .regularFont = faceFonts[0],
+        .boldFont = faceFonts[1],
+        .italicFont = faceFonts[2],
+        .boldItalicFont = faceFonts[3],
+    };
+
+    /* Two passes remain mandatory: a following cell's background may
+     * overlap the previous cell's glyph ink. */
+    NativeSdkCellGridDrawBackgrounds(&state, opacity);
+    NativeSdkCellGridDrawInk(&state, opacity);
     return YES;
 }
 
@@ -3578,6 +3770,42 @@ static NSString *NativeSdkBinaryReadString(NativeSdkBinaryPacketReader *reader) 
     reader->offset += length;
     if (!value) reader->failed = YES;
     return value;
+}
+
+/* The cell stream is overwhelmingly one-byte terminal text. Keep the
+ * complete ASCII mapping once for the process instead of allocating and
+ * copying one NSString per occupied cell on every decoded frame. The
+ * table's identity is immutable Unicode scalar value -> NSString, its
+ * lifetime needs no font invalidation, and its exact 128-entry bound is
+ * independent of frame count. */
+static NSArray<NSString *> *NativeSdkCellAsciiClusters(void) {
+    static NSArray<NSString *> *clusters = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSMutableArray<NSString *> *values = [NSMutableArray arrayWithCapacity:128];
+        for (NSUInteger value = 0; value < 128; value += 1) {
+            unichar character = (unichar)value;
+            [values addObject:[NSString stringWithCharacters:&character length:1]];
+        }
+        clusters = [values copy];
+    });
+    return clusters;
+}
+
+static NSString *NativeSdkBinaryReadCellCluster(NativeSdkBinaryPacketReader *reader, uint8_t length) {
+    if (!NativeSdkBinaryHasBytes(reader, length)) return nil;
+    NSString *cluster = nil;
+    if (length == 1 && reader->bytes[reader->offset] < 128) {
+        cluster = NativeSdkCellAsciiClusters()[reader->bytes[reader->offset]];
+    } else {
+        cluster = [[NSString alloc] initWithBytes:reader->bytes + reader->offset
+                                          length:length
+                                        encoding:NSUTF8StringEncoding];
+    }
+    reader->offset += length;
+    /* Preserve the original cell decoder's invalid-cluster behavior:
+     * malformed UTF-8 is an empty cluster, not a framing refusal. */
+    return cluster ?: @"";
 }
 
 /* Stable wire codes for the command kind; must match the engine's
@@ -3891,6 +4119,9 @@ static NSDictionary *NativeSdkBinaryReadCellGrid(NativeSdkBinaryPacketReader *re
     uint8_t fg[4] = {0, 0, 0, 0};
     uint8_t bg[4] = {0, 0, 0, 0};
     uint8_t underline[4] = {0, 0, 0, 0};
+    NSArray *foregroundValue = nil;
+    NSArray *backgroundValue = nil;
+    NSArray *underlineValue = nil;
     uint16_t cellFlags = 0;
     BOOL haveStyle = NO;
     for (uint32_t index = 0; index < cellCount; index++) {
@@ -3904,6 +4135,13 @@ static NSDictionary *NativeSdkBinaryReadCellGrid(NativeSdkBinaryPacketReader *re
             for (int channel = 0; channel < 4; channel++) underline[channel] = NativeSdkBinaryReadU8(reader);
             cellFlags = NativeSdkBinaryReadU16(reader);
             haveStyle = YES;
+            /* Style-delta runs share their immutable color values. This
+             * removes three arrays and twelve boxed numbers from every
+             * SAME cell, and gives the draw pass pointer-stable run
+             * identity for reusing NSColor and attribute objects. */
+            foregroundValue = @[ @(fg[0] / 255.0), @(fg[1] / 255.0), @(fg[2] / 255.0), @(fg[3] / 255.0) ];
+            backgroundValue = @[ @(bg[0] / 255.0), @(bg[1] / 255.0), @(bg[2] / 255.0), @(bg[3] / 255.0) ];
+            underlineValue = @[ @(underline[0] / 255.0), @(underline[1] / 255.0), @(underline[2] / 255.0), @(underline[3] / 255.0) ];
         } else if (!haveStyle) {
             /* "Same as the previous cell" with no previous cell. */
             reader->failed = YES;
@@ -3916,18 +4154,23 @@ static NSDictionary *NativeSdkBinaryReadCellGrid(NativeSdkBinaryPacketReader *re
                 reader->failed = YES;
                 return nil;
             }
-            if (!NativeSdkBinaryHasBytes(reader, length)) return nil;
-            cluster = [[NSString alloc] initWithBytes:reader->bytes + reader->offset length:length encoding:NSUTF8StringEncoding];
-            reader->offset += length;
-            if (!cluster) cluster = @"";
+            cluster = NativeSdkBinaryReadCellCluster(reader, length);
         }
         if (reader->failed) return nil;
-        NSMutableDictionary *cell = [NSMutableDictionary dictionaryWithCapacity:6];
-        cell[@"fg"] = @[ @(fg[0] / 255.0), @(fg[1] / 255.0), @(fg[2] / 255.0), @(fg[3] / 255.0) ];
-        cell[@"bg"] = @[ @(bg[0] / 255.0), @(bg[1] / 255.0), @(bg[2] / 255.0), @(bg[3] / 255.0) ];
-        cell[@"ul"] = @[ @(underline[0] / 255.0), @(underline[1] / 255.0), @(underline[2] / 255.0), @(underline[3] / 255.0) ];
-        cell[@"flags"] = @(cellFlags);
-        if (cluster) cell[@"text"] = cluster;
+        NSDictionary *cell = cluster
+            ? @{
+                @"fg" : foregroundValue,
+                @"bg" : backgroundValue,
+                @"ul" : underlineValue,
+                @"flags" : @(cellFlags),
+                @"text" : cluster,
+            }
+            : @{
+                @"fg" : foregroundValue,
+                @"bg" : backgroundValue,
+                @"ul" : underlineValue,
+                @"flags" : @(cellFlags),
+            };
         [cells addObject:cell];
     }
     if (reader->failed) return nil;
