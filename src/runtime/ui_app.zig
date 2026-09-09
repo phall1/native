@@ -3646,7 +3646,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             const watch_path: ?[]const u8 = if (markup_options) |m| m.watch_path else null;
             self.provenance.resetFiles();
             self.provenance.watching = watch_path != null and (if (markup_options) |m| m.io != null else false);
-            self.provenance.addFile(root_stamped, watch_path orelse "", std.hash.Wyhash.hash(0, root_source)) catch {};
+            self.provenance.addFile(root_stamped, root_stamped, watch_path orelse "", std.hash.Wyhash.hash(0, root_source)) catch {};
             const disk_prefix: []const u8 = if (watch_path) |path| (std.fs.path.dirname(path) orelse "") else "";
             for (self.provenance_closure.entries[0..self.provenance_closure.len]) |*entry| {
                 const stamped = entry.path[0..entry.path_len];
@@ -3659,7 +3659,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     std.fmt.bufPrint(&disk_buffer, "{s}/{s}", .{ disk_prefix, stamped }) catch ""
                 else
                     stamped;
-                self.provenance.addFile(stamped, disk, entry.hash) catch {};
+                self.provenance.addFile(root_stamped, stamped, disk, entry.hash) catch {};
             }
         }
 

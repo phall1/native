@@ -2709,21 +2709,19 @@ test "fragment provenance retains per-window source anchors across checked edits
     try harness.runtime.dispatchPlatformEvent(app, harness.null_platform.fireTimer(CounterApp.markup_watch_timer_id, 1_500_000).?);
     try std.testing.expectEqual(baseline_arena, state.markup_fragment_slots[0].arena_index);
 
-    // Use the production checked-edit engine on the retained source span.
-    // A semantic refusal leaves source bytes untouched.
-    var diagnostic: canvas.ui_markup.MarkupErrorInfo = .{};
+    // Exercise the same response-to-disk pipeline the CLI invokes, including
+    // invalid-edit and stale-hash refusals before any write.
     var edit_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer edit_arena.deinit();
-    const record = state.installed_provenance.?.find(main_id).?;
-    try std.testing.expectError(error.MarkupEdit, canvas.ui_markup.edit.applyChecked(edit_arena.allocator(), provenance_part, record.start, .{ .set_text = .{ .text = "<invalid>" } }, &diagnostic));
+    try std.testing.expectError(error.AutomationCommandFailed, canvas.ui_markup.writeback.apply(edit_arena.allocator(), io, response, .{ .set_text = .{ .text = "<invalid>" } }));
     const unmodified = try cwd.readFileAlloc(io, provenance_part_path, std.testing.allocator, .limited(4096));
     defer std.testing.allocator.free(unmodified);
     try std.testing.expectEqualStrings(provenance_part, unmodified);
-    const edited = try canvas.ui_markup.edit.applyChecked(edit_arena.allocator(), provenance_part, record.start, .{ .set_text = .{ .text = "Edited action" } }, &diagnostic);
-    try cwd.writeFile(io, .{ .sub_path = provenance_part_path, .data = edited });
-    // The CLI's loaded-hash guard must refuse a write before the watch
-    // adopts this save: the retained hash still describes the old bytes.
-    try std.testing.expect(state.installed_provenance.?.files[record.file].hash != std.hash.Wyhash.hash(0, edited));
+    _ = try canvas.ui_markup.writeback.apply(edit_arena.allocator(), io, response, .{ .set_text = .{ .text = "Edited action" } });
+    const edited = try cwd.readFileAlloc(io, provenance_part_path, edit_arena.allocator(), .limited(4096));
+    try std.testing.expectError(error.AutomationCommandFailed, canvas.ui_markup.writeback.apply(edit_arena.allocator(), io, response, .{ .set_text = .{ .text = "Stale overwrite" } }));
+    const after_refusal = try cwd.readFileAlloc(io, provenance_part_path, edit_arena.allocator(), .limited(4096));
+    try std.testing.expectEqualStrings(edited, after_refusal);
     try harness.runtime.dispatchPlatformEvent(app, harness.null_platform.fireTimer(CounterApp.markup_watch_timer_id, 2_000_000).?);
     try std.testing.expectEqual(main_id, findWidgetIdByText(state.tree.?, .button, "Edited action").?);
     try std.testing.expectEqual(secondary_id, findWidgetIdByText(state.window_slots[0].tree.?, .button, "Edited action").?);
@@ -2744,6 +2742,68 @@ test "fragment provenance retains per-window source anchors across checked edits
     try std.testing.expectEqual(main_id, findWidgetIdByText(state.tree.?, .button, "Source action").?);
     try expectFragmentAnchor(state.installed_provenance.?, main_id, provenance_main_path, provenance_part, "primary-chip/action");
     try expectFragmentAnchor(state.window_slots[0].provenance.?, secondary_id, provenance_secondary_path, provenance_part, "secondary-chip/action");
+}
+
+test "fragment provenance namespaces resolver stamps before production write-back" {
+    const io = std.testing.io;
+    const cwd = std.Io.Dir.cwd();
+    const root_path = provenance_dir ++ "/root.native";
+    // Root embeds resolver-relative paths; watched fragments stamp disk
+    // paths. These two import stamps collide but name DISTINCT disk files.
+    const root_part_path = provenance_dir ++ "/" ++ provenance_part_path;
+    const root_source = "<import src=\"" ++ provenance_part_path ++ "\"/>\n<column><use template=\"chip\"/></column>";
+    try cwd.createDirPath(io, std.fs.path.dirname(root_part_path).?);
+    try cwd.createDirPath(io, provenance_dir ++ "/views/parts");
+    defer cwd.deleteTree(io, provenance_dir) catch {};
+    try cwd.writeFile(io, .{ .sub_path = root_path, .data = root_source });
+    try cwd.writeFile(io, .{ .sub_path = root_part_path, .data = provenance_part });
+    try cwd.writeFile(io, .{ .sub_path = provenance_secondary_path, .data = provenance_secondary });
+    try cwd.writeFile(io, .{ .sub_path = provenance_part_path, .data = provenance_part });
+
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    harness.runtime.options.automation = automation.Server.init(io, provenance_dir, "Fragment");
+    var options = counterOptions();
+    options.view = null;
+    options.markup = .{
+        .source = root_source,
+        .sources = &.{.{ .path = provenance_part_path, .source = provenance_part }},
+        .watch_path = root_path,
+        .io = io,
+    };
+    options.window_view = provenanceWindowView;
+    options.windows_fn = provenanceWindows;
+    options.fragment_watch = .{ .fragments = &.{ProvenanceSecondary.fragment(provenance_secondary_path)}, .io = io };
+    const state = try CounterApp.create(std.heap.page_allocator, options);
+    defer state.destroy();
+    const app = state.app();
+    try installCounterApp(harness, app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .window_id = state.window_slots[0].window_id,
+        .label = "fragment-secondary-canvas",
+        .size = geometry.SizeF.init(320, 240),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    const secondary_id = findWidgetIdByText(state.window_slots[0].tree.?, .button, "Source action").?;
+    const response = try queryFragmentProvenance(harness, app, "fragment-secondary-canvas", secondary_id);
+    defer std.testing.allocator.free(response);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const edit_result = try canvas.ui_markup.writeback.apply(arena.allocator(), io, response, .{ .set_text = .{ .text = "Secondary only" } });
+    const root_bytes = try cwd.readFileAlloc(io, root_part_path, arena.allocator(), .limited(4096));
+    const secondary_bytes = try cwd.readFileAlloc(io, provenance_part_path, arena.allocator(), .limited(4096));
+    try std.testing.expectEqualStrings(provenance_part, root_bytes);
+    try std.testing.expect(std.mem.indexOf(u8, secondary_bytes, "Secondary only") != null);
+    try std.testing.expectEqualStrings(provenance_part_path, edit_result.file_path);
+    const main_id = findWidgetIdByText(state.tree.?, .button, "Source action").?;
+    const main_response = try queryFragmentProvenance(harness, app, canvas_label, main_id);
+    defer std.testing.allocator.free(main_response);
+    try std.testing.expect(std.mem.indexOf(u8, main_response, "node file=" ++ root_part_path) != null);
+    try std.testing.expect(std.mem.indexOf(u8, response, "node file=" ++ provenance_part_path) != null);
 }
 
 test "the fragment watch reloads a compiled fragment embedded in a Zig view" {

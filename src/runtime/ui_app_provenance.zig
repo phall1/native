@@ -26,6 +26,11 @@ pub const max_key_bytes = canvas_limits.max_canvas_widget_provenance_key_bytes;
 pub const unknown_file: u8 = 0xFF;
 
 pub const FileEntry = struct {
+    /// Resolver namespace: the originating document's root stamp. A root
+    /// closure's relative stamp and a fragment's disk stamp can be equal
+    /// while naming different files, so a stamp alone is never identity.
+    root_storage: [max_path_bytes]u8 = undefined,
+    root_len: usize = 0,
     /// The path as `MarkupNode.src_path` stamps it (resolver-relative;
     /// empty for a single-file document's root).
     stamped_storage: [max_path_bytes]u8 = undefined,
@@ -41,6 +46,10 @@ pub const FileEntry = struct {
     /// a mismatch means concurrent edits (or a not-yet-reloaded app) and
     /// the write is refused, never clobbered.
     hash: u64 = 0,
+
+    pub fn root(self: *const FileEntry) []const u8 {
+        return self.root_storage[0..self.root_len];
+    }
 
     pub fn stamped(self: *const FileEntry) []const u8 {
         return self.stamped_storage[0..self.stamped_len];
@@ -133,23 +142,25 @@ pub const ProvenanceTable = struct {
         self.watching = false;
     }
 
-    /// Register one source file of the loaded closure. Paths beyond the
-    /// storage cap truncate (they could never match a stamped path, so
-    /// the record falls back to `unknown_file` honestly).
-    pub fn addFile(self: *ProvenanceTable, stamped_path: []const u8, file_path: []const u8, hash: u64) error{WidgetProvenanceFileLimitReached}!void {
+    /// Register one source file in its resolver namespace. Reject overlong
+    /// paths rather than let a truncated namespace alias another root.
+    pub fn addFile(self: *ProvenanceTable, root_path: []const u8, stamped_path: []const u8, file_path: []const u8, hash: u64) error{ WidgetProvenanceFileLimitReached, WidgetProvenancePathLimitReached }!void {
         if (self.files_len >= self.files.len) return error.WidgetProvenanceFileLimitReached;
+        if (root_path.len > max_path_bytes or stamped_path.len > max_path_bytes or file_path.len > max_path_bytes) return error.WidgetProvenancePathLimitReached;
         var entry = &self.files[self.files_len];
-        entry.stamped_len = @min(stamped_path.len, entry.stamped_storage.len);
-        @memcpy(entry.stamped_storage[0..entry.stamped_len], stamped_path[0..entry.stamped_len]);
-        entry.file_len = @min(file_path.len, entry.file_storage.len);
-        @memcpy(entry.file_storage[0..entry.file_len], file_path[0..entry.file_len]);
+        entry.root_len = root_path.len;
+        @memcpy(entry.root_storage[0..entry.root_len], root_path);
+        entry.stamped_len = stamped_path.len;
+        @memcpy(entry.stamped_storage[0..entry.stamped_len], stamped_path);
+        entry.file_len = file_path.len;
+        @memcpy(entry.file_storage[0..entry.file_len], file_path);
         entry.hash = hash;
         self.files_len += 1;
     }
 
-    pub fn fileIndexOf(self: *const ProvenanceTable, stamped_path: []const u8) ?u8 {
+    pub fn fileIndexOf(self: *const ProvenanceTable, root_path: []const u8, stamped_path: []const u8) ?u8 {
         for (self.files[0..self.files_len], 0..) |*entry, index| {
-            if (std.mem.eql(u8, entry.stamped(), stamped_path)) return @intCast(index);
+            if (std.mem.eql(u8, entry.root(), root_path) and std.mem.eql(u8, entry.stamped(), stamped_path)) return @intCast(index);
         }
         return null;
     }
@@ -165,8 +176,8 @@ pub const ProvenanceTable = struct {
         var record = &self.records[self.records_len];
         record.* = .{
             .id = id,
-            .root_file = self.fileIndexOf(source.root_path) orelse unknown_file,
-            .file = self.fileIndexOf(source.src_path) orelse unknown_file,
+            .root_file = self.fileIndexOf(source.root_path, source.root_path) orelse unknown_file,
+            .file = self.fileIndexOf(source.root_path, source.src_path) orelse unknown_file,
             .start = clampU32(source.span.start),
             .end = clampU32(source.span.end),
             .line = clampU32(source.line),
@@ -178,7 +189,7 @@ pub const ProvenanceTable = struct {
                 break;
             }
             record.chain[record.chain_len] = .{
-                .file = self.fileIndexOf(site.src_path) orelse unknown_file,
+                .file = self.fileIndexOf(source.root_path, site.src_path) orelse unknown_file,
                 .start = clampU32(site.span.start),
                 .end = clampU32(site.span.end),
                 .line = clampU32(site.line),
@@ -286,8 +297,8 @@ fn writeKeyByte(writer: *std.Io.Writer, byte: u8, record: *Record) void {
 
 test "provenance table records, finds, and formats" {
     var table = ProvenanceTable{};
-    try table.addFile("", "src/board.native", 0xabcd);
-    try table.addFile("components/pill.native", "src/components/pill.native", 0x1234);
+    try table.addFile("", "", "src/board.native", 0xabcd);
+    try table.addFile("", "components/pill.native", "src/components/pill.native", 0x1234);
     table.watching = true;
 
     const chain = [_]canvas.ui_provenance.UseSite{
@@ -324,7 +335,7 @@ test "provenance table records, finds, and formats" {
 
 test "provenance pool budget: at capacity applies, one past errors named, no half-apply" {
     var table = ProvenanceTable{};
-    try table.addFile("", "src/app.native", 1);
+    try table.addFile("", "", "src/app.native", 1);
     const source = canvas.ui_provenance.NodeSource{ .src_path = "", .span = .{ .start = 0, .end = 4 }, .line = 1, .column = 1 };
     var index: usize = 0;
     while (index < max_records) : (index += 1) {
@@ -348,7 +359,7 @@ test "provenance pool budget: at capacity applies, one past errors named, no hal
 
 test "provenance record caps truncate honestly" {
     var table = ProvenanceTable{};
-    try table.addFile("a.native", "src/a.native", 1);
+    try table.addFile("", "a.native", "src/a.native", 1);
     var chain: [max_chain + 2]canvas.ui_provenance.UseSite = undefined;
     for (&chain) |*site| site.* = .{ .src_path = "a.native", .span = .{ .start = 1, .end = 2 }, .line = 1, .column = 1 };
     const source = canvas.ui_provenance.NodeSource{ .src_path = "a.native", .span = .{ .start = 0, .end = 4 }, .chain = &chain };
@@ -366,7 +377,7 @@ test "file table one past errors named" {
     var table = ProvenanceTable{};
     var index: usize = 0;
     while (index < max_files) : (index += 1) {
-        try table.addFile("x.native", "src/x.native", index);
+        try table.addFile("", "x.native", "src/x.native", index);
     }
-    try std.testing.expectError(error.WidgetProvenanceFileLimitReached, table.addFile("y.native", "src/y.native", 1));
+    try std.testing.expectError(error.WidgetProvenanceFileLimitReached, table.addFile("", "y.native", "src/y.native", 1));
 }
