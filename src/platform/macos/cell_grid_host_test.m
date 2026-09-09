@@ -4,6 +4,33 @@
 #define NATIVE_SDK_APPKIT_CELL_GRID_TESTING 1
 #include "appkit_host.m"
 
+// The updater (upstream v0.10.0, #398) calls two functions the Zig side
+// exports from src/updater/c_api.zig. This harness links the host without
+// Zig, and never exercises the updater, so refuse everything.
+native_sdk_update_verify_result_t native_sdk_update_verify_feed(
+    const char *envelope, size_t envelope_len,
+    const char *public_key, size_t public_key_len,
+    const char *bundle_id, size_t bundle_id_len,
+    const char *current_version, size_t current_version_len,
+    const char *target, size_t target_len,
+    char *version_out, size_t version_capacity,
+    char *archive_url_out, size_t archive_url_capacity,
+    char *release_notes_out, size_t release_notes_capacity) {
+    (void)envelope; (void)envelope_len; (void)public_key; (void)public_key_len;
+    (void)bundle_id; (void)bundle_id_len; (void)current_version; (void)current_version_len;
+    (void)target; (void)target_len; (void)version_out; (void)version_capacity;
+    (void)archive_url_out; (void)archive_url_capacity; (void)release_notes_out; (void)release_notes_capacity;
+    native_sdk_update_verify_result_t result = {0};
+    result.ok = 0;
+    result.error_code = 1;
+    return result;
+}
+
+int native_sdk_update_verify_archive(const char *path, size_t path_len, uint64_t expected_bytes, const char *sha256, size_t sha256_len) {
+    (void)path; (void)path_len; (void)expected_bytes; (void)sha256; (void)sha256_len;
+    return 0;
+}
+
 static void NativeSdkCellGridTestFail(NSString *message) {
     fprintf(stderr, "cell-grid-host-test: %s\n", message.UTF8String);
     exit(1);
