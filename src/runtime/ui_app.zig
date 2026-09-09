@@ -44,6 +44,7 @@ const launch_timing = @import("launch_timing.zig");
 const runtime_effects = @import("effects.zig");
 const terminal_session = @import("terminal_session.zig");
 const ui_app_provenance = @import("ui_app_provenance.zig");
+const fragment_provenance = @import("ui_app_fragment_provenance.zig");
 
 const Runtime = core.Runtime;
 const App = core.App;
@@ -146,8 +147,11 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             /// build swaps in through the Ui seam; null while the disk
             /// closure matches the embedded baseline, which keeps the
             /// comptime-compiled path (and drops back to it when an edit
-            /// is reverted byte for byte).
+            /// is reverted byte for byte). Automation instead interprets
+            /// the baseline too, to capture authored source locations.
             document: ?canvas.ui_markup.MarkupDocument = null,
+            source_files: []const ui_app_provenance.FileEntry = &.{},
+            capture_provenance: bool = false,
             /// Hash of the embedded source closure the fragment was
             /// compiled from, computed when the watch arms.
             baseline_hash: u64 = 0,
@@ -965,6 +969,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             /// The main canvas keeps its scale in `Self.pixel_snap_scale`.
             pixel_snap_scale: f32 = 1,
             tree: ?Ui.Tree = null,
+            provenance: ?*ui_app_provenance.ProvenanceTable = null,
             arena_index: usize = 0,
             arenas: [2]std.heap.ArenaAllocator,
 
@@ -1083,12 +1088,14 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// none of this state. No default on purpose: every constructor
         /// must initialize the arenas against the backing allocator.
         markup_fragment_slots: if (fragment_watch_enabled) [max_watched_fragments]MarkupFragmentSlot else void,
-        /// Widget provenance (write-back's read half): the retained
-        /// structural-id -> authored-markup table the `provenance`
-        /// automation verb answers from. Exists only in markup-interpreter
-        /// builds; filled only while automation is enabled.
+        /// Source-file anchors for the loaded root markup closure. Build
+        /// passes copy these into their own retained provenance snapshot;
+        /// records are collected only while automation is enabled.
         provenance: if (features.runtime_markup) ui_app_provenance.ProvenanceTable else void =
             if (features.runtime_markup) .{} else {},
+        /// Snapshot owned by the installed tree arena, never by an in-flight
+        /// reload. Failed builds retain the old spans and source hashes.
+        installed_provenance: ?*ui_app_provenance.ProvenanceTable = null,
         /// Import-closure staging for the file table: filled by the
         /// hashing loader during a resolve, committed on adopt so a failed
         /// mid-edit reload can never re-anchor spans to bytes the running
@@ -2204,6 +2211,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             }
 
             self.tree = tree;
+            self.installed_provenance = built.provenance;
             self.arena_index = next_index;
             live_tree_reset = false;
             self.main_tree_current = true;
@@ -2352,6 +2360,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         }
 
         const BuiltLayout = struct {
+            provenance: ?*ui_app_provenance.ProvenanceTable = null,
             tree: Ui.Tree,
             layout: canvas.WidgetLayoutTree,
         };
@@ -2389,6 +2398,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             };
             var tree: Ui.Tree = undefined;
             var layout: canvas.WidgetLayoutTree = undefined;
+            var provenance: ?*ui_app_provenance.ProvenanceTable = null;
             var pass: usize = 0;
             while (true) {
                 // `contextMenuRebuildIndex` never routes a rebuild into
@@ -2413,12 +2423,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 ui.context_menu_fallback_target = self.contextMenuFallbackTargetForLabel(self.options.canvas_label);
                 if (ui.context_menu_fallback_target != 0) ui.context_menu_fallback_point = self.context_menu_fallback_point;
                 self.armUiFragmentHost(&ui);
-                if (comptime features.runtime_markup) {
-                    if (self.markup_view != null and runtime.options.automation != null) {
-                        self.provenance.resetRecords();
-                        ui.provenance_sink = self.provenance.sink();
-                    }
-                }
+                provenance = try self.prepareBuildProvenance(&ui, runtime.options.automation != null);
                 // Frame-profile stamps (no-ops unless profiling is on): the
                 // view build fn + tree finalize is the `rebuild` stage, the
                 // flex pass below is `layout`; reconcile/emit are stamped at
@@ -2480,7 +2485,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 if (pass >= 2 or (!corrected and !self.virtualWindowsUndercovered(layout))) break;
                 window_source.fresh = layout;
             }
-            return .{ .tree = tree, .layout = layout };
+            return .{ .tree = tree, .layout = layout, .provenance = provenance };
         }
 
         /// The window-control cluster's canvas-local frame — but only
@@ -3114,7 +3119,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             errdefer if (live_tree_reset) {
                 slot.tree = null;
             };
-            var built = try self.buildWindowSlotPass(slot, bounds, tokens, next_index);
+            var built = try self.buildWindowSlotPass(runtime, slot, bounds, tokens, next_index);
             // The same one-retry window-control clearance the main
             // rebuild runs (see `rebuild`): a secondary hidden-inset
             // window's drag header collides with the OS caption cluster
@@ -3123,7 +3128,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             // other windows keep their own layout) for one more pass.
             if (windowControlsReservation(runtime, slot.window_id, slot.canvasLabel(), built.layout, tokens)) |controls| {
                 tokens.window_controls = controls;
-                built = try self.buildWindowSlotPass(slot, bounds, tokens, next_index);
+                built = try self.buildWindowSlotPass(runtime, slot, bounds, tokens, next_index);
             }
             const tree = built.tree;
             const layout = built.layout;
@@ -3162,6 +3167,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             try self.applyTerminalLayout(runtime, slot.window_id, layout, tokens);
             self.applyWebPanes(runtime, slot.window_id, slot.canvasLabel(), slot.canvas_size, tokens, layout);
             slot.tree = tree;
+            slot.provenance = built.provenance;
             slot.arena_index = next_index;
             live_tree_reset = false;
             slot.tree_current = true;
@@ -3256,6 +3262,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// `bounds` with `tokens`.
         fn buildWindowSlotPass(
             self: *Self,
+            runtime: *Runtime,
             slot: *WindowSlot,
             bounds: geometry.RectF,
             tokens: canvas.DesignTokens,
@@ -3282,6 +3289,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             ui.context_menu_fallback_target = self.contextMenuFallbackTargetForLabel(slot.canvasLabel());
             if (ui.context_menu_fallback_target != 0) ui.context_menu_fallback_point = self.context_menu_fallback_point;
             self.armUiFragmentHost(&ui);
+            const provenance = try self.prepareBuildProvenance(&ui, runtime.options.automation != null);
             const node = window_view(&ui, &self.model, slot.label());
             const tree = try ui.finalizeWithTokens(node, tokens);
             // The declaration is captured by `rebuildWindowSlot` AFTER
@@ -3298,7 +3306,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 }
                 return err;
             };
-            return .{ .tree = tree, .layout = layout };
+            return .{ .tree = tree, .layout = layout, .provenance = provenance };
         }
 
         /// Re-apply the model-derived webview panes against the freshly
@@ -3661,13 +3669,63 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// answer landed (its fallback teaches when no app responds).
         fn handleProvenanceQuery(self: *Self, runtime: *Runtime, query: core.AutomationProvenanceEvent) anyerror!void {
             if (comptime !features.runtime_markup) return;
-            if (!std.mem.eql(u8, query.view_label, self.options.canvas_label)) return;
+            const table = self.provenanceForView(query.view_label) orelse return;
             const server = runtime.options.automation orelse return;
             var buffer: [4096]u8 = undefined;
             var writer = std.Io.Writer.fixed(&buffer);
-            try self.provenance.writeResponse(&writer, query.view_label, query.widget_id);
+            try table.writeResponse(&writer, query.view_label, query.widget_id);
             try server.publishProvenanceResponse(writer.buffered());
             runtime.automation_provenance_published = true;
+        }
+
+        fn provenanceForView(self: *Self, label: []const u8) ?*const ui_app_provenance.ProvenanceTable {
+            if (std.mem.eql(u8, label, self.options.canvas_label)) {
+                if (self.tree == null or !self.main_tree_current) return null;
+                return self.installed_provenance;
+            }
+            for (self.window_slots[0..self.window_slot_count]) |*slot| {
+                if (!std.mem.eql(u8, label, slot.canvasLabel())) continue;
+                if (slot.tree == null or !slot.tree_current) return null;
+                return slot.provenance;
+            }
+            return null;
+        }
+
+        fn prepareBuildProvenance(self: *Self, ui: *Ui, enabled: bool) !?*ui_app_provenance.ProvenanceTable {
+            if (comptime !features.runtime_markup) return null;
+            if (!enabled) return null;
+            const table = try ui.arena.create(ui_app_provenance.ProvenanceTable);
+            table.* = .{};
+            fragment_provenance.appendFiles(table, self.provenance.files[0..self.provenance.files_len]);
+            table.watching = self.provenance.watching;
+            try self.prepareFragmentProvenance(table);
+            ui.provenance_sink = table.sink();
+            return table;
+        }
+
+        fn prepareFragmentProvenance(self: *Self, table: *ui_app_provenance.ProvenanceTable) !void {
+            if (comptime !fragment_watch_enabled) return;
+            const watch = self.options.fragment_watch orelse return;
+            const count = @min(watch.fragments.len, max_watched_fragments);
+            for (watch.fragments[0..count], self.markup_fragment_slots[0..count]) |spec, *slot| {
+                if (slot.document == null) try self.loadFragmentBaseline(spec, slot);
+                slot.capture_provenance = true;
+                fragment_provenance.appendFiles(table, slot.source_files);
+            }
+            table.watching = table.watching or count > 0;
+        }
+
+        fn loadFragmentBaseline(self: *Self, spec: canvas.MarkupFragment, slot: *MarkupFragmentSlot) !void {
+            if (comptime !fragment_watch_enabled) return;
+            const arena = slot.arenas[slot.arena_index].allocator();
+            var embedded = fragment_provenance.EmbeddedLoader{ .spec = spec };
+            var hashing = HashingLoader.init(embedded.loader(), spec.source, std.fs.path.dirname(spec.path) orelse "");
+            self.provenance_closure.reset();
+            hashing.closure = &self.provenance_closure;
+            var diagnostic: canvas.ui_markup.MarkupErrorInfo = .{};
+            const document = try canvas.ui_markup.resolveImports(arena, spec.path, spec.source, hashing.loader(), &diagnostic);
+            slot.source_files = try fragment_provenance.capture(arena, spec.path, spec.source, &self.provenance_closure);
+            slot.document = canvas.ui_markup.canonicalize(arena, document) catch document;
         }
 
         /// Store a markup diagnostic and say it out loud once per distinct
@@ -3762,10 +3820,19 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 // next reload attempt, so this costs nothing durable.
                 const scratch_index = slot.arena_index ^ 1;
                 _ = slot.arenas[scratch_index].reset(.retain_capacity);
-                slot.baseline_hash = embeddedClosureHash(slot.arenas[scratch_index].allocator(), spec.source, spec.sources);
+                slot.baseline_hash = embeddedFragmentClosureHash(slot.arenas[scratch_index].allocator(), spec);
                 slot.hash = slot.baseline_hash;
             }
             return count > 0;
+        }
+
+        fn embeddedFragmentClosureHash(arena: std.mem.Allocator, spec: canvas.MarkupFragment) u64 {
+            if (comptime !fragment_watch_enabled) return 0;
+            var embedded = fragment_provenance.EmbeddedLoader{ .spec = spec };
+            var hashing = HashingLoader.init(embedded.loader(), spec.source, std.fs.path.dirname(spec.path) orelse "");
+            var diagnostic: canvas.ui_markup.MarkupErrorInfo = .{};
+            _ = canvas.ui_markup.resolveImports(arena, spec.path, spec.source, hashing.loader(), &diagnostic) catch {};
+            return hashing.hasher.final();
         }
 
         fn embeddedMarkupClosureHash(self: *Self, markup_options: MarkupOptions) u64 {
@@ -3856,48 +3923,57 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             const count = @min(fragment_watch.fragments.len, max_watched_fragments);
             var any_adopted = false;
             for (fragment_watch.fragments[0..count], self.markup_fragment_slots[0..count]) |spec, *slot| {
-                const next_index = slot.arena_index ^ 1;
-                _ = slot.arenas[next_index].reset(.retain_capacity);
-                const arena = slot.arenas[next_index].allocator();
-                const source = readMarkupFile(fragment_watch.io, arena, spec.path) orelse continue;
-                var disk_loader = DiskImportLoader{ .io = fragment_watch.io };
-                const watch_dir = std.fs.path.dirname(spec.path) orelse "";
-                var hashing = HashingLoader.init(disk_loader.loader(), source, watch_dir);
-                var diagnostic: canvas.ui_markup.MarkupErrorInfo = .{};
-                const document = canvas.ui_markup.resolveImports(arena, spec.path, source, hashing.loader(), &diagnostic) catch |err| {
-                    const hash = hashing.hasher.final();
-                    if (hash == slot.hash) continue;
-                    slot.hash = hash;
-                    if (err == error.MarkupSyntax or err == error.MarkupImport) {
-                        self.recordMarkupDiagnostic(diagnostic);
-                    }
-                    continue;
-                };
-                const hash = hashing.hasher.final();
-                if (hash == slot.hash) continue;
-                slot.hash = hash;
-                if (hash == slot.baseline_hash) {
-                    // The edit was reverted byte for byte: back to the
-                    // comptime-compiled path, the release-identical one.
-                    slot.document = null;
-                } else {
-                    // Canonicalize for per-frame cost only; on OOM the raw
-                    // document builds identically through attrTyped's
-                    // fallback.
-                    slot.document = canvas.ui_markup.canonicalize(arena, document) catch document;
-                }
-                slot.arena_index = next_index;
-                // One diagnostic channel, adopt clears it — the root
-                // watch's contract (`adoptMarkupDocument`): the dev loop
-                // edits one file at a time, and the recovering save is
-                // what should silence the teaching line.
-                self.markup_diagnostic = null;
-                any_adopted = true;
+                any_adopted = self.pollFragmentSource(fragment_watch.io, spec, slot) or any_adopted;
             }
-            // Fragments build wherever the app's views embed them — the
-            // main canvas and declared windows — so a reload re-derives
-            // every open view.
+            // Fragments can appear in any open view; each successful view
+            // installation commits its own source snapshot.
             if (any_adopted and self.installed) self.rebuildAllViews(runtime) catch {};
+        }
+
+        fn pollFragmentSource(self: *Self, io: std.Io, spec: canvas.MarkupFragment, slot: *MarkupFragmentSlot) bool {
+            if (comptime !fragment_watch_enabled) return false;
+            const next_index = slot.arena_index ^ 1;
+            _ = slot.arenas[next_index].reset(.retain_capacity);
+            const arena = slot.arenas[next_index].allocator();
+            const source = readMarkupFile(io, arena, spec.path) orelse return false;
+            var disk_loader = DiskImportLoader{ .io = io };
+            const watch_dir = std.fs.path.dirname(spec.path) orelse "";
+            var hashing = HashingLoader.init(disk_loader.loader(), source, watch_dir);
+            self.provenance_closure.reset();
+            hashing.closure = &self.provenance_closure;
+            var diagnostic: canvas.ui_markup.MarkupErrorInfo = .{};
+            const document = canvas.ui_markup.resolveImports(arena, spec.path, source, hashing.loader(), &diagnostic) catch |err| {
+                self.recordFragmentParseFailure(slot, hashing.hasher.final(), err, diagnostic);
+                return false;
+            };
+            const hash = hashing.hasher.final();
+            if (hash == slot.hash) return false;
+            const files = fragment_provenance.capture(arena, spec.path, source, &self.provenance_closure) catch return false;
+            slot.hash = hash;
+            if (hash == slot.baseline_hash and !slot.capture_provenance) {
+                // The edit was reverted byte for byte: back to the
+                // comptime-compiled path, the release-identical one.
+                slot.document = null;
+            } else {
+                // Canonicalize for per-frame cost only; on OOM the raw
+                // document builds identically through attrTyped's
+                // fallback.
+                slot.document = canvas.ui_markup.canonicalize(arena, document) catch document;
+            }
+            slot.source_files = files;
+            slot.arena_index = next_index;
+            // One diagnostic channel, adopt clears it — the root
+            // watch's contract (`adoptMarkupDocument`): the dev loop
+            // edits one file at a time, and the recovering save is
+            // what should silence the teaching line.
+            self.markup_diagnostic = null;
+            return true;
+        }
+
+        fn recordFragmentParseFailure(self: *Self, slot: *MarkupFragmentSlot, hash: u64, err: anyerror, diagnostic: canvas.ui_markup.MarkupErrorInfo) void {
+            if (hash == slot.hash) return;
+            slot.hash = hash;
+            if (err == error.MarkupSyntax or err == error.MarkupImport) self.recordMarkupDiagnostic(diagnostic);
         }
 
         /// The `override` half of the fragment hot-reload seam (see

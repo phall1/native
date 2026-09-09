@@ -32,6 +32,9 @@ pub const UseSite = struct {
 /// in the template body) and `chain` names every `<use>` that put it
 /// there, outermost first — both halves of "jump to its markup".
 pub const NodeSource = struct {
+    /// Root document whose import closure instantiated this node. Composed
+    /// views can embed several roots, even when they share a template file.
+    root_path: []const u8 = "",
     src_path: []const u8 = "",
     span: markup.Span = .{},
     line: usize = 0,
