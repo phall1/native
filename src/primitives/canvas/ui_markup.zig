@@ -41,6 +41,9 @@ pub const contract = @import("ui_markup_contract.zig");
 /// validated by reparse + structural diff before any file write
 /// (ui_markup_edit.zig).
 pub const edit = @import("ui_markup_edit.zig");
+/// Production automation write-back: provenance guards, checked edit,
+/// closure validation, and disk write, shared by the CLI and runtime tests.
+pub const writeback = @import("ui_markup_writeback.zig");
 
 pub const MarkupErrorInfo = struct {
     line: usize = 0,
