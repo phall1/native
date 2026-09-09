@@ -1622,6 +1622,7 @@ pub fn build(b: *std.Build) void {
     addTestStep(b, "test-app-runner-window-placement", "Run app-runner window placement decision tests", app_runner_window_placement_tests);
     addTestStep(b, "test-canvas", "Run canvas display list tests", canvas_tests);
     addTestStep(b, "test-desktop", "Run Native SDK framework tests", desktop_tests);
+    addTestStep(b, "test-fragment-provenance", "Run composed fragment provenance and reload regressions", filteredTestArtifact(b, desktop_mod, "fragment-provenance-tests", &.{"runtime.ui_app_tests.test.fragment provenance"}));
     for (desktop_test_shard_specs, desktop_test_shards) |spec, shard_tests| {
         addTestStep(b, b.fmt("test-desktop-{s}", .{spec.name}), spec.description, shard_tests);
     }

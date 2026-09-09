@@ -198,6 +198,7 @@ pub fn MarkupView(comptime ModelT: type, comptime MsgT: type) type {
             if (ui.provenance_sink != null) {
                 const source = try ui.arena.create(ui_provenance.NodeSource);
                 source.* = .{
+                    .root_path = self.document.root.?.src_path,
                     .src_path = node.src_path,
                     .span = node.span,
                     .line = node.line,

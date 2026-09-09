@@ -2571,6 +2571,181 @@ test "radio accessibility selection dispatches change once per retained transiti
     try std.testing.expectEqual(@as(u32, 1), app_state.model.change_count);
 }
 
+test "fragment provenance identifies markup inside a composed Zig view from the first frame" {
+    const io = std.testing.io;
+    const cwd = std.Io.Dir.cwd();
+    try cwd.createDirPath(io, ".zig-cache/fragment-provenance");
+    defer cwd.deleteTree(io, ".zig-cache/fragment-provenance") catch {};
+    try cwd.writeFile(io, .{ .sub_path = fragment_actions_path, .data = fragment_actions_markup });
+    defer cwd.deleteFile(io, fragment_actions_path) catch {};
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    harness.runtime.options.automation = automation.Server.init(io, ".zig-cache/fragment-provenance", "Fragment");
+    const app_state = try std.testing.allocator.create(CounterApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = CounterApp.init(std.heap.page_allocator, .{}, hybridCounterOptions(io));
+    defer app_state.deinit();
+    const app = app_state.app();
+    try installCounterApp(harness, app);
+    const id = findWidgetIdByText(app_state.tree.?, .button, "Reset").?;
+    var compiled_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer compiled_arena.deinit();
+    var compiled_ui = CounterApp.Ui.init(compiled_arena.allocator());
+    const compiled_tree = try compiled_ui.finalize(hybridCounterView(&compiled_ui, &app_state.model));
+    try std.testing.expectEqual(id, findWidgetIdByText(compiled_tree, .button, "Reset").?);
+    var command_buffer: [128]u8 = undefined;
+    try harness.runtime.dispatchAutomationCommand(app, try std.fmt.bufPrint(&command_buffer, "provenance {s} {d}", .{ canvas_label, id }));
+    const response = try cwd.readFileAlloc(io, ".zig-cache/fragment-provenance/provenance.txt", std.testing.allocator, .limited(4096));
+    defer std.testing.allocator.free(response);
+    try std.testing.expect(std.mem.indexOf(u8, response, "authored=markup") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response, "watching=true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response, "node file=" ++ fragment_actions_path) != null);
+}
+
+const provenance_root =
+    \\<import src="parts/chip.native"/>
+    \\<column key="primary-chip"><use template="chip"/></column>
+;
+const provenance_secondary =
+    \\<import src="parts/chip.native"/>
+    \\<column key="secondary-chip"><use template="chip"/></column>
+;
+const provenance_part =
+    \\<template name="chip">
+    \\  <button key="action" on-press="increment">Source action</button>
+    \\</template>
+;
+const provenance_dir = ".zig-cache/fragment-provenance";
+const provenance_main_path = provenance_dir ++ "/views/main.native";
+const provenance_secondary_path = provenance_dir ++ "/views/secondary.native";
+const provenance_part_path = provenance_dir ++ "/views/parts/chip.native";
+const provenance_sources = [_]canvas.ui_markup.SourceFile{
+    .{ .path = "views/main.native", .source = provenance_root },
+    .{ .path = "views/secondary.native", .source = provenance_secondary },
+    .{ .path = "views/parts/chip.native", .source = provenance_part },
+};
+const ProvenanceMain = canvas.CompiledMarkupImports(CounterModel, CounterMsg, "views/main.native", &provenance_sources);
+const ProvenanceSecondary = canvas.CompiledMarkupImports(CounterModel, CounterMsg, "views/secondary.native", &provenance_sources);
+const provenance_fragments = [_]canvas.MarkupFragment{
+    ProvenanceMain.fragment(provenance_main_path),
+    ProvenanceSecondary.fragment(provenance_secondary_path),
+};
+
+fn provenanceMainView(ui: *CounterApp.Ui, model: *const CounterModel) CounterApp.Ui.Node {
+    return ui.column(.{}, .{ ui.text(.{}, "Zig sibling"), ProvenanceMain.build(ui, model) });
+}
+
+fn provenanceWindowView(ui: *CounterApp.Ui, model: *const CounterModel, _: []const u8) CounterApp.Ui.Node {
+    return ui.column(.{}, .{ui.row(.{}, .{ProvenanceSecondary.build(ui, model)})});
+}
+
+fn provenanceWindows(_: *const CounterModel, scratch: *CounterApp.WindowsScratch) []const CounterApp.WindowDescriptor {
+    scratch.windows[0] = .{ .label = "fragment-secondary", .canvas_label = "fragment-secondary-canvas", .title = "Fragment", .width = 320, .height = 240 };
+    return scratch.windows[0..1];
+}
+
+fn queryFragmentProvenance(harness: *core.TestHarness(), app: core.App, label: []const u8, id: u64) ![]u8 {
+    var command: [160]u8 = undefined;
+    try harness.runtime.dispatchAutomationCommand(app, try std.fmt.bufPrint(&command, "provenance {s} {d}", .{ label, id }));
+    return std.Io.Dir.cwd().readFileAlloc(std.testing.io, provenance_dir ++ "/provenance.txt", std.testing.allocator, .limited(4096));
+}
+
+fn expectFragmentAnchor(table: anytype, id: u64, root: []const u8, source: []const u8, key: []const u8) !void {
+    const record = table.find(id).?;
+    try std.testing.expectEqualStrings(provenance_part_path, table.files[record.file].file());
+    try std.testing.expectEqualStrings(root, table.files[record.root_file].file());
+    try std.testing.expectEqual(std.hash.Wyhash.hash(0, source), table.files[record.file].hash);
+    try std.testing.expectEqual(@as(u32, 2), record.line);
+    try std.testing.expectEqual(@as(u8, 1), record.chain_len);
+    try std.testing.expectEqualStrings(root, table.files[record.chain[0].file].file());
+    try std.testing.expectEqualStrings(key, record.keys[0..record.keys_len]);
+    try std.testing.expect(std.mem.startsWith(u8, source[record.start..record.end], "<button"));
+}
+
+test "fragment provenance retains per-window source anchors across checked edits and malformed reloads" {
+    const io = std.testing.io;
+    const cwd = std.Io.Dir.cwd();
+    try cwd.createDirPath(io, provenance_dir ++ "/views/parts");
+    defer cwd.deleteTree(io, provenance_dir) catch {};
+    try cwd.writeFile(io, .{ .sub_path = provenance_main_path, .data = provenance_root });
+    try cwd.writeFile(io, .{ .sub_path = provenance_secondary_path, .data = provenance_secondary });
+    try cwd.writeFile(io, .{ .sub_path = provenance_part_path, .data = provenance_part });
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    harness.runtime.options.automation = automation.Server.init(io, provenance_dir, "Fragment");
+    var options = hybridCounterOptions(io);
+    options.view = provenanceMainView;
+    options.window_view = provenanceWindowView;
+    options.windows_fn = provenanceWindows;
+    options.fragment_watch = .{ .fragments = &provenance_fragments, .io = io };
+    const state = try CounterApp.create(std.heap.page_allocator, options);
+    defer state.destroy();
+    const app = state.app();
+    try installCounterApp(harness, app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .window_id = state.window_slots[0].window_id,
+        .label = "fragment-secondary-canvas",
+        .size = geometry.SizeF.init(320, 240),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    const main_id = findWidgetIdByText(state.tree.?, .button, "Source action").?;
+    const secondary_id = findWidgetIdByText(state.window_slots[0].tree.?, .button, "Source action").?;
+    try expectFragmentAnchor(state.installed_provenance.?, main_id, provenance_main_path, provenance_part, "primary-chip/action");
+    try expectFragmentAnchor(state.window_slots[0].provenance.?, secondary_id, provenance_secondary_path, provenance_part, "secondary-chip/action");
+    const response = try queryFragmentProvenance(harness, app, "fragment-secondary-canvas", secondary_id);
+    defer std.testing.allocator.free(response);
+    try std.testing.expect(std.mem.indexOf(u8, response, "authored=markup watching=true root=" ++ provenance_secondary_path) != null);
+    const zig_id = findWidgetIdByText(state.tree.?, .text, "Zig sibling").?;
+    const zig_response = try queryFragmentProvenance(harness, app, canvas_label, zig_id);
+    defer std.testing.allocator.free(zig_response);
+    try std.testing.expect(std.mem.indexOf(u8, zig_response, "authored=zig") != null);
+
+    const baseline_arena = state.markup_fragment_slots[0].arena_index;
+    try harness.runtime.dispatchPlatformEvent(app, harness.null_platform.fireTimer(CounterApp.markup_watch_timer_id, 1_500_000).?);
+    try std.testing.expectEqual(baseline_arena, state.markup_fragment_slots[0].arena_index);
+
+    // Use the production checked-edit engine on the retained source span.
+    // A semantic refusal leaves source bytes untouched.
+    var diagnostic: canvas.ui_markup.MarkupErrorInfo = .{};
+    var edit_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer edit_arena.deinit();
+    const record = state.installed_provenance.?.find(main_id).?;
+    try std.testing.expectError(error.MarkupEdit, canvas.ui_markup.edit.applyChecked(edit_arena.allocator(), provenance_part, record.start, .{ .set_text = .{ .text = "<invalid>" } }, &diagnostic));
+    const unmodified = try cwd.readFileAlloc(io, provenance_part_path, std.testing.allocator, .limited(4096));
+    defer std.testing.allocator.free(unmodified);
+    try std.testing.expectEqualStrings(provenance_part, unmodified);
+    const edited = try canvas.ui_markup.edit.applyChecked(edit_arena.allocator(), provenance_part, record.start, .{ .set_text = .{ .text = "Edited action" } }, &diagnostic);
+    try cwd.writeFile(io, .{ .sub_path = provenance_part_path, .data = edited });
+    // The CLI's loaded-hash guard must refuse a write before the watch
+    // adopts this save: the retained hash still describes the old bytes.
+    try std.testing.expect(state.installed_provenance.?.files[record.file].hash != std.hash.Wyhash.hash(0, edited));
+    try harness.runtime.dispatchPlatformEvent(app, harness.null_platform.fireTimer(CounterApp.markup_watch_timer_id, 2_000_000).?);
+    try std.testing.expectEqual(main_id, findWidgetIdByText(state.tree.?, .button, "Edited action").?);
+    try std.testing.expectEqual(secondary_id, findWidgetIdByText(state.window_slots[0].tree.?, .button, "Edited action").?);
+    try expectFragmentAnchor(state.installed_provenance.?, main_id, provenance_main_path, edited, "primary-chip/action");
+    try expectFragmentAnchor(state.window_slots[0].provenance.?, secondary_id, provenance_secondary_path, edited, "secondary-chip/action");
+
+    // Failed parses and failed Model binding builds must not publish new
+    // hashes or erase the last installed record, including repeated polls.
+    for ([_][]const u8{ "<template><oops", "<template name=\"chip\"><text>{missing_field}</text></template>", "<template><broken" }) |broken| {
+        try cwd.writeFile(io, .{ .sub_path = provenance_part_path, .data = broken });
+        try harness.runtime.dispatchPlatformEvent(app, harness.null_platform.fireTimer(CounterApp.markup_watch_timer_id, 3_000_000).?);
+        try std.testing.expectEqual(main_id, findWidgetIdByText(state.tree.?, .button, "Edited action").?);
+        try expectFragmentAnchor(state.installed_provenance.?, main_id, provenance_main_path, edited, "primary-chip/action");
+        try expectFragmentAnchor(state.window_slots[0].provenance.?, secondary_id, provenance_secondary_path, edited, "secondary-chip/action");
+    }
+    try cwd.writeFile(io, .{ .sub_path = provenance_part_path, .data = provenance_part });
+    try harness.runtime.dispatchPlatformEvent(app, harness.null_platform.fireTimer(CounterApp.markup_watch_timer_id, 4_000_000).?);
+    try std.testing.expectEqual(main_id, findWidgetIdByText(state.tree.?, .button, "Source action").?);
+    try expectFragmentAnchor(state.installed_provenance.?, main_id, provenance_main_path, provenance_part, "primary-chip/action");
+    try expectFragmentAnchor(state.window_slots[0].provenance.?, secondary_id, provenance_secondary_path, provenance_part, "secondary-chip/action");
+}
+
 test "the fragment watch reloads a compiled fragment embedded in a Zig view" {
     const io = std.testing.io;
     const cwd = std.Io.Dir.cwd();

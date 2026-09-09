@@ -96,6 +96,9 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
         /// `UiApp.Options.fragment_watch` names the on-disk source this
         /// fragment was compiled from, so a dev run reloads it in place
         /// when the file (or any file its imports reach) changes.
+        /// Under automation, registered fragments also expose provenance
+        /// and checked source edits from the first frame, including when
+        /// composed inside Zig views or declared secondary windows.
         /// Outside Debug this returns an empty handle — no path bytes,
         /// no embedded-baseline references — so release binaries carry
         /// no watch plumbing.
@@ -106,6 +109,7 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
             if (comptime builtin.mode != .Debug) return .{};
             return .{
                 .key = fragmentKey(),
+                .root_path = document.root.?.src_path,
                 .path = path,
                 .source = fragment_source,
                 .sources = fragment_sources,
@@ -181,25 +185,7 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
                 if (ui.markup_fragment_host) |host| {
                     if (host.override(host.context, fragmentKey())) |override_ptr| {
                         const live_document: *const markup.MarkupDocument = @ptrCast(@alignCast(override_ptr));
-                        var live = interpreter.MarkupView(ModelT, MsgT).fromDocument(live_document.*);
-                        return live.build(ui, model) catch {
-                            // The reloaded source parses but cannot build
-                            // against this Model/Msg (a binding naming no
-                            // model field, an unknown message tag — what
-                            // the compiled engine catches at comptime).
-                            // Report the teaching diagnostic through the
-                            // host and latch `ui.failed` so the frame
-                            // aborts and the last good tree stays up; the
-                            // next good save reloads and recovers.
-                            host.report(host.context, .{
-                                .line = live.diagnostic.line,
-                                .column = live.diagnostic.column,
-                                .message = live.diagnostic.message,
-                                .path = live.diagnostic.path,
-                            });
-                            ui.failed = true;
-                            return ui.column(.{}, .{});
-                        };
+                        return buildLiveFragment(ui, model, host, live_document.*);
                     }
                 }
             }
@@ -219,6 +205,27 @@ fn CompiledMarkupEngine(comptime ModelT: type, comptime MsgT: type, comptime res
                 return buildUse(root, no_entries, ui, model, .{});
             }
             return buildElement(root, no_entries, ui, model, .{});
+        }
+
+        fn buildLiveFragment(ui: *Ui, model: *const ModelT, host: canvas.MarkupFragmentHost, live_document: markup.MarkupDocument) Ui.Node {
+            // A later parse can succeed but fail Model binding, leaving the
+            // old tree installed. Its literals must survive subsequent
+            // source-arena reuse, just like its copied provenance records.
+            const owned = markup.copyDocument(ui.arena, live_document) catch {
+                ui.failed = true;
+                return ui.column(.{}, .{});
+            };
+            var live = interpreter.MarkupView(ModelT, MsgT).fromDocument(owned);
+            return live.build(ui, model) catch {
+                host.report(host.context, .{
+                    .line = live.diagnostic.line,
+                    .column = live.diagnostic.column,
+                    .message = live.diagnostic.message,
+                    .path = live.diagnostic.path,
+                });
+                ui.failed = true;
+                return ui.column(.{}, .{});
+            };
         }
 
         /// Comptime template wiring checks, mirroring the validator: a

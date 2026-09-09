@@ -919,6 +919,40 @@ pub fn canonicalize(arena: std.mem.Allocator, document: MarkupDocument) error{Ou
     return out;
 }
 
+/// An owned copy for a view that can outlive the watched source generation.
+/// Typed caches are rebuilt from the copied bytes, never borrowed from the
+/// original document's arena.
+pub fn copyDocument(arena: std.mem.Allocator, document: MarkupDocument) error{OutOfMemory}!MarkupDocument {
+    var copy = document;
+    copy.imports = try copyMarkupNodes(arena, document.imports);
+    copy.templates = try copyMarkupNodes(arena, document.templates);
+    if (document.root) |root| copy.root = try copyMarkupNode(arena, root);
+    return canonicalize(arena, copy);
+}
+
+fn copyMarkupNodes(arena: std.mem.Allocator, nodes: []const MarkupNode) error{OutOfMemory}![]const MarkupNode {
+    const copy = try arena.alloc(MarkupNode, nodes.len);
+    for (nodes, copy) |node, *out| out.* = try copyMarkupNode(arena, node);
+    return copy;
+}
+
+fn copyMarkupNode(arena: std.mem.Allocator, node: MarkupNode) error{OutOfMemory}!MarkupNode {
+    var copy = node;
+    copy.name = try arena.dupe(u8, node.name);
+    copy.text = try arena.dupe(u8, node.text);
+    copy.src_path = try arena.dupe(u8, node.src_path);
+    copy.typed_text = null;
+    copy.children = try copyMarkupNodes(arena, node.children);
+    const attrs = try arena.dupe(MarkupAttr, node.attrs);
+    for (attrs) |*attr| {
+        attr.name = try arena.dupe(u8, attr.name);
+        attr.value = try arena.dupe(u8, attr.value);
+        attr.typed = null;
+    }
+    copy.attrs = attrs;
+    return copy;
+}
+
 fn canonicalizeNode(arena: std.mem.Allocator, node: MarkupNode) error{OutOfMemory}!MarkupNode {
     var out = node;
     if (node.attrs.len > 0) {
@@ -3834,6 +3868,9 @@ pub const SourceFile = struct {
 /// returns nothing, so release binaries carry no source paths, no
 /// embedded-baseline references, and no watch plumbing.
 pub const MarkupFragment = if (builtin.mode == .Debug) struct {
+    /// Resolver path of the embedded root, for mapping its source set to
+    /// the registered disk path without losing nested import directories.
+    root_path: []const u8 = "",
     /// Identity of the compiled fragment type (the address of its
     /// comptime document), matched by the engine's build-time override
     /// lookup — registration and lookup derive it from the same type,
