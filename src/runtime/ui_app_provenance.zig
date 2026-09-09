@@ -61,6 +61,7 @@ pub const ChainRef = struct {
 
 pub const Record = struct {
     id: u64 = 0,
+    root_file: u8 = unknown_file,
     file: u8 = unknown_file,
     start: u32 = 0,
     end: u32 = 0,
@@ -164,6 +165,7 @@ pub const ProvenanceTable = struct {
         var record = &self.records[self.records_len];
         record.* = .{
             .id = id,
+            .root_file = self.fileIndexOf(source.root_path) orelse unknown_file,
             .file = self.fileIndexOf(source.src_path) orelse unknown_file,
             .start = clampU32(source.span.start),
             .end = clampU32(source.span.end),
@@ -233,7 +235,7 @@ pub const ProvenanceTable = struct {
     /// answers "where was it authored".
     pub fn writeResponse(self: *const ProvenanceTable, writer: *std.Io.Writer, view_label: []const u8, id: u64) !void {
         if (self.find(id)) |record| {
-            const root_file = if (self.files_len > 0) self.files[0].file() else "";
+            const root_file = if (record.root_file < self.files_len) self.files[record.root_file].file() else "";
             try writer.print("provenance ok view={s} id={d} authored=markup watching={} root={s}\n", .{ view_label, id, self.watching, root_file });
             try self.writeSite(writer, "node", record.file, record.start, record.end, record.line, record.column);
             var index: usize = 0;
