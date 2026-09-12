@@ -243,6 +243,9 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
         /// supported). Selecting a menu item dispatches its `command`
         /// through `on_command` with source `.tray`.
         pub const StatusItemOptions = struct {
+            /// Primary status item's transient macOS popover window.
+            /// Visibility commands are tray.popover_opened/closed, source .tray.
+            popover_window: []const u8 = "",
             /// Menu-bar button title (used when no icon resolves; macOS
             /// falls back to the app name's first letter when both are
             /// empty).
@@ -3955,6 +3958,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 };
                 if (!applied.active) {
                     runtime.createStatusItem(descriptor.id, .{
+                        .popover_window = (self.options.status_item orelse StatusItemOptions{}).popover_window,
                         .title = descriptor.state.presentation.title,
                         .icon_path = shell.icon_path,
                         .tooltip = shell.tooltip,

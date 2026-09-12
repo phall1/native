@@ -237,6 +237,8 @@ pub const TrayItem = struct {
 /// The macOS menu bar is outside every window capture, so this is the
 /// only automation-visible evidence a model-driven tray exists.
 pub const Tray = struct {
+    popover_window: []const u8 = "",
+    popover_visible: bool = false,
     id: platform.StatusItemId = platform.primary_status_item_id,
     visible: bool = true,
     title: []const u8 = "",
@@ -640,7 +642,13 @@ pub fn writeText(input: Input, writer: anytype) !void {
         }
     }
     for (input.trays) |tray| {
-        try writer.print("tray #{d} title=\"{s}\" visible={any} items={d}\n", .{ tray.id, tray.title, tray.visible, tray.items.len });
+        try writer.print("tray #{d} title=\"{s}\" visible={any} items={d}", .{ tray.id, tray.title, tray.visible, tray.items.len });
+        if (tray.popover_window.len > 0) {
+            try writer.writeAll(" popover_window=");
+            try writeQuotedSnapshotText(tray.popover_window, writer);
+            try writer.print(" popover_visible={any}", .{tray.popover_visible});
+        }
+        try writer.writeByte('\n');
         for (tray.items) |item| {
             if (item.separator) {
                 try writer.writeAll("  tray-item separator\n");

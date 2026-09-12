@@ -306,6 +306,9 @@ pub const NullAudioCapture = struct {
 };
 
 const NullStatusItem = struct {
+    popover_window: [types.max_tray_popover_window_bytes]u8 = undefined,
+    popover_window_len: usize = 0,
+    popover_visible: bool = false,
     id: StatusItemId = 0,
     active: bool = false,
     visible: bool = true,
@@ -558,6 +561,7 @@ pub const NullPlatform = struct {
     tray_update_count: usize = 0,
     tray_title_update_count: usize = 0,
     tray_remove_count: usize = 0,
+    tray_popover_toggle_count: usize = 0,
     window_event_window_id: WindowId = 0,
     window_event_name: [max_window_event_name_bytes]u8 = undefined,
     window_event_name_len: usize = 0,
@@ -947,6 +951,7 @@ pub const NullPlatform = struct {
                 .update_tray_title_fn = updateTrayTitle,
                 .update_tray_presentation_fn = updateTrayPresentation,
                 .remove_tray_fn = removeTray,
+                .toggle_tray_popover_fn = toggleTrayPopover,
                 .open_external_url_fn = openExternalUrl,
                 .reveal_path_fn = revealPath,
                 .add_recent_document_fn = addRecentDocument,
@@ -1782,6 +1787,8 @@ pub const NullPlatform = struct {
     fn createTray(context: ?*anyopaque, status_item_id: StatusItemId, options: TrayOptions) anyerror!void {
         const self: *NullPlatform = @ptrCast(@alignCast(context.?));
         const item = try self.statusItemSlot(status_item_id);
+        item.popover_window_len = (try copyInto(&item.popover_window, options.popover_window)).len;
+        item.popover_visible = false;
         try copyTrayShell(item, types.trayShell(options));
         var presentation = options.presentation;
         if (presentation.title.len == 0) presentation.title = options.title;
@@ -1866,6 +1873,19 @@ pub const NullPlatform = struct {
         item.item_count = 0;
         self.status_item_count -= 1;
         self.tray_remove_count += 1;
+    }
+
+    fn toggleTrayPopover(context: ?*anyopaque) anyerror!void {
+        const self: *NullPlatform = @ptrCast(@alignCast(context.?));
+        const item = self.findStatusItem(types.primary_status_item_id) orelse return error.UnsupportedService;
+        if (item.popover_window_len == 0) return error.UnsupportedService;
+        item.popover_visible = !item.popover_visible;
+        self.tray_popover_toggle_count += 1;
+    }
+
+    pub fn trayPopoverVisible(self: *const NullPlatform) bool {
+        const item = self.findStatusItemConst(types.primary_status_item_id) orelse return false;
+        return item.popover_visible;
     }
 
     fn openExternalUrl(context: ?*anyopaque, url: []const u8) anyerror!void {

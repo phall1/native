@@ -103,6 +103,9 @@ pub const RuntimeTrayItem = struct {
 };
 
 pub const RuntimeStatusItem = struct {
+    popover_window: []const u8 = "",
+    popover_window_storage: [platform.max_tray_popover_window_bytes]u8 = undefined,
+    popover_visible: bool = false,
     id: platform.StatusItemId = 0,
     active: bool = false,
     visible: bool = true,

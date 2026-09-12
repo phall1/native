@@ -434,6 +434,38 @@ test "runtime dispatches named tray lifecycle commands with tray source" {
     try std.testing.expectEqualStrings("app.refresh", app_state.last_name);
     try std.testing.expectEqual(CommandSource.tray, app_state.last_source);
     try std.testing.expectEqual(@as(platform.WindowId, 3), app_state.last_window_id);
+
+    // Popover compatibility is scoped to the primary item; creating and
+    // updating a second typed status item must not replace its hosting.
+    try std.testing.expectError(error.UnsupportedService, harness.runtime.toggleTrayPopover());
+    try std.testing.expectError(error.InvalidTrayOptions, harness.runtime.createStatusItem(7, .{ .popover_window = "panel" }));
+    try harness.runtime.createTray(.{ .popover_window = "panel" });
+    try harness.runtime.createStatusItem(7, .{ .title = "Other", .items = &.{.{ .role = .info, .label = "Readout" }} });
+    try harness.runtime.updateStatusItemShell(1, .{ .tooltip = "Live shell" });
+    try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .native_command = .{ .name = "native-sdk.tray.toggle-popover" } });
+    try std.testing.expect(harness.null_platform.trayPopoverVisible());
+    try std.testing.expectEqual(@as(u32, 1), app_state.command_count);
+    // Native visibility arrives asynchronously; toggling alone must not
+    // optimistically claim that a panel reached the screen.
+    try std.testing.expect(!harness.runtime.automationSnapshot("popover").trays[0].popover_visible);
+    try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .tray_popover = .{ .visible = true } });
+    try std.testing.expectEqualStrings("tray.popover_opened", app_state.last_name);
+    try std.testing.expectEqual(CommandSource.tray, app_state.last_source);
+    const snapshot = harness.runtime.automationSnapshot("popover");
+    try std.testing.expectEqual(@as(usize, 2), snapshot.trays.len);
+    try std.testing.expectEqualStrings("panel", snapshot.trays[0].popover_window);
+    try std.testing.expect(snapshot.trays[0].popover_visible);
+    try std.testing.expectEqualStrings("Other", snapshot.trays[1].title);
+    var snapshot_buffer: [8192]u8 = undefined;
+    var snapshot_writer = std.Io.Writer.fixed(&snapshot_buffer);
+    try automation.snapshot.writeText(snapshot, &snapshot_writer);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot_writer.buffered(), "popover_window=\"panel\" popover_visible=true") != null);
+    try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .tray_popover = .{ .visible = false } });
+    try std.testing.expectEqualStrings("tray.popover_closed", app_state.last_name);
+    try std.testing.expect(!harness.runtime.automationSnapshot("popover").trays[0].popover_visible);
+    try harness.runtime.removeTray();
+    try std.testing.expectError(error.UnsupportedService, harness.runtime.toggleTrayPopover());
+    try std.testing.expectEqual(@as(usize, 1), harness.runtime.automationSnapshot("popover").trays.len);
 }
 
 test "runtime dispatches notification actions through the normal command path" {

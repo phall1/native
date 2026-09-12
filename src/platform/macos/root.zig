@@ -469,6 +469,10 @@ extern fn native_sdk_appkit_update_tray_title(host: *AppKitHost, status_item_id:
 extern fn native_sdk_appkit_update_tray_presentation(host: *AppKitHost, status_item_id: u32, title: [*]const u8, title_len: usize, width: f64, tone: c_int, icon_opacity: f64, monospaced: c_int, font_size: f64, font_weight: c_int) void;
 extern fn native_sdk_appkit_remove_tray(host: *AppKitHost, status_item_id: u32) void;
 extern fn native_sdk_appkit_set_tray_callback(host: *AppKitHost, callback: AppKitTrayCallback, context: ?*anyopaque) void;
+const AppKitTrayPopoverCallback = *const fn (context: ?*anyopaque, visible: c_int) callconv(.c) void;
+extern fn native_sdk_appkit_set_tray_popover(host: *AppKitHost, label: [*]const u8, label_len: usize) void;
+extern fn native_sdk_appkit_toggle_tray_popover(host: *AppKitHost) c_int;
+extern fn native_sdk_appkit_set_tray_popover_callback(host: *AppKitHost, callback: AppKitTrayPopoverCallback, context: ?*anyopaque) void;
 
 /// Whether a Dock icon path names a raw image source (.png/.svg) that
 /// `native package` would inset and mask onto the macOS icon grid.
@@ -822,6 +826,7 @@ pub const MacPlatform = struct {
                 .update_tray_title_fn = updateTrayTitle,
                 .update_tray_presentation_fn = updateTrayPresentation,
                 .remove_tray_fn = removeTray,
+                .toggle_tray_popover_fn = toggleTrayPopover,
                 .configure_security_policy_fn = configureSecurityPolicy,
                 .configure_menus_fn = configureMenus,
                 .configure_shortcuts_fn = configureShortcuts,
@@ -941,6 +946,7 @@ pub const MacPlatform = struct {
         };
         native_sdk_appkit_set_bridge_callback(self.host, appkitBridgeCallback, &self.state);
         native_sdk_appkit_set_tray_callback(self.host, appkitTrayCallback, &self.state);
+        native_sdk_appkit_set_tray_popover_callback(self.host, appkitTrayPopoverCallback, &self.state);
         native_sdk_appkit_run(self.host, appkitCallback, &self.state);
         if (self.state.failed) return error.CallbackFailed;
     }
@@ -2774,6 +2780,9 @@ fn createTray(context: ?*anyopaque, status_item_id: platform_mod.StatusItemId, o
         options.open_command.ptr,
         options.open_command.len,
     );
+    if (status_item_id == platform_mod.primary_status_item_id) {
+        native_sdk_appkit_set_tray_popover(self.host, options.popover_window.ptr, options.popover_window.len);
+    }
     if (options.items.len > 0) {
         try updateTrayMenu(context, status_item_id, options.items);
     }
@@ -2895,6 +2904,16 @@ fn removeTray(context: ?*anyopaque, status_item_id: platform_mod.StatusItemId) a
 fn appkitTrayCallback(context: ?*anyopaque, status_item_id: u32, item_id: u32) callconv(.c) void {
     const state: *RunState = @ptrCast(@alignCast(context.?));
     state.emit(.{ .tray_action = .{ .status_item_id = status_item_id, .item_id = item_id } });
+}
+
+fn toggleTrayPopover(context: ?*anyopaque) anyerror!void {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    if (native_sdk_appkit_toggle_tray_popover(self.host) == 0) return error.UnsupportedService;
+}
+
+fn appkitTrayPopoverCallback(context: ?*anyopaque, visible: c_int) callconv(.c) void {
+    const state: *RunState = @ptrCast(@alignCast(context.?));
+    state.emit(.{ .tray_popover = .{ .visible = visible != 0 } });
 }
 
 fn flattenFilters(filters: []const platform_mod.FileFilter, buffer: []u8) []const u8 {

@@ -268,6 +268,7 @@ pub const max_tray_title_bytes: usize = 64;
 pub const max_tray_tooltip_bytes: usize = 256;
 pub const max_tray_item_label_bytes: usize = 256;
 pub const max_tray_item_command_bytes: usize = 128;
+pub const max_tray_popover_window_bytes: usize = 128;
 pub const max_tray_item_detail_bytes: usize = 256;
 pub const max_tray_segment_options: usize = 8;
 pub const max_tray_segment_label_bytes: usize = 64;
@@ -1466,6 +1467,8 @@ pub const LocalTimeStyle = enum(u8) {
 
 pub const StatusItemId = u32;
 pub const primary_status_item_id: StatusItemId = 1;
+/// Visibility report for the primary status item's hosted popover.
+pub const TrayPopoverEvent = struct { visible: bool };
 pub const TrayItemId = u32;
 
 /// Visual emphasis for the menu-bar button's live presentation. Hosts
@@ -1500,6 +1503,10 @@ pub const TrayPresentation = struct {
 };
 
 pub const TrayOptions = struct {
+    /// Primary/default status item only: host this window's content in a
+    /// transient macOS popover. Left click toggles it; right click opens
+    /// the typed menu. Shell/presentation updates retain the hosting.
+    popover_window: []const u8 = "",
     icon_path: []const u8 = "",
     /// Status-bar button title, shown when no icon resolves (macOS
     /// `NSStatusItem` menu-bar extras render it directly in the menu bar).
@@ -2587,6 +2594,7 @@ pub const Event = union(enum) {
     view_focused: ViewFocusEvent,
     bridge_message: BridgeMessage,
     tray_action: TrayActionEvent,
+    tray_popover: TrayPopoverEvent,
     shortcut: ShortcutEvent,
     native_command: NativeCommandEvent,
     menu_command: MenuCommandEvent,
@@ -2626,6 +2634,7 @@ pub const Event = union(enum) {
             .view_focused => "view_focused",
             .bridge_message => "bridge_message",
             .tray_action => "tray_action",
+            .tray_popover => "tray_popover",
             .shortcut => "shortcut",
             .native_command => "native_command",
             .menu_command => "menu_command",
@@ -2788,6 +2797,7 @@ pub const PlatformServices = struct {
     update_tray_title_fn: ?*const fn (context: ?*anyopaque, status_item_id: StatusItemId, title: []const u8) anyerror!void = null,
     update_tray_presentation_fn: ?*const fn (context: ?*anyopaque, status_item_id: StatusItemId, presentation: TrayPresentation) anyerror!void = null,
     remove_tray_fn: ?*const fn (context: ?*anyopaque, status_item_id: StatusItemId) anyerror!void = null,
+    toggle_tray_popover_fn: ?*const fn (context: ?*anyopaque) anyerror!void = null,
     configure_security_policy_fn: ?*const fn (context: ?*anyopaque, policy: security.Policy) anyerror!void = null,
     configure_menus_fn: ?*const fn (context: ?*anyopaque, menus: []const Menu) anyerror!void = null,
     configure_shortcuts_fn: ?*const fn (context: ?*anyopaque, shortcuts: []const Shortcut) anyerror!void = null,
@@ -3420,6 +3430,11 @@ pub const PlatformServices = struct {
 
     pub fn removeTray(self: PlatformServices) anyerror!void {
         return self.removeStatusItem(primary_status_item_id);
+    }
+
+    pub fn toggleTrayPopover(self: PlatformServices) anyerror!void {
+        const toggle_fn = self.toggle_tray_popover_fn orelse return error.UnsupportedService;
+        try toggle_fn(self.context);
     }
 
     pub fn configureSecurityPolicy(self: PlatformServices, policy: security.Policy) anyerror!void {

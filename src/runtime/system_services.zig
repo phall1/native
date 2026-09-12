@@ -145,12 +145,15 @@ pub fn RuntimeSystemServices(comptime Runtime: type) type {
         pub fn createStatusItem(self: *Runtime, status_item_id: platform.StatusItemId, options: platform.TrayOptions) anyerror!void {
             try validation.validateStatusItemId(status_item_id);
             try validateTrayOptions(options);
+            if (options.popover_window.len > 0 and status_item_id != platform.primary_status_item_id) return error.InvalidTrayOptions;
             const status_item = try statusItemSlot(self, status_item_id);
             const was_active = status_item.active;
             try self.options.platform.services.createStatusItem(status_item_id, options);
             try storeTrayItems(status_item, options.items);
             const title = if (options.presentation.title.len > 0) options.presentation.title else options.title;
             status_item.title = try copyInto(&status_item.title_storage, title);
+            status_item.popover_window = try copyInto(&status_item.popover_window_storage, options.popover_window);
+            status_item.popover_visible = false;
             status_item.id = status_item_id;
             status_item.active = true;
             status_item.visible = options.visible;
@@ -219,6 +222,17 @@ pub fn RuntimeSystemServices(comptime Runtime: type) type {
 
         pub fn removeTray(self: *Runtime) anyerror!void {
             return self.removeStatusItem(platform.primary_status_item_id);
+        }
+
+        pub fn toggleTrayPopover(self: *Runtime) anyerror!void {
+            const item = findStatusItem(self, platform.primary_status_item_id) orelse return error.UnsupportedService;
+            if (item.popover_window.len == 0) return error.UnsupportedService;
+            try self.options.platform.services.toggleTrayPopover();
+        }
+
+        pub fn recordTrayPopoverVisibility(self: *Runtime, visible: bool) void {
+            const item = findStatusItem(self, platform.primary_status_item_id) orelse return;
+            item.popover_visible = visible;
         }
 
         pub fn statusItemExists(self: *const Runtime, status_item_id: platform.StatusItemId) bool {

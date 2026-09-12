@@ -110,6 +110,8 @@ pub fn RuntimeAutomationSnapshot(comptime Runtime: type) type {
                 }
                 self.automation_trays[tray_count] = .{
                     .id = status_item.id,
+                    .popover_window = status_item.popover_window,
+                    .popover_visible = status_item.popover_visible,
                     .visible = status_item.visible,
                     .title = status_item.title,
                     .items = self.automation_tray_items[item_offset .. item_offset + count],

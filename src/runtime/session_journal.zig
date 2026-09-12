@@ -185,6 +185,7 @@ fn formatLayoutDescription(comptime epoch: u32) []const u8 {
             "view_focused=" ++ layout_fingerprint.describe(platform.ViewFocusEvent) ++ "\n" ++
             "bridge_message=" ++ layout_fingerprint.describe(platform.BridgeMessage) ++ "\n" ++
             "tray_action=" ++ layout_fingerprint.describe(platform.TrayItemId) ++ "\n" ++
+            "tray_popover=" ++ layout_fingerprint.describe(platform.TrayPopoverEvent) ++ "\n" ++
             "shortcut=" ++ layout_fingerprint.describe(platform.ShortcutEvent) ++ "\n" ++
             "native_command=" ++ layout_fingerprint.describe(platform.NativeCommandEvent) ++ "\n" ++
             "menu_command=" ++ layout_fingerprint.describe(platform.MenuCommandEvent) ++ "\n" ++
@@ -472,6 +473,7 @@ const EventTag = enum(u8) {
     view_focused = 26,
     tray_command = 27,
     notification_command = 28,
+    tray_popover = 29,
 };
 
 // The bit assignments below are hand-written wire layout: they are
@@ -595,6 +597,10 @@ pub fn encodeEvent(event: platform.Event, buffer: []u8) JournalError![]const u8 
             try cursor.writeEnum(EventTag.tray_action);
             try cursor.writeInt(u32, action.status_item_id);
             try cursor.writeInt(u32, action.item_id);
+        },
+        .tray_popover => |popover| {
+            try cursor.writeEnum(EventTag.tray_popover);
+            try cursor.writeByte(@intFromBool(popover.visible));
         },
         .shortcut => |shortcut| {
             try cursor.writeEnum(EventTag.shortcut);
@@ -826,6 +832,7 @@ pub fn decodeEvent(bytes: []const u8, storage: *EventDecodeStorage) JournalError
             .status_item_id = try cursor.readInt(u32),
             .item_id = try cursor.readInt(u32),
         } },
+        .tray_popover => .{ .tray_popover = .{ .visible = (try cursor.readByte()) != 0 } },
         .shortcut => blk: {
             const id = try cursor.readStr();
             const key = try cursor.readStr();
@@ -1697,6 +1704,12 @@ test "event codec round-trips every payload variant" {
         const decoded = try roundTripEvent(.{ .tray_action = .{ .status_item_id = 3, .item_id = 9 } });
         try testing.expectEqual(@as(platform.StatusItemId, 3), decoded.tray_action.status_item_id);
         try testing.expectEqual(@as(platform.TrayItemId, 9), decoded.tray_action.item_id);
+    }
+    {
+        const opened = try roundTripEvent(.{ .tray_popover = .{ .visible = true } });
+        const closed = try roundTripEvent(.{ .tray_popover = .{ .visible = false } });
+        try testing.expect(opened.tray_popover.visible);
+        try testing.expect(!closed.tray_popover.visible);
     }
     {
         const decoded = try roundTripEvent(.{ .window_focused = 4 });

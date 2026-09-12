@@ -4042,6 +4042,19 @@ void native_sdk_appkit_set_tray_callback(native_sdk_appkit_host_t *host, native_
     object.trayContext = context;
 }
 
+void native_sdk_appkit_set_tray_popover(native_sdk_appkit_host_t *host, const char *label, size_t label_len) {
+    (void)host; (void)label; (void)label_len;
+}
+
+int native_sdk_appkit_toggle_tray_popover(native_sdk_appkit_host_t *host) {
+    (void)host;
+    return 0;
+}
+
+void native_sdk_appkit_set_tray_popover_callback(native_sdk_appkit_host_t *host, native_sdk_appkit_tray_popover_callback_t callback, void *context) {
+    (void)host; (void)callback; (void)context;
+}
+
 int native_sdk_appkit_audio_capture_start(native_sdk_appkit_host_t *host, int source, uint32_t sample_rate, uint8_t channels, native_sdk_appkit_audio_capture_push_t callback, void *context) {
     (void)host;
     (void)source;

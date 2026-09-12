@@ -803,6 +803,7 @@ pub const Runtime = struct {
     pub const updateTrayTitle = SystemServiceMethods.updateTrayTitle;
     pub const updateTrayPresentation = SystemServiceMethods.updateTrayPresentation;
     pub const removeTray = SystemServiceMethods.removeTray;
+    pub const toggleTrayPopover = SystemServiceMethods.toggleTrayPopover;
     const trayCommandNameForItem = SystemServiceMethods.trayCommandNameForItem;
     const statusItemCommandNameForItem = SystemServiceMethods.statusItemCommandNameForItem;
     const supportsFeatureFromJson = SystemServiceMethods.supportsFeatureFromJson;

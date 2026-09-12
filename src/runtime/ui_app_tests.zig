@@ -4186,6 +4186,7 @@ test "ui app status item installs a tray and dispatches its commands" {
         .status_item = .{
             .title = "NS",
             .tooltip = "native-sdk status",
+            .popover_window = "main",
             .items = &status_items,
         },
     });
@@ -4208,6 +4209,9 @@ test "ui app status item installs a tray and dispatches its commands" {
     try std.testing.expectEqualStrings("NS", harness.null_platform.lastTrayTitle());
     try std.testing.expectEqualStrings("native-sdk status", harness.null_platform.lastTrayTooltip());
     try std.testing.expectEqual(@as(usize, 3), harness.null_platform.trayItems().len);
+    try harness.runtime.toggleTrayPopover();
+    try std.testing.expect(harness.null_platform.trayPopoverVisible());
+    try std.testing.expectEqualStrings("main", harness.runtime.automationSnapshot("popover").trays[0].popover_window);
     var second_frame = frame_event;
     second_frame.frame_index = 2;
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = second_frame });

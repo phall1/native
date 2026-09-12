@@ -371,6 +371,15 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                         .tray_item_id = action.item_id,
                     });
                 },
+                .tray_popover => |popover| {
+                    SystemServiceMethods().recordTrayPopoverVisibility(self, popover.visible);
+                    try dispatchCommand(self, app, .{
+                        .name = if (popover.visible) "tray.popover_opened" else "tray.popover_closed",
+                        .source = .tray,
+                        .status_item_id = platform.primary_status_item_id,
+                    });
+                    self.invalidateFor(.command, null);
+                },
                 .shortcut => |shortcut| {
                     try dispatchCommand(self, app, .{
                         .name = shortcut.id,
@@ -382,6 +391,12 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                     self.invalidateFor(.command, null);
                 },
                 .native_command => |command| {
+                    if (std.mem.eql(u8, command.name, "native-sdk.tray.toggle-popover")) {
+                        SystemServiceMethods().toggleTrayPopover(self) catch |err| {
+                            log(self, "tray.popover_toggle_failed", @errorName(err), &.{});
+                        };
+                        return;
+                    }
                     try dispatchCommand(self, app, .{
                         .name = command.name,
                         .source = WindowViewMethods().commandSourceForNativeView(self, command.window_id, command.view_label),

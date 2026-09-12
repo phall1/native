@@ -847,6 +847,11 @@ void native_sdk_appkit_update_tray_title(native_sdk_appkit_host_t *host, uint32_
 void native_sdk_appkit_update_tray_presentation(native_sdk_appkit_host_t *host, uint32_t status_item_id, const char *title, size_t title_len, double width, int tone, double icon_opacity, int monospaced, double font_size, int font_weight);
 void native_sdk_appkit_remove_tray(native_sdk_appkit_host_t *host, uint32_t status_item_id);
 void native_sdk_appkit_set_tray_callback(native_sdk_appkit_host_t *host, native_sdk_appkit_tray_callback_t callback, void *context);
+/* Primary status item only; the CEF host leaves popovers unsupported. */
+typedef void (*native_sdk_appkit_tray_popover_callback_t)(void *context, int visible);
+void native_sdk_appkit_set_tray_popover(native_sdk_appkit_host_t *host, const char *label, size_t label_len);
+int native_sdk_appkit_toggle_tray_popover(native_sdk_appkit_host_t *host);
+void native_sdk_appkit_set_tray_popover_callback(native_sdk_appkit_host_t *host, native_sdk_appkit_tray_popover_callback_t callback, void *context);
 
 #ifdef __cplusplus
 }
