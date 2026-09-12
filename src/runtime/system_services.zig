@@ -142,6 +142,21 @@ pub fn RuntimeSystemServices(comptime Runtime: type) type {
             return self.options.platform.services.formatLocalTime(timestamp_ms, style, buffer);
         }
 
+        /// Compatibility with existing Zig apps. Status-aware callers can
+        /// use platform.services.launchAtLoginStatus() to observe approval.
+        pub fn getLaunchAtLogin(self: *Runtime) anyerror!bool {
+            return launchAtLoginEnabled(try self.options.platform.services.launchAtLoginStatus());
+        }
+
+        pub fn setLaunchAtLogin(self: *Runtime, enabled: bool) anyerror!void {
+            _ = try launchAtLoginEnabled(try self.options.platform.services.setLaunchAtLogin(enabled));
+        }
+
+        fn launchAtLoginEnabled(status: platform.LaunchAtLoginStatus) anyerror!bool {
+            if (status == .not_found) return error.RequiresAppBundle;
+            return status == .enabled;
+        }
+
         pub fn createStatusItem(self: *Runtime, status_item_id: platform.StatusItemId, options: platform.TrayOptions) anyerror!void {
             try validation.validateStatusItemId(status_item_id);
             try validateTrayOptions(options);

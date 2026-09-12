@@ -468,6 +468,22 @@ test "runtime dispatches named tray lifecycle commands with tray source" {
     try std.testing.expectEqual(@as(usize, 1), harness.runtime.automationSnapshot("popover").trays.len);
 }
 
+test "runtime launch-at-login compatibility delegates to upstream status services" {
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    try std.testing.expect(!try harness.runtime.getLaunchAtLogin());
+    try harness.runtime.setLaunchAtLogin(true);
+    try std.testing.expect(try harness.runtime.getLaunchAtLogin());
+    try harness.runtime.setLaunchAtLogin(false);
+    try std.testing.expect(!try harness.runtime.getLaunchAtLogin());
+    harness.null_platform.launch_at_login_status = .requires_approval;
+    try std.testing.expect(!try harness.runtime.getLaunchAtLogin());
+    harness.null_platform.launch_at_login_status = .not_found;
+    try std.testing.expectError(error.RequiresAppBundle, harness.runtime.getLaunchAtLogin());
+    harness.runtime.options.platform.services.set_launch_at_login_fn = null;
+    try std.testing.expectError(error.UnsupportedService, harness.runtime.setLaunchAtLogin(true));
+}
+
 test "runtime dispatches notification actions through the normal command path" {
     const TestApp = struct {
         command_count: u32 = 0,
