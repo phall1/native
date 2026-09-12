@@ -1141,6 +1141,8 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
 - (NativeSdkStatusItemEntry *)statusEntryForMenu:(NSMenu *)menu;
 - (void)emitStatusCommand:(NSString *)command statusItemId:(uint32_t)statusItemId;
 - (void)statusItemActivated:(id)sender;
+- (void)activateStatusEntry:(NativeSdkStatusItemEntry *)entry event:(NSEvent *)event;
+- (NSView *)contentContainerForWindow:(NSWindow *)window;
 - (BOOL)windowIsTrayPopoverHosted:(uint64_t)windowId;
 - (BOOL)isTrayPopoverEntry:(NativeSdkStatusItemEntry *)entry;
 - (void)configureStatusButton:(NativeSdkStatusItemEntry *)entry;
@@ -8467,6 +8469,16 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
     return YES;
 }
 
+// Window identity and sizing remain on NSWindow. Its logical view tree can
+// temporarily live in the popover controller while contentView is a placeholder.
+- (NSView *)contentContainerForWindow:(NSWindow *)window {
+    if (!window) return nil;
+    if (self.trayPopoverHostedWindowId != 0 && self.windows[@(self.trayPopoverHostedWindowId)] == window) {
+        return self.trayPopoverController.view;
+    }
+    return window.contentView;
+}
+
 // Create-on-first-use for a window's main WebView. Pure peek reads
 // (event emission, bridge completion echoes, reorder passes) keep going
 // through `webViewForWindowId:` and skip absent WebViews — a page that
@@ -8479,7 +8491,7 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
     WKWebView *existing = self.webViews[key];
     if (existing) return existing;
     NSWindow *window = self.windows[key] ?: (windowId == 1 ? self.window : nil);
-    NSView *container = window.contentView;
+    NSView *container = [self contentContainerForWindow:window];
     if (!container) return nil;
 
     WKWebViewConfiguration *configuration = [[WKWebViewConfiguration alloc] init];
@@ -8552,7 +8564,7 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
 }
 
 - (NSRect)webViewFrameForWindow:(NSWindow *)window x:(double)x y:(double)y width:(double)width height:(double)height {
-    NSView *contentView = window.contentView;
+    NSView *contentView = [self contentContainerForWindow:window];
     CGFloat nativeY = contentView.isFlipped ? y : contentView.bounds.size.height - y - height;
     return NSMakeRect(x, nativeY, width, height);
 }
@@ -8572,7 +8584,7 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
         return parentView;
     }
     NSWindow *window = self.windows[@(windowId)] ?: (windowId == 1 ? self.window : nil);
-    return window.contentView;
+    return [self contentContainerForWindow:window];
 }
 
 - (NSView *)makeNativeViewWithKind:(NSInteger)kind label:(NSString *)label role:(NSString *)role text:(NSString *)text {
@@ -8774,7 +8786,7 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
     if (label.length == 0 || x < 0 || y < 0 || width < 0 || height < 0) return NO;
     if (self.nativeViews.count >= NativeSdkMaxNativeViews) return NO;
     NSWindow *window = self.windows[@(windowId)] ?: (windowId == 1 ? self.window : nil);
-    if (!window || !window.contentView) return NO;
+    if (!window || ![self contentContainerForWindow:window]) return NO;
 
     NSString *key = [self nativeViewKeyForWindow:windowId label:label];
     if (self.nativeViews[key]) return NO;
@@ -8947,7 +8959,7 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
 - (BOOL)showContextMenuInWindow:(uint64_t)windowId label:(NSString *)label x:(double)x y:(double)y token:(uint64_t)token items:(const native_sdk_appkit_context_menu_item_t *)items count:(NSUInteger)count {
     NSView *view = nil;
     if (label.length > 0) view = self.nativeViews[[self nativeViewKeyForWindow:windowId label:label]];
-    if (!view) view = ((NSWindow *)self.windows[@(windowId)]).contentView;
+    if (!view) view = [self contentContainerForWindow:self.windows[@(windowId)]];
     if (!view || count == 0) return NO;
 
     NSMenu *menu = [[NSMenu alloc] initWithTitle:@""];
@@ -9154,7 +9166,8 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
 - (BOOL)createWebViewInWindow:(uint64_t)windowId label:(NSString *)label url:(NSString *)url x:(double)x y:(double)y width:(double)width height:(double)height layer:(NSInteger)layer transparent:(BOOL)transparent bridgeEnabled:(BOOL)bridgeEnabled {
     if (label.length == 0 || url.length == 0 || width <= 0 || height <= 0 || x < 0 || y < 0) return NO;
     NSWindow *window = self.windows[@(windowId)] ?: (windowId == 1 ? self.window : nil);
-    if (!window || !window.contentView) return NO;
+    NSView *container = [self contentContainerForWindow:window];
+    if (!window || !container) return NO;
     NSURL *targetURL = [NSURL URLWithString:url];
     if (!targetURL) return NO;
     if (![self allowsNavigationURL:targetURL]) return NO;
@@ -9199,7 +9212,7 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
     }
     webview.navigationDelegate = self;
     webview.autoresizingMask = NSViewNotSizable;
-    [window.contentView addSubview:webview positioned:NSWindowAbove relativeTo:nil];
+    [container addSubview:webview positioned:NSWindowAbove relativeTo:nil];
     [webview loadRequest:[NSURLRequest requestWithURL:targetURL]];
     self.childWebViews[key] = webview;
     if (bridgeEnabled) [self.bridgeEnabledChildWebViewKeys addObject:key];
@@ -9306,7 +9319,7 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
 
 - (void)reorderWebViewsInWindow:(uint64_t)windowId {
     NSWindow *window = self.windows[@(windowId)] ?: (windowId == 1 ? self.window : nil);
-    NSView *contentView = window.contentView;
+    NSView *contentView = [self contentContainerForWindow:window];
     if (!contentView) return;
 
     NSMutableArray<NSView *> *views = [[NSMutableArray alloc] init];
@@ -9353,7 +9366,7 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
 
 - (void)updateCoveredMouseRectsInWindow:(uint64_t)windowId {
     NSWindow *window = self.windows[@(windowId)] ?: (windowId == 1 ? self.window : nil);
-    NSView *contentView = window.contentView;
+    NSView *contentView = [self contentContainerForWindow:window];
     if (!contentView) return;
 
     NSMutableArray<NSView *> *views = [[NSMutableArray alloc] init];
@@ -12764,17 +12777,35 @@ static void NativeSdkVideoFittedSize(double naturalWidth, double naturalHeight, 
 - (void)statusItemActivated:(id)sender {
     NSStatusBarButton *button = [sender isKindOfClass:[NSStatusBarButton class]] ? sender : nil;
     NativeSdkStatusItemEntry *entry = button ? [self statusEntryForId:(uint32_t)button.tag] : nil;
+    [self activateStatusEntry:entry event:NSApp.currentEvent];
+}
+
+- (BOOL)isSecondaryTrayEvent:(NSEvent *)event {
+    return event.type == NSEventTypeRightMouseUp || (event.modifierFlags & NSEventModifierFlagControl) != 0;
+}
+
+- (void)openStatusMenu:(NativeSdkStatusItemEntry *)entry {
+    if (entry.menu) [entry.item popUpStatusItemMenu:entry.menu];
+}
+
+- (void)activateStatusEntry:(NativeSdkStatusItemEntry *)entry event:(NSEvent *)event {
     if (!entry) return;
-    if ((NSEvent.modifierFlags & NSEventModifierFlagOption) != 0 && entry.alternateActivationCommand.length > 0) {
+    // The popover's secondary click is a menu gesture, even with Option held.
+    // It must be consumed before either activation hook can run.
+    if ([self isTrayPopoverEntry:entry] && [self isSecondaryTrayEvent:event]) {
+        [self openStatusMenu:entry];
+        return;
+    }
+    if ((event.modifierFlags & NSEventModifierFlagOption) != 0 && entry.alternateActivationCommand.length > 0) {
         [self emitStatusCommand:entry.alternateActivationCommand statusItemId:entry.identifier];
         return;
     }
     [self emitStatusCommand:entry.activationCommand statusItemId:entry.identifier];
     if ([self isTrayPopoverEntry:entry]) {
-        [self trayPopoverButtonClicked:entry];
+        [self toggleTrayPopover];
         return;
     }
-    if (entry.menu) [entry.item popUpStatusItemMenu:entry.menu];
+    [self openStatusMenu:entry];
 }
 
 - (BOOL)isTrayPopoverEntry:(NativeSdkStatusItemEntry *)entry {
@@ -12813,16 +12844,6 @@ static void NativeSdkVideoFittedSize(double naturalWidth, double naturalHeight, 
     if (windowId == 0) return;
     [self.deferredShowWindows removeObjectForKey:@(windowId)];
     [self.windows[@(windowId)] orderOut:nil];
-}
-
-- (void)trayPopoverButtonClicked:(NativeSdkStatusItemEntry *)entry {
-    NSEvent *event = NSApp.currentEvent;
-    const BOOL secondary = event.type == NSEventTypeRightMouseUp || (event.modifierFlags & NSEventModifierFlagControl) != 0;
-    if (secondary) {
-        if (entry.menu) [entry.item popUpStatusItemMenu:entry.menu];
-        return;
-    }
-    [self toggleTrayPopover];
 }
 
 // Borrow the existing container (including its Metal surface) while shown.
@@ -14112,8 +14133,6 @@ void native_sdk_appkit_update_tray_shell(native_sdk_appkit_host_t *host, uint32_
         if (!entry) return;
         NativeSdkApplyTrayShell(object, entry, icon_path, icon_path_len, tooltip, tooltip_len, visible, activation_command, activation_command_len, alternate_activation_command, alternate_activation_command_len, open_command, open_command_len);
         NativeSdkApplyTrayPresentation(object, entry, entry.presentationTitle, entry.presentationWidth, entry.presentationTone, entry.presentationIconOpacity, entry.presentationMonospaced, entry.presentationFontSize, entry.presentationFontWeight);
-        if (entry.activationCommand.length == 0 && entry.alternateActivationCommand.length == 0) entry.item.menu = entry.menu;
-        else entry.item.menu = nil;
     }
 }
 

@@ -24,6 +24,9 @@
 #                                                 CEF layout is absent — prime
 #                                                 with `zig build &&
 #                                                 ./zig-out/bin/native cef install`)
+#                                               + tray-popover-host: real AppKit
+#                                                 borrow/mount and click-routing
+#                                                 regression harness (no UI shown)
 #   examples/<name>/**                          -> that example's suite only
 #                                                 (test-example-<name>; the
 #                                                 mobile projects map to
@@ -164,7 +167,7 @@ while IFS= read -r file; do
     docs/*) docs_changed=true ;;
     apps/schema/*) docs_changed=true; meta_changed=true ;;
     packages/core/*) meta_changed=true ;;
-    src/platform/macos/*) framework_changed=true; macos_platform_changed=true ;;
+    src/platform/macos/*|scripts/test-tray-popover-host.sh) framework_changed=true; macos_platform_changed=true ;;
     src/*|build.zig|build.zig.zon|build/*|tools/*|tests/*|assets/*) framework_changed=true ;;
     examples/*/*)
       example="${file#examples/}"
@@ -293,6 +296,14 @@ cef_host_step() {
   run_step "cef-host-link" zig build test-webview-cef-link
 }
 
+tray_popover_host_step() {
+  if $is_macos; then
+    run_step "tray-popover-host" bash scripts/test-tray-popover-host.sh
+  else
+    skip_step "tray-popover-host" "macOS only"
+  fi
+}
+
 # ---- tiers ----------------------------------------------------------------
 
 if [ "$tier" = "fast" ]; then
@@ -346,6 +357,7 @@ if [ "$tier" = "fast" ]; then
   fi
 
   if $macos_platform_changed; then
+    tray_popover_host_step
     cef_host_step
   else
     skip_step "cef-host-link" "src/platform/macos unchanged vs $base_ref"
@@ -369,6 +381,7 @@ else # full
   run_step "examples-native" zig build test-examples-native
   run_step "examples-mobile" zig build test-examples-mobile
 
+  tray_popover_host_step
   cef_host_step
 
   if $is_macos; then
