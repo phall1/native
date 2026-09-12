@@ -3,9 +3,10 @@ import fs from "node:fs";
 // Kept in lockstep with `zig build print-pins`; the Node test suite checks
 // both values so a runtime wire change cannot silently strand dev-host
 // recordings.
-// EffectFileOp appended `delete`; the reflected journal layout fingerprint
-// moves so older recordings refuse cleanly instead of decoding op 8 wrongly.
-export const journalFormatFingerprint = 0xc510d4b0292ac71an;
+// Primary-tray popover visibility appends event tag 29 (one boolean byte).
+// Existing event encodings stay intact; this reflected identity also describes
+// that payload so devhost recordings replay in the popover-capable runtime.
+export const journalFormatFingerprint = 0xa3af960b6001de46n;
 export const automationProtocolFingerprint = 0x51f7889bbe3305e7n;
 
 const requestKeyBase = 0x5453525100000000n;
