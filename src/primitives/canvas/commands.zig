@@ -388,14 +388,12 @@ fn nonNegative(value: f32) f32 {
 /// keeps the two from drifting — so the store can only overflow on a
 /// frame the per-view display-list copy would refuse anyway.
 ///
-/// Raised 32 KiB -> 64 KiB with the terminal work: a full-width
-/// terminal viewport is ONE widget whose every visible cell is a
-/// presented byte (a 300x100 grid is ~30 KB before any chrome, and a
-/// split of two such panes doubles it), so the old store made a wide
-/// screen degrade to fewer painted rows while 96% of the command budget
-/// sat unused. See `canvas_limits.max_canvas_text_bytes_per_view` for
-/// the memory accounting.
-pub const max_display_list_text_bytes: usize = 65536;
+/// Raised 32 KiB -> 64 KiB with the original terminal work, then
+/// 64 KiB -> 128 KiB with Metal Hybrid C: one unique 3-byte 320x96
+/// pane is ~92160 interned bytes. See
+/// `canvas_limits.max_canvas_text_bytes_per_view` for the memory
+/// accounting.
+pub const max_display_list_text_bytes: usize = 131072;
 
 /// Commands one view's display list may hold. Mirrors the runtime's
 /// per-view `max_canvas_commands_per_view` — a lockstep test keeps the
@@ -407,12 +405,13 @@ pub const max_display_list_commands: usize = 2048;
 /// Cells one frame's `cell_grid` commands may hold between them.
 ///
 /// The budget that replaced the terminal's command budget: a screen
-/// costs CELLS now, and `cell_grid.Cell` is 20 bytes, so this is 640 KB
-/// of builder-owned storage and the same again in each view's retained
-/// copy. 32768 covers a 300x100 viewport (30,000) with room over, and
-/// two 160x100 split panes exactly. Mirrors the runtime's per-view
-/// `max_canvas_cells_per_view`, which a lockstep test pins.
-pub const max_display_list_cells: usize = 32768;
+/// costs CELLS now, and `cell_grid.Cell` is 20 bytes, so 131072 is
+/// 2560 KB of builder-owned storage and the same again in each view's
+/// retained copy. Raised 32768 -> 131072 (4x) for Metal Hybrid C: four
+/// 320x96 product grids (122880) plus 8192 slack. Mirrors the
+/// runtime's per-view `max_canvas_cells_per_view`, which a lockstep
+/// test pins.
+pub const max_display_list_cells: usize = 131072;
 
 /// A per-view store an emitter can run out of mid-frame.
 pub const DisplayListStore = enum { commands, text_bytes, path_elements, glyphs, cells };
