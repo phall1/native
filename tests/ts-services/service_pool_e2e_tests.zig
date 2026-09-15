@@ -102,7 +102,7 @@ const Harness = struct {
 
         self.app_state = try std.testing.allocator.create(App);
         errdefer std.testing.allocator.destroy(self.app_state);
-        self.app_state.* = Adapter.init(std.heap.page_allocator, .{
+        Adapter.initInPlace(self.app_state, std.heap.page_allocator, .{
             .host_calls = self.transport.binding(),
             .service_results = .{ .index_fn = registry.indexOf, .streaming_fn = registry.isStreaming, .decode_fn = registry.resultDecoder(core) },
         }, appOptions());
@@ -824,7 +824,7 @@ test "journal replay reproduces in-process service results without initializing 
     harness.null_platform.gpu_surfaces = true;
     const app_state = try std.testing.allocator.create(App);
     defer std.testing.allocator.destroy(app_state);
-    app_state.* = Adapter.init(std.heap.page_allocator, .{
+    Adapter.initInPlace(app_state, std.heap.page_allocator, .{
         .host_calls = replay_pool.binding(),
         .service_results = .{ .index_fn = registry.indexOf, .streaming_fn = registry.isStreaming, .decode_fn = registry.resultDecoder(core) },
     }, appOptions());
