@@ -198,10 +198,17 @@ fn emitHostCodecs(w: *std.Io.Writer, contract: service.Contract) !void {
         \\}
         \\function concat(parts: readonly Uint8Array[]): Uint8Array {
         \\  let length = 0;
-        \\  for (const part of parts) length += part.length;
+        \\  for (const candidate of parts) {
+        \\    const part = candidate === undefined ? new Uint8Array(0) : candidate;
+        \\    length += part.length;
+        \\  }
         \\  const out = new Uint8Array(length);
         \\  let at = 0;
-        \\  for (const part of parts) { out.set(part, at); at += part.length; }
+        \\  for (const candidate of parts) {
+        \\    const part = candidate === undefined ? new Uint8Array(0) : candidate;
+        \\    out.set(part, at);
+        \\    at += part.length;
+        \\  }
         \\  return out;
         \\}
         \\function writeBool(value: boolean): Uint8Array { return new Uint8Array([value ? 1 : 0]); }

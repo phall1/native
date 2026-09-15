@@ -298,7 +298,7 @@ const Harness = struct {
         self.harness.runtime.options.session_recorder = recorder;
         self.app_state = try std.testing.allocator.create(App);
         errdefer std.testing.allocator.destroy(self.app_state);
-        self.app_state.* = Adapter.init(std.heap.page_allocator, .{}, e2eOptions());
+        Adapter.initInPlace(self.app_state, std.heap.page_allocator, .{}, e2eOptions());
         // Bind the stub host services, the executor mode, and the
         // deterministic clock BEFORE install: init_fx issues the boot
         // request.
@@ -1943,7 +1943,7 @@ test "a recorded compiled-core session replays byte-identically with no host cal
     harness.null_platform.gpu_surfaces = true;
     const app_state = try std.testing.allocator.create(App);
     defer std.testing.allocator.destroy(app_state);
-    app_state.* = Adapter.init(std.heap.page_allocator, .{}, e2eOptions());
+    Adapter.initInPlace(app_state, std.heap.page_allocator, .{}, e2eOptions());
     defer app_state.deinit();
     app_state.effects.bindHostCalls(HostStub.binding());
 
@@ -2091,7 +2091,7 @@ test "a recorded stream session replays byte-identically with no process launche
     harness.null_platform.gpu_surfaces = true;
     const app_state = try std.testing.allocator.create(App);
     defer std.testing.allocator.destroy(app_state);
-    app_state.* = Adapter.init(std.heap.page_allocator, .{}, e2eOptions());
+    Adapter.initInPlace(app_state, std.heap.page_allocator, .{}, e2eOptions());
     defer app_state.deinit();
     app_state.effects.bindHostCalls(HostStub.binding());
 
@@ -2185,7 +2185,7 @@ test "a recorded mixed-rejection session replays with identical cross-family ord
     harness.null_platform.gpu_surfaces = true;
     const app_state = try std.testing.allocator.create(App);
     defer std.testing.allocator.destroy(app_state);
-    app_state.* = Adapter.init(std.heap.page_allocator, .{}, e2eOptions());
+    Adapter.initInPlace(app_state, std.heap.page_allocator, .{}, e2eOptions());
     defer app_state.deinit();
     app_state.effects.bindHostCalls(HostStub.binding());
 

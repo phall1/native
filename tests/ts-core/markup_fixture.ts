@@ -285,7 +285,9 @@ export function dropMsg(drop: FileDropEvent): Msg | null {
   if (drop.windowId !== 1 || drop.viewLabel !== "ts-markup-canvas") return null;
   if (drop.point === null || drop.point.x !== 12.5 || drop.point.y !== 24.25) return null;
   if (drop.paths.length === 0) return null;
-  return { kind: "banner_set", value: drop.paths[0] };
+  const candidate = drop.paths[0];
+  const value = candidate === undefined ? new Uint8Array(0) : candidate;
+  return { kind: "banner_set", value: value };
 }
 
 export const appearanceMsg = "appearance_changed";
@@ -362,10 +364,19 @@ export function update(model: Model, msg: Msg): [Model, Cmd<Msg>] {
       return [{ ...model, tasks: [...model.tasks, added], nextId: bumped }, Cmd.none];
     }
     case "toggle": {
-      const next = model.tasks.map((t) => (t.id === msg.taskId ? { ...t, done: !t.done } : t));
+      const next = model.tasks.map((candidate) => {
+        const task: Task = candidate === undefined
+          ? { id: 0, title: new Uint8Array(0), done: false }
+          : candidate;
+        return task.id === msg.taskId ? { ...task, done: !task.done } : task;
+      });
       let done = 0;
       for (let i = 0; i < next.length; i++) {
-        if (next[i].done) {
+        const candidate = next[i];
+        const task: Task = candidate === undefined
+          ? { id: 0, title: new Uint8Array(0), done: false }
+          : candidate;
+        if (task.done) {
           done = done + 1;
         }
       }

@@ -158,7 +158,10 @@ function cardsForColumn(model: Model, column: Column): readonly Card[] {
   if (sourceIndex < 0) {
     return model.cards.filter((card) => card.column === column);
   }
-  const source = model.cards[sourceIndex];
+  const candidate = model.cards[sourceIndex];
+  const source: Card = candidate === undefined
+    ? { id: 0, column: column, title: new Uint8Array(0), ticketNumber: 0, assignee: "claude", avatarId: 0 }
+    : candidate;
   const cards = model.cards.filter(
     (card) => card.column === column && card.id !== model.draggingId,
   );
@@ -238,7 +241,10 @@ function pathBasename(path: Uint8Array): Uint8Array {
 function committedCardMove(model: Model, id: number, target: Column, beforeId: number): Model {
   const sourceIndex = model.cards.findIndex((card) => card.id === id);
   if (sourceIndex < 0) return { ...model, draggingId: 0, dragBeforeId: 0 };
-  const source = model.cards[sourceIndex];
+  const candidate = model.cards[sourceIndex];
+  const source: Card = candidate === undefined
+    ? { id: 0, column: target, title: new Uint8Array(0), ticketNumber: 0, assignee: "claude", avatarId: 0 }
+    : candidate;
   const moved: Card = { ...source, column: target };
   const remaining = model.cards.filter((card) => card.id !== id);
   const cards: Card[] = [];

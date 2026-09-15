@@ -111,7 +111,7 @@ const Harness = struct {
         self.harness.runtime.options.session_recorder = config.recorder;
         self.app_state = try std.testing.allocator.create(App);
         errdefer std.testing.allocator.destroy(self.app_state);
-        self.app_state.* = Adapter.init(std.heap.page_allocator, config.core, boardOptions());
+        Adapter.initInPlace(self.app_state, std.heap.page_allocator, config.core, boardOptions());
         self.app_state.effects.clock = self.clock.clock();
         self.app = self.app_state.app();
         try self.harness.start(self.app);
@@ -841,7 +841,7 @@ test "a recorded markup session replays byte-identically with verified fingerpri
     harness.null_platform.gpu_surfaces = true;
     const app_state = try std.testing.allocator.create(App);
     defer std.testing.allocator.destroy(app_state);
-    app_state.* = Adapter.init(std.heap.page_allocator, .{}, boardOptions());
+    Adapter.initInPlace(app_state, std.heap.page_allocator, .{}, boardOptions());
     defer app_state.deinit();
 
     const report = try runtime_ns.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
@@ -926,7 +926,7 @@ test "a recorded tooltip hover dwell replays its show and hide frames byte-ident
     harness.null_platform.gpu_surfaces = true;
     const app_state = try std.testing.allocator.create(App);
     defer std.testing.allocator.destroy(app_state);
-    app_state.* = Adapter.init(std.heap.page_allocator, .{}, boardOptions());
+    Adapter.initInPlace(app_state, std.heap.page_allocator, .{}, boardOptions());
     defer app_state.deinit();
 
     const report = try runtime_ns.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{

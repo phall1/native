@@ -191,10 +191,14 @@ function hexDigit(value: number): number {
 
 export function concatAll(parts: readonly Uint8Array[]): Bytes {
   let total = 0;
-  for (const part of parts) total += part.length;
+  for (const candidate of parts) {
+    const part = candidate === undefined ? new Uint8Array(0) : candidate;
+    total += part.length;
+  }
   const out = new Uint8Array(total);
   let at = 0;
-  for (const part of parts) {
+  for (const candidate of parts) {
+    const part = candidate === undefined ? new Uint8Array(0) : candidate;
     out.set(part, at);
     at += part.length;
   }
