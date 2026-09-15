@@ -162,7 +162,7 @@ const Harness = struct {
         self.harness.runtime.options.session_recorder = recorder;
         self.app_state = try std.testing.allocator.create(App);
         errdefer std.testing.allocator.destroy(self.app_state);
-        self.app_state.* = Adapter.init(std.heap.page_allocator, .{}, appOptions());
+        Adapter.initInPlace(self.app_state, std.heap.page_allocator, .{}, appOptions());
         self.app_state.effects.executor = .fake;
         self.app_state.effects.clock = self.clock.clock();
         self.app = self.app_state.app();
@@ -851,7 +851,7 @@ test "a recorded monitor session replays byte-identically with zero host calls" 
     harness.null_platform.gpu_surfaces = true;
     const app_state = try std.testing.allocator.create(App);
     defer std.testing.allocator.destroy(app_state);
-    app_state.* = Adapter.init(std.heap.page_allocator, .{}, appOptions());
+    Adapter.initInPlace(app_state, std.heap.page_allocator, .{}, appOptions());
     defer app_state.deinit();
 
     const report = try runtime_ns.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
