@@ -1,0 +1,5 @@
+Metal Hybrid C signed paint ceilings (Cockpit pin bump):
+
+- max_canvas_cells_per_view / max_display_list_cells: 32768 -> 131072 (4x)
+- max_canvas_text_bytes_per_view / max_display_list_text_bytes: 65536 -> 131072 (2x)
+- glyphs / commands / paths / atlas_variants_per_glyph unchanged
