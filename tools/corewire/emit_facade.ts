@@ -9,6 +9,16 @@ import * as text from "./facade_templates.ts";
 
 const maxSafe = "9007199254740991";
 function lowerBound(className: string | null): string { return className === "u64" ? "0" : "-9007199254740991"; }
+// Wide models carry hundreds of integer guards. One left-associated `&&`
+// chain nests as deep as the guard count and overflows ScriptC's recursive
+// IR emitter, so conjunctions split at the midpoint: depth stays
+// logarithmic and the text stays linear.
+export function balancedGuardExpression(guards: string[]): string { return balancedGuardRange(guards, 0, guards.length); }
+function balancedGuardRange(guards: string[], low: number, high: number): string {
+  if (high - low === 1) return guards[low];
+  const midpoint = low + Math.floor((high - low) / 2);
+  return "(" + balancedGuardRange(guards, low, midpoint) + ") && (" + balancedGuardRange(guards, midpoint, high) + ")";
+}
 function payloadNumberClass(p: Payload): string | null {
   if (p.kind === "number") return p.class!;
   if (p.kind === "scalar" && (p.type!.kind === "f64" || p.type!.kind === "i64")) return p.type!.kind;
@@ -331,7 +341,7 @@ class FacadeEmitter extends CodeWriter {
       const flat = this.synthesizedRecordOf({ kind: "value", name: p.name! }, this.s.msg.name, a.name) !== null;
       const object = '{ kind: "' + tsString(a.name) + '", ' + (flat ? fields.join(", ") : tsProp(this.memberOf(a.member)) + ": { " + fields.join(", ") + " }") + " }";
       if (guards.length === 0) this.print("  if (tag === nscfTag_{s}) {s}\n", [a.name, this.commitLine(object)]);
-      else { this.print(text.scrollDispatchGuard, [a.name, guards.join(" && "), object]); this.use("trap"); }
+      else { this.print(text.scrollDispatchGuard, [a.name, balancedGuardExpression(guards), object]); this.use("trap"); }
     }
     this.raw('  nscfUnknownTag("scroll-state", tag);\n}\n');
   }
@@ -406,7 +416,7 @@ class FacadeEmitter extends CodeWriter {
     this.use("assert_consumed"); this.print("  nscfAssertConsumed(bytes, {s});\n", [decode.offsetText()]);
     const construction = decode.constructionText();
     if (decode.guards.length > 0) {
-      this.print('  if ({s}) return {s};\n  nscfTrap("a restored integer value is NaN or outside its attested exact-integer range — the snapshot cannot represent this Model");\n', [decode.guards.join(" && "), construction]);
+      this.print('  if ({s}) return {s};\n  nscfTrap("a restored integer value is NaN or outside its attested exact-integer range — the snapshot cannot represent this Model");\n', [balancedGuardExpression(decode.guards), construction]);
       this.use("trap");
     } else this.print("  return {s};\n", [construction]);
     this.raw("}\n"); this.raw(text.restorePrelude);
@@ -438,7 +448,7 @@ class FacadeEmitter extends CodeWriter {
         argumentsText = ", " + decode.exprs.map(p => p.text).join(", ");
         guards = decode.guards;
       } else if (parameterized) this.raw("    nscfAssertConsumed(args, 0);\n");
-      if (guards.length) this.print("    if ({s}) {{\n", [guards.join(" && ")]);
+      if (guards.length) this.print("    if ({s}) {{\n", [balancedGuardExpression(guards)]);
       this.print("    const sink = nscfNewSink();\n    const nscfValue = {s}(nscfCommitted{s});\n", [h.name, argumentsText]);
       this.fieldWriteStatements(h.returns, "nscfValue", "helpers", h.name + ".return", 2);
       this.raw("    return nscfFinish(sink);\n");
@@ -540,7 +550,7 @@ class FacadeEmitter extends CodeWriter {
     const object = member !== null ? '{ kind: "' + tsString(arm) + '", ' + tsProp(member) + ": " + construction + " }"
       : '{ kind: "' + tsString(arm) + '",' + construction.slice(1, -1) + "}";
     if (decode.guards.length > 0) {
-      this.print('    if ({s}) {{\n      return nscfCommit(coreUpdate(nscfCommitted, {s}));\n    }}\n    nscfTrap("a decoded integer value is NaN or outside its attested exact-integer range — the integer slot has no honest value for it");\n', [decode.guards.join(" && "), object]);
+      this.print('    if ({s}) {{\n      return nscfCommit(coreUpdate(nscfCommitted, {s}));\n    }}\n    nscfTrap("a decoded integer value is NaN or outside its attested exact-integer range — the integer slot has no honest value for it");\n', [balancedGuardExpression(decode.guards), object]);
       this.use("trap");
     } else this.print("    return nscfCommit(coreUpdate(nscfCommitted, {s}));\n", [object]);
   }
@@ -561,7 +571,7 @@ class FacadeEmitter extends CodeWriter {
           construction = '{ kind: "' + kind + '", ' + tsProp(this.memberOf(a.member)) + ": " + decode.exprs[0].text + " }";
         }
         this.print("    nscfAssertConsumed(bytes, {s});\n", [decode.offsetText()]);
-        if (decode.guards.length > 0) this.print('    if ({s}) {{\n      return {s};\n    }}\n    nscfTrap("a decoded integer value is NaN or outside its attested exact-integer range — the integer slot has no honest value for it");\n', [decode.guards.join(" && "), construction]);
+        if (decode.guards.length > 0) this.print('    if ({s}) {{\n      return {s};\n    }}\n    nscfTrap("a decoded integer value is NaN or outside its attested exact-integer range — the integer slot has no honest value for it");\n', [balancedGuardExpression(decode.guards), construction]);
         else this.print("    return {s};\n", [construction]);
       }
       this.raw("  }\n");
@@ -625,7 +635,7 @@ class RecordDecode {
   }
   guardedStatement(guards: string[], statement: string): void {
     if (guards.length === 0) { this.line("{s}\n", [statement]); return; }
-    this.line("if ({s}) {{\n", [guards.join(" && ")]); this.indent++; this.line("{s}\n", [statement]); this.indent--;
+    this.line("if ({s}) {{\n", [balancedGuardExpression(guards)]); this.indent++; this.line("{s}\n", [statement]); this.indent--;
     this.line("}} else {{\n", []); this.indent++;
     this.line('nscfTrap("a decoded integer value is NaN or outside its attested exact-integer range — the integer slot has no honest value for it");\n', []);
     this.indent--; this.line("}}\n", []); this.em.use("trap");

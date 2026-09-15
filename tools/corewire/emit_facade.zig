@@ -784,7 +784,7 @@ test "scroll-shaped record arms answer the dedicated scroll entry" {
     integer_source = try std.mem.replaceOwned(u8, arena, integer_source, "{\"name\": \"offsetY\", \"type\": {\"kind\": \"f64\"}}", "{\"name\": \"offsetY\", \"type\": {\"kind\": \"i64\"}}");
     integer_source = try std.mem.replaceOwned(u8, arena, integer_source, "{\"slot\": \"Model.count\", \"class\": \"i64\"}", "{\"slot\": \"Model.count\", \"class\": \"i64\"}, {\"slot\": \"ScrollState.offsetX\", \"class\": \"u64\"}, {\"slot\": \"ScrollState.offsetY\", \"class\": \"i64\"}");
     const integer_generated = try facadeFromJson(arena, integer_source);
-    try testing.expect(std.mem.indexOf(u8, integer_generated, "offsetX >= 0 && offsetX <= 9007199254740991 && offsetY >= -9007199254740991 && offsetY <= 9007199254740991") != null);
+    try testing.expect(std.mem.indexOf(u8, integer_generated, "if ((offsetX >= 0 && offsetX <= 9007199254740991) && (offsetY >= -9007199254740991 && offsetY <= 9007199254740991))") != null);
     try testing.expect(std.mem.indexOf(u8, integer_generated, "offsetX: Math.trunc(offsetX), offsetY: Math.trunc(offsetY)") != null);
 
     // The canvas snake_case vocabulary routes through the same ABI entry,
@@ -806,4 +806,36 @@ test "scroll-shaped record arms answer the dedicated scroll entry" {
     const inline_generated = try facadeFromJson(arena, inline_source);
     try testing.expect(std.mem.indexOf(u8, inline_generated, "{ kind: \"scrolled\", offsetX: offsetX, offsetY: offsetY") != null);
     try testing.expect(std.mem.indexOf(u8, inline_generated, "{ kind: \"scrolled\", value:") == null);
+}
+
+test "wide model decode emits bounded integer guards" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var fields: std.ArrayListUnmanaged(u8) = .empty;
+    var slots: std.ArrayListUnmanaged(u8) = .empty;
+    for (0..512) |index| {
+        if (index > 0) {
+            try fields.appendSlice(arena, ", ");
+            try slots.appendSlice(arena, ", ");
+        }
+        try fields.appendSlice(arena, try std.fmt.allocPrint(arena, "{{\"name\": \"value{d}\", \"type\": {{\"kind\": \"i64\"}}}}", .{index}));
+        try slots.appendSlice(arena, try std.fmt.allocPrint(arena, "{{\"slot\": \"Model.value{d}\", \"class\": \"i64\"}}", .{index}));
+    }
+
+    var source = try std.mem.replaceOwned(
+        u8,
+        arena,
+        sidecar_mod.minimal_valid_json,
+        "{\"name\": \"Model\", \"fields\": [\n        {\"name\": \"count\", \"type\": {\"kind\": \"i64\"}},\n        {\"name\": \"label\", \"type\": {\"kind\": \"bytes\"}}\n      ]}",
+        try std.fmt.allocPrint(arena, "{{\"name\": \"Model\", \"fields\": [{s}]}}", .{fields.items}),
+    );
+    source = try std.mem.replaceOwned(u8, arena, source, "{\"slot\": \"Model.count\", \"class\": \"i64\"}", slots.items);
+    const generated = try facadeFromJson(arena, source);
+
+    // ScriptC recursively emits logical-expression IR, so the emitter
+    // balances the proof tree to keep model width from becoming depth.
+    try testing.expectEqual(@as(usize, 512), std.mem.count(u8, generated, ">= -9007199254740991 && nscfV"));
+    try testing.expect(std.mem.indexOf(u8, generated, "<= 9007199254740991 && nscfV") == null);
 }
