@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { baseContract, coreCases } from "./core_cases.ts";
+import { balancedGuardExpression } from "./emit_facade.ts";
 
 assert.ok(process.argv[2], "run with the compiled corewire path (zig build test-corewire-policy)");
 const corewire = path.resolve(process.argv[2]);
@@ -111,4 +112,18 @@ test("Markdown recipe wrapper names reserve only when window policy glue is emit
       }
     }
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("guard conjunctions have logarithmic depth and linear retained output", () => {
+  assert.equal(balancedGuardExpression(["g0", "g1", "g2", "g3", "g4"]), "((g0) && (g1)) && ((g2) && ((g3) && (g4)))");
+  assert.equal(balancedGuardExpression(["only"]), "only");
+  const expression = balancedGuardExpression(Array.from({ length: 512 }, () => "guard"));
+  let depth = 0, maximum = 0;
+  for (const char of expression) {
+    if (char === "(") maximum = Math.max(maximum, ++depth);
+    else if (char === ")") depth--;
+  }
+  assert.equal(depth, 0);
+  assert.equal(maximum, 9);
+  assert.ok(expression.length < 512 * "guard".length * 3, "retained output grows linearly");
 });
