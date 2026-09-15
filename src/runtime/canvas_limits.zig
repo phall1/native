@@ -62,26 +62,27 @@ pub const max_canvas_glyphs_per_view: usize = 8192;
 // replaced the terminal's command budget. A `cell_grid` command is one
 // command carrying a whole screen, so a terminal's cost stopped being
 // "commands" and became "area" — and area is what a terminal actually
-// scales with. One cell is 20 B, so 32768 is 640 KB in the view's
-// retained copy and the same again in the frame's builder-owned store
-// (threadlocal, one per planning thread). It covers a 300x100 viewport
-// (30,000 cells) with room over, or two 160x100 split panes exactly.
-// Beyond it the painter degrades row-atomically and says so, the same
-// contract every other frame budget carries.
-pub const max_canvas_cells_per_view: usize = 32768;
+// scales with. Raised 32768 -> 131072 (4x) for Cockpit Hybrid C (Metal
+// signed): four 320x96 product grids are 122880 cells with 8192 slack.
+// One cell is 20 B, so 131072 is 2560 KB in the view's retained copy
+// and the same again in the frame's builder-owned store (threadlocal,
+// one per planning thread). Address space is reserved per view slot;
+// pages are touched as used. Beyond it the painter degrades
+// row-atomically and says so, the same contract every other frame
+// budget carries. Glyphs, commands, paths, and atlas_variants_per_glyph
+// stay on this bump.
+pub const max_canvas_cells_per_view: usize = 131072;
 // Frame TEXT bytes: every `draw_text` in the finished display list,
 // builder-owned and referenced alike. Raised 32 KiB -> 64 KiB with the
-// terminal work: a terminal viewport is one widget whose every visible
-// cell is a presented byte, so a 200x60 screen is ~12 KB and a 300x100
-// one ~30 KB before any chrome — and a split of two panes doubles that
-// while each pane must also hold back a share for the other. The old
-// 32 KiB made a wide screen degrade on TEXT with 96% of the command
-// budget unspent, which is the wrong cliff in the wrong place. Memory
-// is cheap here compared with the command budget: one byte array per
-// view (32 KiB -> 64 KiB x 32 view slots = 1 MiB -> 2 MiB), plus the
-// matching builder-owned store (`canvas.max_display_list_text_bytes`,
+// original terminal work, then 64 KiB -> 128 KiB (2x) with Hybrid C:
+// one unique 3-byte 320x96 pane interned per row is ~92160 bytes, which
+// overflowed the 64 KiB store while the cell store still had room.
+// Typical ASCII interned cost is the alphabet, not the cell count.
+// Memory is cheap here compared with the cell budget: one byte array
+// per view (64 KiB -> 128 KiB x 32 view slots = 2 MiB -> 4 MiB), plus
+// the matching builder-owned store (`canvas.max_display_list_text_bytes`,
 // which a lockstep test keeps equal) and the display-list copy scratch.
-pub const max_canvas_text_bytes_per_view: usize = 65536;
+pub const max_canvas_text_bytes_per_view: usize = 131072;
 // Retained packet commands per gpu-surface view: the host-side command
 // dictionary that incremental (`patch`) presents edit, and the engine's
 // per-view key+fingerprint mirror that derives those patches. Derived
