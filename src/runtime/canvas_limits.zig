@@ -352,7 +352,7 @@ pub const max_canvas_widget_change_events_per_view: usize = 4;
 // storage — but an honesty bound: realistically 1-3 anchored surfaces are
 // ever open (a picker, maybe a nested submenu), each one costs the late
 // z-pass and hit-test pre-pass a full-tree scan, and the likely way past
-// 16 is an `anchor` accidentally inside a `\u003cfor>` body (one floating menu
+// 16 is an `anchor` accidentally inside a `<for>` body (one floating menu
 // PER ROW). That mistake fails loudly at layout apply
 // (`error.WidgetAnchoredSurfaceLimitReached`), never degrades every frame.
 pub const max_canvas_widget_anchored_per_view: usize = 16;
