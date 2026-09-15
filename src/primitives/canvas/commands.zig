@@ -1,1 +1,1 @@
-PLACEHOLDER_COMMANDS
+SEE_FILE_/tmp/native/src/primitives/canvas/commands.zig
