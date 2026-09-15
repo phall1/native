@@ -148,7 +148,7 @@ const Harness = struct {
         self.harness.runtime.options.session_recorder = recorder;
         self.app_state = try std.testing.allocator.create(App);
         errdefer std.testing.allocator.destroy(self.app_state);
-        self.app_state.* = Adapter.init(std.heap.page_allocator, .{ .env_values = env_values }, appOptions());
+        Adapter.initInPlace(self.app_state, std.heap.page_allocator, .{ .env_values = env_values }, appOptions());
         self.app_state.effects.executor = .fake;
         self.app_state.effects.clock = self.clock.clock();
         self.app = self.app_state.app();
@@ -1002,7 +1002,7 @@ fn replayWithEnv(journal_bytes: []const u8, env_values: []const Adapter.EnvValue
     harness.null_platform.gpu_surface_scroll_drivers = true;
     const app_state = try std.testing.allocator.create(App);
     defer std.testing.allocator.destroy(app_state);
-    app_state.* = Adapter.init(std.heap.page_allocator, .{ .env_values = env_values }, appOptions());
+    Adapter.initInPlace(app_state, std.heap.page_allocator, .{ .env_values = env_values }, appOptions());
     defer app_state.deinit();
     return try runtime_ns.replaySession(&harness.runtime, app_state.app(), journal_bytes, .{
         .verify = true,

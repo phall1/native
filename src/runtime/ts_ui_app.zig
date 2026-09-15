@@ -350,6 +350,18 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
             return App.init(backing, Host.model().*, stamped);
         }
 
+        /// Construct into caller-owned heap storage without materializing the
+        /// multi-megabyte App value on the stack. This is the allocation-neutral
+        /// counterpart of `create` for test harnesses and embedders that already
+        /// own an App slot.
+        pub fn initInPlace(self: *App, backing: std.mem.Allocator, core_options: CoreOptions, options: Options) void {
+            const stamped = stampOptions(options);
+            Host.boot();
+            applyCoreOptions(core_options);
+            App.initInPlace(self, backing, stamped);
+            self.model = Host.model().*;
+        }
+
         /// Mobile counterpart of `init`/`create`: the embed host
         /// (`native_sdk.embed.UiAppHost`) owns App construction, so this
         /// resolves the adapter's stamped options and applies the core
@@ -369,12 +381,8 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
         /// place on the heap — the shape generated wiring and `main`
         /// functions use. Pair with `App.destroy`.
         pub fn create(backing: std.mem.Allocator, core_options: CoreOptions, options: Options) error{OutOfMemory}!*App {
-            const stamped = stampOptions(options);
-            Host.boot();
-            applyCoreOptions(core_options);
             const self = try backing.create(App);
-            App.initInPlace(self, backing, stamped);
-            self.model = Host.model().*;
+            initInPlace(self, backing, core_options, options);
             return self;
         }
 

@@ -223,7 +223,7 @@ const FacadeEmitter = struct {
             .w_i64 => &.{ .w_u32, .trunc_toward_zero, .trap },
             .w_u64 => &.{ .w_u32, .trunc_toward_zero, .trap },
             .w_bytes => &.{.w_u32},
-            .short_text => &.{ .sink, .trap },
+            .short_text => &.{ .w_u8, .trap },
             .utf8_text => &.{},
             .enum_index => &.{.trap},
             .cmd_encoder => &.{ .w_u8, .w_f64, .w_bytes, .short_text, .utf8_text, .enum_index, .trap },
@@ -1911,7 +1911,7 @@ const FacadeEmitter = struct {
         self.use(.trap);
         try self.print("  const nscfFieldCount = nscfReadU32(snapshot, nscfAt);\n  nscfAt += 4;\n  if (nscfFieldCount !== {d}) nscfTrap(\"a model snapshot carries the wrong field count for this Model\");\n", .{model.fields.len});
         for (model.fields, 0..) |_, index| {
-            try self.print("  const nscfFieldTag{d} = nscfReadU32(snapshot, nscfAt);\n  nscfAt += 4;\n  if (nscfFieldTag{d} !== {d}) nscfTrap(\"a model snapshot field tag does not match this Model\");\n  const nscfFieldLen{d} = nscfReadU32(snapshot, nscfAt);\n  nscfAt += 4;\n  const nscfFieldBytes{d} = nscfReadBytesBody(snapshot, nscfAt, nscfFieldLen{d});\n  nscfAt += nscfFieldLen{d};\n  for (let nscfFieldAt{d} = 0; nscfFieldAt{d} < nscfFieldBytes{d}.length; nscfFieldAt{d}++) sink.push(nscfFieldBytes{d}[nscfFieldAt{d}]!);\n", .{ index, index, index, index, index, index, index, index, index, index, index, index, index });
+            try self.print("  const nscfFieldTag{d} = nscfReadU32(snapshot, nscfAt);\n  nscfAt += 4;\n  if (nscfFieldTag{d} !== {d}) nscfTrap(\"a model snapshot field tag does not match this Model\");\n  const nscfFieldLen{d} = nscfReadU32(snapshot, nscfAt);\n  nscfAt += 4;\n  const nscfFieldBytes{d} = nscfReadBytesBody(snapshot, nscfAt, nscfFieldLen{d});\n  nscfAt += nscfFieldLen{d};\n  sink.push(nscfFieldBytes{d});\n", .{ index, index, index, index, index, index, index, index });
         }
         try self.raw(
             \\  nscfAssertConsumed(snapshot, nscfAt);
@@ -1942,7 +1942,7 @@ const FacadeEmitter = struct {
                 \\    const body = nscfSnapshot{s}(migrated);
                 \\    const out = new Uint8Array(body.length + 1);
                 \\    out[0] = 1;
-                \\    for (let i = 0; i < body.length; i++) out[i + 1] = body[i]!;
+                \\    out.set(body, 1);
                 \\    return out;
                 \\  }} catch {{
                 \\    return new Uint8Array(1);
@@ -2478,17 +2478,26 @@ const FacadeEmitter = struct {
         if (self.used_codec.contains(.sink)) {
             try self.raw(
                 \\
-                \\// A sink is a plain byte accumulator; nscfFinish snapshots it.
-                \\type nscfSink = number[];
+                \\// A sink is a chunk accumulator; nscfFinish joins it without
+                \\// computed typed-array reads, which the static compiler refuses.
+                \\type nscfSink = Uint8Array[];
                 \\
                 \\function nscfNewSink(): nscfSink {
                 \\  return [];
                 \\}
                 \\
                 \\function nscfFinish(sink: nscfSink): Uint8Array {
-                \\  const out = new Uint8Array(sink.length);
-                \\  for (let i = 0; i < sink.length; i++) {
-                \\    out[i] = sink[i]!;
+                \\  let length = 0;
+                \\  for (const candidate of sink) {
+                \\    const part = candidate === undefined ? new Uint8Array(0) : candidate;
+                \\    length += part.length;
+                \\  }
+                \\  const out = new Uint8Array(length);
+                \\  let at = 0;
+                \\  for (const candidate of sink) {
+                \\    const part = candidate === undefined ? new Uint8Array(0) : candidate;
+                \\    out.set(part, at);
+                \\    at += part.length;
                 \\  }
                 \\  return out;
                 \\}
@@ -2499,7 +2508,7 @@ const FacadeEmitter = struct {
             try self.raw(
                 \\
                 \\function nscfWU8(sink: nscfSink, value: number): void {
-                \\  sink.push(value);
+                \\  sink.push(new Uint8Array([value]));
                 \\}
                 \\
             );
@@ -2508,10 +2517,12 @@ const FacadeEmitter = struct {
             try self.raw(
                 \\
                 \\function nscfWU32(sink: nscfSink, value: number): void {
-                \\  sink.push(value % 256);
-                \\  sink.push(Math.floor(value / 256) % 256);
-                \\  sink.push(Math.floor(value / 65536) % 256);
-                \\  sink.push(Math.floor(value / 16777216) % 256);
+                \\  sink.push(new Uint8Array([
+                \\    value % 256,
+                \\    Math.floor(value / 256) % 256,
+                \\    Math.floor(value / 65536) % 256,
+                \\    Math.floor(value / 16777216) % 256,
+                \\  ]));
                 \\}
                 \\
             );
@@ -2522,9 +2533,7 @@ const FacadeEmitter = struct {
                 \\function nscfWF64(sink: nscfSink, value: number): void {
                 \\  const buf = Buffer.alloc(8);
                 \\  buf.writeDoubleLE(value, 0);
-                \\  for (let i = 0; i < 8; i++) {
-                \\    sink.push(buf[i]!);
-                \\  }
+                \\  sink.push(buf);
                 \\}
                 \\
             );
@@ -2568,7 +2577,7 @@ const FacadeEmitter = struct {
             try self.raw(
                 \\
                 \\function nscfWBool(sink: nscfSink, value: boolean): void {
-                \\  sink.push(value ? 1 : 0);
+                \\  sink.push(new Uint8Array([value ? 1 : 0]));
                 \\}
                 \\
             );
@@ -2580,9 +2589,7 @@ const FacadeEmitter = struct {
                 \\// and the wire format's long-bytes field).
                 \\function nscfWBytes(sink: nscfSink, bytes: Uint8Array): void {
                 \\  nscfWU32(sink, bytes.length);
-                \\  for (let i = 0; i < bytes.length; i++) {
-                \\    sink.push(bytes[i]!);
-                \\  }
+                \\  sink.push(bytes);
                 \\}
                 \\
             );
@@ -2604,10 +2611,8 @@ const FacadeEmitter = struct {
                 \\  if (bytes.length > 255) {
                 \\    nscfTrap("a command name or key is over 255 bytes — the wire's short-text fields cannot carry it");
                 \\  }
-                \\  sink.push(bytes.length);
-                \\  for (let i = 0; i < bytes.length; i++) {
-                \\    sink.push(bytes[i]!);
-                \\  }
+                \\  nscfWU8(sink, bytes.length);
+                \\  sink.push(bytes);
                 \\}
                 \\
             );
@@ -2673,7 +2678,10 @@ const FacadeEmitter = struct {
                 \\
                 \\function nscfAsciiString(bytes: Uint8Array): string {
                 \\  let out = "";
-                \\  for (let i = 0; i < bytes.length; i++) out = out + String.fromCharCode(bytes[i]!);
+                \\  for (let i = 0; i < bytes.length; i++) {
+                \\    const candidate = bytes[i];
+                \\    out = out + String.fromCharCode(candidate === undefined ? 0 : candidate);
+                \\  }
                 \\  return out;
                 \\}
                 \\
@@ -2742,8 +2750,13 @@ const FacadeEmitter = struct {
             \\  }} else {{
             \\    nscfWU8(sink, 2);
             \\    const bytes = (value as nscfDbText).bytes;
-            \\    nscfWU32(sink, bytes.length);
-            \\    for (let i = 0; i < bytes.length; i++) sink.push(bytes[i]!);
+            \\    const encoded = new Uint8Array(bytes.length);
+            \\    let at = 0;
+            \\    for (const candidate of bytes) {{
+            \\      encoded[at] = candidate === undefined ? 0 : candidate;
+            \\      at += 1;
+            \\    }}
+            \\    nscfWBytes(sink, encoded);
             \\  }}
             \\}}
             \\
@@ -3188,8 +3201,13 @@ const FacadeEmitter = struct {
             \\  }} else {{
             \\    nscfWU8(sink, 2);
             \\    const bytes = (value as nscfDbText).bytes;
-            \\    nscfWU32(sink, bytes.length);
-            \\    for (let i = 0; i < bytes.length; i++) sink.push(bytes[i]!);
+            \\    const encoded = new Uint8Array(bytes.length);
+            \\    let at = 0;
+            \\    for (const candidate of bytes) {{
+            \\      encoded[at] = candidate === undefined ? 0 : candidate;
+            \\      at += 1;
+            \\    }}
+            \\    nscfWBytes(sink, encoded);
             \\  }}
             \\}}
             \\
@@ -3889,7 +3907,7 @@ test "facade emission is deterministic and carries the adapter surface" {
     // Facade-only types, tag constants, and SDK effect imports all live in
     // the lowercase reserved namespace, so authored capitalized names cannot
     // collide with them.
-    try testing.expect(std.mem.indexOf(u8, first, "type nscfSink = number[];") != null);
+    try testing.expect(std.mem.indexOf(u8, first, "type nscfSink = Uint8Array[];") != null);
     try testing.expect(std.mem.indexOf(u8, first, "import type { Cmd as nscfCmd, DbText as nscfDbText }") != null);
     try testing.expect(std.mem.indexOf(u8, first, "Number.isInteger(value) && value >= 0 && value <= 256 ? value : 257") != null);
     try testing.expect(std.mem.indexOf(u8, first, "nscfWU32(sink, nscfStoreScanLimit(cmd.limit));") != null);
@@ -4345,7 +4363,7 @@ test "capitalized authored names no longer collide with facade internals" {
     try testing.expect(std.mem.indexOf(u8, generated, "import type { Cmd as nscfCmd, DbText as nscfDbText } from \"./sdk/core.ts\";") != null);
     try testing.expect(std.mem.indexOf(u8, generated, "export function NSCF_TAG_bump(model: Model): Uint8Array {") != null);
     try testing.expect(std.mem.indexOf(u8, generated, "const nscfTag_bump = 0;") != null);
-    try testing.expect(std.mem.indexOf(u8, generated, "type nscfSink = number[];") != null);
+    try testing.expect(std.mem.indexOf(u8, generated, "type nscfSink = Uint8Array[];") != null);
 }
 
 test "a helper may not shadow an ambient facade value" {

@@ -6,11 +6,11 @@
      Verify without writing:
        node packages/core/scripts/gen_service_surface.mjs --check -->
 
-# Service compile surface — scriptc 0.0.36
+# Service compile surface — scriptc 0.1.1
 
 What TypeScript under `src/services/` can use, as stated by the pinned
 compiler itself (surface manifest schema 1, 527 entries:
-334 static, 36 dynamic-only, 157 unsupported).
+336 static, 34 dynamic-only, 157 unsupported).
 
 How to read the tables:
 
@@ -450,8 +450,8 @@ manifest row in the Notes column:
 | `stdlib.map.get` | Map.prototype.get | static |  |  |
 | `stdlib.map.has` | Map.prototype.has | static |  |  |
 | `stdlib.map.set` | Map.prototype.set | static |  |  |
-| `stdlib.math.E` | Math.E | dynamic-only | `SC2012` |  |
-| `stdlib.math.PI` | Math.PI | dynamic-only | `SC2012` |  |
+| `stdlib.math.E` | Math.E | static |  | the constant read compiles to a numeric literal; no runtime Math read is performed |
+| `stdlib.math.PI` | Math.PI | static |  | the constant read compiles to a numeric literal; no runtime Math read is performed |
 | `stdlib.math.abs` | Math.abs | static |  | compiles statically at arity 1; other declared call shapes run only in the embedded dynamic engine (SC2012 without --dynamic) |
 | `stdlib.math.acos` | Math.acos | dynamic-only | `SC2012` |  |
 | `stdlib.math.asin` | Math.asin | dynamic-only | `SC2012` |  |

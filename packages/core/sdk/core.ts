@@ -936,7 +936,12 @@ export interface DbText {
 
 export function dbText(bytes: Uint8Array): DbText {
   const out: number[] = [];
-  for (let i = 0; i < bytes.length; i++) out.push(bytes[i]!);
+  for (let i = 0; i < bytes.length; i++) {
+    // Keep the computed offset outside the read: scriptc requires a literal
+    // key when this bytes value becomes a runtime-optional capture.
+    const candidate = bytes.slice(i, i + 1)[0];
+    out.push(candidate === undefined ? 0 : candidate);
+  }
   return { __dbText: true, bytes: out };
 }
 
@@ -1437,10 +1442,14 @@ function serviceU32(value: number): Uint8Array {
 /// declaration-order enum/union tags).
 export function serviceConcat(parts: readonly Uint8Array[]): Uint8Array {
   let length = 0;
-  for (const part of parts) length += part.length;
+  for (const candidate of parts) {
+    const part = candidate === undefined ? new Uint8Array(0) : candidate;
+    length += part.length;
+  }
   const out = new Uint8Array(length);
   let at = 0;
-  for (const part of parts) {
+  for (const candidate of parts) {
+    const part = candidate === undefined ? new Uint8Array(0) : candidate;
     out.set(part, at);
     at += part.length;
   }

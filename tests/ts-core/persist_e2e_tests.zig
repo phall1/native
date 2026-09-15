@@ -102,7 +102,7 @@ const Harness = struct {
         self.harness.null_platform.gpu_surfaces = true;
         self.state = try std.testing.allocator.create(App);
         errdefer std.testing.allocator.destroy(self.state);
-        self.state.* = Adapter.init(std.heap.page_allocator, core_options, options());
+        Adapter.initInPlace(self.state, std.heap.page_allocator, core_options, options());
         if (replay_restore) |restore| {
             self.state.effects.armReplay();
             try self.state.effects.pushReplayPersist(restore.outcome, restore.bytes);
