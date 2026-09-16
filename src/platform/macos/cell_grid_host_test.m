@@ -181,9 +181,14 @@ static NSDictionary *NativeSdkCellGridJsonTwin(void) {
 }
 
 static NSDictionary *NativeSdkCellGridCommand(NSDictionary *grid) {
+    NSPoint origin = NativeSdkPacketPoint(grid[@"origin"]);
+    CGFloat width = NativeSdkPacketNumber(grid[@"cellWidth"], 0) *
+        NativeSdkPacketNumber(grid[@"cols"], 0);
+    CGFloat height = NativeSdkPacketNumber(grid[@"cellHeight"], 0) *
+        NativeSdkPacketNumber(grid[@"rows"], 0);
     return @{
         @"kind" : @"cell_grid",
-        @"bounds" : @[@(0.0), @(0.0), @(48.0), @(18.0)],
+        @"bounds" : @[@(origin.x), @(origin.y), @(width), @(height)],
         @"opacity" : @(1.0),
         @"cellGrid" : grid,
     };
@@ -202,6 +207,55 @@ static NativeSdkMetalSurfaceView *NativeSdkCellGridTestView(void) {
     if (!view.canvasColorSpace) view.canvasColorSpace = CGColorSpaceCreateDeviceRGB();
     NativeSdkCellGridTestExpect(view.canvasColorSpace != NULL, @"could not create device RGB color space");
     return view;
+}
+
+static NSDictionary *NativeSdkCellGridBackgroundGrid(
+    CGFloat originX,
+    CGFloat originY,
+    CGFloat cellWidth,
+    CGFloat cellHeight,
+    NSArray<NSArray *> *backgrounds
+) {
+    NSMutableArray *cells = [NSMutableArray arrayWithCapacity:backgrounds.count];
+    NSArray *foreground = NativeSdkCellGridColor(244, 247, 251, 255);
+    for (NSArray *background in backgrounds) {
+        [cells addObject:@{
+            @"fg" : foreground,
+            @"bg" : background,
+            @"flags" : @(NativeSdkCellFlagHasBackground),
+        }];
+    }
+    return @{
+        @"font" : @(2),
+        @"boldFont" : @(0),
+        @"italicFont" : @(0),
+        @"boldItalicFont" : @(0),
+        @"size" : @(13.0),
+        @"origin" : @[@(originX), @(originY)],
+        @"cellWidth" : @(cellWidth),
+        @"cellHeight" : @(cellHeight),
+        @"baseline" : @(14.0),
+        @"cols" : @(backgrounds.count),
+        @"rows" : @(1),
+        @"cells" : cells,
+    };
+}
+
+static uint8_t NativeSdkCellGridRasterAlpha(
+    NativeSdkPacketCommandRaster *raster,
+    NSData *pixels,
+    NSUInteger deviceX,
+    NSUInteger deviceY
+) {
+    NativeSdkCellGridTestExpect(deviceX >= raster.pixelX, @"sample x precedes raster");
+    NativeSdkCellGridTestExpect(deviceY >= raster.pixelY, @"sample y precedes raster");
+    NSUInteger x = deviceX - raster.pixelX;
+    NSUInteger y = deviceY - raster.pixelY;
+    NativeSdkCellGridTestExpect(x < CGImageGetWidth(raster.image), @"sample x exceeds raster");
+    NativeSdkCellGridTestExpect(y < CGImageGetHeight(raster.image), @"sample y exceeds raster");
+    NativeSdkCellGridTestExpect(CGImageGetBitsPerPixel(raster.image) == 32, @"cell-grid raster is not RGBA8");
+    const uint8_t *bytes = pixels.bytes;
+    return bytes[y * CGImageGetBytesPerRow(raster.image) + x * 4 + 3];
 }
 
 static void NativeSdkCellGridTestAsciiCache(void) {
@@ -285,6 +339,96 @@ static void NativeSdkCellGridTestPixelsAndLookups(void) {
         @"binary run sharing changed CoreText pixels");
 }
 
+static void NativeSdkCellGridTestBackgroundPixelPartition(void) {
+    const CGFloat scale = 2;
+    const CGFloat cellWidth = 7.8;
+    const CGFloat cellHeight = 18;
+    NSArray *blue = NativeSdkCellGridColor(38, 93, 171, 255);
+    NSArray *red = NativeSdkCellGridColor(188, 62, 78, 255);
+    NSDictionary *grid = NativeSdkCellGridBackgroundGrid(
+        0,
+        0,
+        cellWidth,
+        cellHeight,
+        @[blue, blue, blue, red, red, red]);
+    NativeSdkMetalSurfaceView *view = NativeSdkCellGridTestView();
+    NativeSdkPacketCommandRaster *raster = [view rasterCacheBuildEntryForCommand:NativeSdkCellGridCommand(grid)
+                                                                            kind:@"cell_grid"
+                                                                           scale:scale
+                                                                      pixelWidth:128
+                                                                     pixelHeight:64];
+    NativeSdkCellGridTestExpect(raster.image != NULL, @"fractional-width grid did not rasterize");
+    NSData *pixels = NativeSdkCellGridImageBytes(raster.image);
+    NSUInteger minX = (NSUInteger)llround(0 * scale);
+    NSUInteger maxX = (NSUInteger)llround(6 * cellWidth * scale);
+    NSUInteger sampleY = (NSUInteger)llround(cellHeight * scale / 2);
+    for (NSUInteger x = minX; x < maxX; x += 1) {
+        NativeSdkCellGridTestExpect(
+            NativeSdkCellGridRasterAlpha(raster, pixels, x, sampleY) == 255,
+            @"fractional cell boundary leaked the surface through an opaque background");
+    }
+
+    NSArray *translucent = NativeSdkCellGridColor(38, 93, 171, 128);
+    grid = NativeSdkCellGridBackgroundGrid(
+        0,
+        0,
+        cellWidth,
+        cellHeight,
+        @[translucent, translucent, translucent, translucent, translucent, translucent]);
+    raster = [view rasterCacheBuildEntryForCommand:NativeSdkCellGridCommand(grid)
+                                              kind:@"cell_grid"
+                                             scale:scale
+                                        pixelWidth:128
+                                       pixelHeight:64];
+    NativeSdkCellGridTestExpect(raster.image != NULL, @"translucent fractional-width grid did not rasterize");
+    pixels = NativeSdkCellGridImageBytes(raster.image);
+    for (NSUInteger x = minX; x < maxX; x += 1) {
+        NativeSdkCellGridTestExpect(
+            NativeSdkCellGridRasterAlpha(raster, pixels, x, sampleY) == 128,
+            @"fractional cell partition overlapped or under-covered translucent neighbours");
+    }
+}
+
+static void NativeSdkCellGridTestFractionalRowPartition(void) {
+    const CGFloat scale = 2;
+    const CGFloat originY = 0.25;
+    const CGFloat cellHeight = 18;
+    NSArray *background = NativeSdkCellGridColor(38, 93, 171, 255);
+    NativeSdkMetalSurfaceView *view = NativeSdkCellGridTestView();
+    NativeSdkPacketCommandRaster *rows[2] = {nil, nil};
+    NSData *pixels[2] = {nil, nil};
+    for (NSUInteger row = 0; row < 2; row += 1) {
+        NSDictionary *grid = NativeSdkCellGridBackgroundGrid(
+            0,
+            originY + row * cellHeight,
+            7.8,
+            cellHeight,
+            @[background]);
+        rows[row] = [view rasterCacheBuildEntryForCommand:NativeSdkCellGridCommand(grid)
+                                                     kind:@"cell_grid"
+                                                    scale:scale
+                                               pixelWidth:32
+                                              pixelHeight:96];
+        NativeSdkCellGridTestExpect(rows[row].image != NULL, @"fractional-origin row did not rasterize");
+        pixels[row] = NativeSdkCellGridImageBytes(rows[row].image);
+    }
+
+    NSUInteger firstBoundary = (NSUInteger)llround(originY * scale);
+    NSUInteger sharedBoundary = (NSUInteger)llround((originY + cellHeight) * scale);
+    NSUInteger lastBoundary = (NSUInteger)llround((originY + 2 * cellHeight) * scale);
+    NSUInteger sampleX = (NSUInteger)llround(7.8 * scale / 2);
+    for (NSUInteger y = firstBoundary; y < sharedBoundary; y += 1) {
+        NativeSdkCellGridTestExpect(
+            NativeSdkCellGridRasterAlpha(rows[0], pixels[0], sampleX, y) == 255,
+            @"first fractional row left transparent coverage");
+    }
+    for (NSUInteger y = sharedBoundary; y < lastBoundary; y += 1) {
+        NativeSdkCellGridTestExpect(
+            NativeSdkCellGridRasterAlpha(rows[1], pixels[1], sampleX, y) == 255,
+            @"second fractional row left transparent coverage");
+    }
+}
+
 static void NativeSdkCellGridTestRasterCacheLifecycle(void) {
     NativeSdkMetalSurfaceView *view = NativeSdkCellGridTestView();
     [view rasterCacheEnsureScale:2 pixelWidth:96 pixelHeight:36];
@@ -318,6 +462,8 @@ int main(void) {
         NativeSdkCellGridTestAsciiCache();
         NativeSdkCellGridTestDecodeSharing();
         NativeSdkCellGridTestPixelsAndLookups();
+        NativeSdkCellGridTestBackgroundPixelPartition();
+        NativeSdkCellGridTestFractionalRowPartition();
         NativeSdkCellGridTestRasterCacheLifecycle();
         fprintf(stdout, "cell-grid-host-test: ok\n");
     }
