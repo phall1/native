@@ -453,6 +453,12 @@ static void NativeSdkCellGridTestRasterCacheLifecycle(void) {
 
 int main(void) {
     @autoreleasepool {
+        const char *expectedShotEvery = getenv("NATIVE_SDK_GPU_SHOT_EVERY_EXPECT");
+        if (expectedShotEvery) {
+            NativeSdkCellGridTestExpect(
+                NativeSdkGpuShotEvery() == (NSUInteger)strtoul(expectedShotEvery, NULL, 10),
+                @"GPU shot cadence did not match the configured policy");
+        }
         NativeSdkCellGridTestAsciiCache();
         NativeSdkCellGridTestDecodeSharing();
         NativeSdkCellGridTestPixelsAndLookups();
