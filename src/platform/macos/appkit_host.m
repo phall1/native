@@ -4910,7 +4910,7 @@ static BOOL NativeSdkGpuCompareEnabled(void) {
 
 /* Composite screenshot dumps (NATIVE_SDK_GPU_SHOT_DIR=<dir>, composite
  * mode only): the actual composited texture is read back and written as
- * PNG every 30th present (and on the first), for visual spot checks of
+ * PNG every Nth present (and on the first), for visual spot checks of
  * real GPU output. */
 static const char *NativeSdkGpuShotDir(void) {
     static char dir[1024];
@@ -4925,6 +4925,29 @@ static const char *NativeSdkGpuShotDir(void) {
         }
     });
     return present ? dir : NULL;
+}
+
+/* Dump cadence (NATIVE_SDK_GPU_SHOT_EVERY=<n>, default 30).
+ *
+ * Every 30th present is a sane default for a spot check of an animating
+ * view, and it is unreachable for a view that is not animating. A
+ * COMPOSITE present happens only when the packet content changes, which
+ * for a settled app is not once a frame. With n=1 the last file in the
+ * directory is the newest settled frame, which is what a capture harness
+ * wants. Values below 1 clamp to 1; anything unparseable keeps the default
+ * rather than silently disabling the dump. */
+static NSUInteger NativeSdkGpuShotEvery(void) {
+    static NSUInteger every = 30;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        const char *value = getenv("NATIVE_SDK_GPU_SHOT_EVERY");
+        if (!value || value[0] == 0) return;
+        char *end = NULL;
+        long parsed = strtol(value, &end, 10);
+        if (end == value || (end && *end != 0)) return;
+        every = parsed < 1 ? 1 : (NSUInteger)parsed;
+    });
+    return every;
 }
 
 /* ---------------------------------------------------------------------------
@@ -5604,7 +5627,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     if (NativeSdkGpuCompareEnabled()) {
         [self compareCompositeAgainstReferenceWithCommands:commands keys:keys pixelWidth:pixelWidth pixelHeight:pixelHeight scale:scale surfaceWidth:surfaceWidth surfaceHeight:surfaceHeight clearColor:clearColor];
     }
-    if (NativeSdkGpuShotDir() && (self.canvasCompositePresentCount == 1 || self.canvasCompositePresentCount % 30 == 0)) {
+    if (NativeSdkGpuShotDir() && (self.canvasCompositePresentCount == 1 || self.canvasCompositePresentCount % NativeSdkGpuShotEvery() == 0)) {
         [self dumpCompositeShotWithPixelWidth:pixelWidth pixelHeight:pixelHeight];
     }
     return 1;
