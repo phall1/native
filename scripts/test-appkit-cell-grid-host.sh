@@ -34,3 +34,7 @@ xcrun clang \
   -framework MediaToolbox
 
 "$tmp_dir/cell-grid-host-test"
+NATIVE_SDK_GPU_SHOT_EVERY_EXPECT=30 "$tmp_dir/cell-grid-host-test"
+NATIVE_SDK_GPU_SHOT_EVERY=1 NATIVE_SDK_GPU_SHOT_EVERY_EXPECT=1 "$tmp_dir/cell-grid-host-test"
+NATIVE_SDK_GPU_SHOT_EVERY=0 NATIVE_SDK_GPU_SHOT_EVERY_EXPECT=1 "$tmp_dir/cell-grid-host-test"
+NATIVE_SDK_GPU_SHOT_EVERY=invalid NATIVE_SDK_GPU_SHOT_EVERY_EXPECT=30 "$tmp_dir/cell-grid-host-test"
