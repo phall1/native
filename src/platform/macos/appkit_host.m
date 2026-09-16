@@ -3265,6 +3265,8 @@ typedef struct {
     CGFloat baseline;
     CGFloat size;
     CGFloat thickness;
+    CGContextRef context;
+    BOOL axisAligned;
     NativeSdkCellFace faces[4];
     __unsafe_unretained NSFont *regularFont;
     __unsafe_unretained NSFont *boldFont;
@@ -3281,10 +3283,43 @@ static NSFont *NativeSdkCellGridFontForStyle(const NativeSdkCellGridDrawState *s
     }
 }
 
+static CGFloat NativeSdkCellGridPixelBoundary(
+    const NativeSdkCellGridDrawState *state,
+    CGFloat point,
+    BOOL horizontal
+) {
+    CGPoint user = horizontal ?
+        CGPointMake(point, state->origin.y) :
+        CGPointMake(state->origin.x, point);
+    CGPoint device = CGContextConvertPointToDeviceSpace(state->context, user);
+    if (horizontal) device.x = round(device.x); else device.y = round(device.y);
+    user = CGContextConvertPointToUserSpace(state->context, device);
+    return horizontal ? user.x : user.y;
+}
+
 static void NativeSdkCellGridDrawBackgrounds(const NativeSdkCellGridDrawState *state, CGFloat opacity) {
     id previousValue = nil;
     NSColor *previousColor = nil;
     BOOL havePrevious = NO;
+    /* A terminal cell's measured advance is deliberately fractional: glyph
+     * pens must keep the font's real advance across a wide row. Backgrounds
+     * have a different contract. They partition device pixels, and every
+     * adjacent cell must use the SAME rounded boundary. Drawing the logical
+     * rectangles directly makes AppKit antialias both sides of a fractional
+     * edge into this transparent row raster; source-over then leaves alpha
+     * holes that reveal the terminal surface as repeating hairlines.
+     *
+     * Quantize only coverage, never the glyph advance. Rounding lattice
+     * boundaries (rather than independently expanding each rectangle) gives
+     * opaque cells gap-free coverage and keeps translucent neighbours from
+     * overlapping and darkening their shared edge. The row edges take the
+     * same path, so independently cached rows also meet at one device pixel. */
+    const CGFloat minY = state->axisAligned ?
+        NativeSdkCellGridPixelBoundary(state, state->origin.y, NO) :
+        state->origin.y;
+    const CGFloat maxY = state->axisAligned ?
+        NativeSdkCellGridPixelBoundary(state, state->origin.y + state->cellHeight, NO) :
+        state->origin.y + state->cellHeight;
     NSUInteger index = 0;
     for (id cellObject in state->cells) {
         NSDictionary *cell = NativeSdkPacketDictionary(cellObject);
@@ -3299,12 +3334,16 @@ static void NativeSdkCellGridDrawBackgrounds(const NativeSdkCellGridDrawState *s
             havePrevious = YES;
         }
         if (!previousColor) continue;
+        const CGFloat logicalMinX = state->origin.x + (CGFloat)column * state->cellWidth;
+        const CGFloat logicalMaxX = state->origin.x + (CGFloat)(column + 1) * state->cellWidth;
+        const CGFloat minX = state->axisAligned ?
+            NativeSdkCellGridPixelBoundary(state, logicalMinX, YES) :
+            logicalMinX;
+        const CGFloat maxX = state->axisAligned ?
+            NativeSdkCellGridPixelBoundary(state, logicalMaxX, YES) :
+            logicalMaxX;
         NativeSdkCellFillRect(
-            NSMakeRect(
-                state->origin.x + (CGFloat)column * state->cellWidth,
-                state->origin.y,
-                state->cellWidth,
-                state->cellHeight),
+            NSMakeRect(minX, minY, maxX - minX, maxY - minY),
             previousColor);
     }
 }
@@ -3496,7 +3535,7 @@ static void NativeSdkCellGridDrawInk(const NativeSdkCellGridDrawState *state, CG
     }
 }
 
-static BOOL NativeSdkPacketDrawCellGrid(NSDictionary *grid, CGFloat opacity) {
+static BOOL NativeSdkPacketDrawCellGrid(NSDictionary *grid, CGFloat opacity, CGContextRef context) {
     if (!grid) return NO;
     NSArray *cells = [grid[@"cells"] isKindOfClass:[NSArray class]] ? grid[@"cells"] : nil;
     if (!cells) return NO;
@@ -3538,6 +3577,7 @@ static BOOL NativeSdkPacketDrawCellGrid(NSDictionary *grid, CGFloat opacity) {
             faceFonts[index] = NativeSdkCellGridResolveFont(faces[index].fontId, size);
         }
     }
+    const CGAffineTransform transform = CGContextGetCTM(context);
     NativeSdkCellGridDrawState state = {
         .cells = cells,
         .cols = cols,
@@ -3547,6 +3587,8 @@ static BOOL NativeSdkPacketDrawCellGrid(NSDictionary *grid, CGFloat opacity) {
         .baseline = baseline,
         .size = size,
         .thickness = NativeSdkCellStrokeWidth(size),
+        .context = context,
+        .axisAligned = fabs(transform.b) < 0.000001 && fabs(transform.c) < 0.000001,
         .faces = {faces[0], faces[1], faces[2], faces[3]},
         .regularFont = faceFonts[0],
         .boldFont = faceFonts[1],
@@ -3588,7 +3630,7 @@ static BOOL NativeSdkPacketDrawCommandBody(NSDictionary *command, NSString *kind
     } else if ([kind isEqualToString:@"draw_text"]) {
         ok = NativeSdkPacketDrawText(NativeSdkPacketDictionary(command[@"text"]), opacity);
     } else if ([kind isEqualToString:@"cell_grid"]) {
-        ok = NativeSdkPacketDrawCellGrid(NativeSdkPacketDictionary(command[@"cellGrid"]), opacity);
+        ok = NativeSdkPacketDrawCellGrid(NativeSdkPacketDictionary(command[@"cellGrid"]), opacity, context);
     } else if ([kind isEqualToString:@"shadow"] || [kind isEqualToString:@"blur"]) {
         ok = NativeSdkPacketDrawEffect(NativeSdkPacketDictionary(command[@"effect"]), opacity, context, scale, command[@"transform"], hasEffectiveClip, effectiveClip);
     } else if ([kind isEqualToString:@"draw_image"]) {
