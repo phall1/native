@@ -185,6 +185,7 @@ export type NativeSdkGpuSurfaceBackendRequest = "metal" | "software";
 export type NativeSdkGpuSurfacePixelFormat = "none" | "bgra8_unorm";
 export type NativeSdkGpuSurfacePresentMode = "none" | "timer";
 export type NativeSdkGpuSurfaceAlphaMode = "none" | "opaque" | "premultiplied";
+export type NativeSdkGpuSurfaceMaterial = "none" | "glass";
 export type NativeSdkGpuSurfaceColorSpace = "none" | "srgb" | "display_p3";
 export type NativeSdkGpuSurfaceStatus = "unavailable" | "initializing" | "ready" | "lost";
 export type NativeSdkCursor = "arrow" | "pointing_hand" | "text" | "resize_horizontal" | "resize_vertical";
@@ -233,6 +234,7 @@ export interface NativeSdkViewInfo {
   gpuPixelFormat: NativeSdkGpuSurfacePixelFormat;
   gpuPresentMode: NativeSdkGpuSurfacePresentMode;
   gpuAlphaMode: NativeSdkGpuSurfaceAlphaMode;
+  gpuMaterial: NativeSdkGpuSurfaceMaterial;
   gpuColorSpace: NativeSdkGpuSurfaceColorSpace;
   gpuVsync: boolean;
   gpuStatus: NativeSdkGpuSurfaceStatus;
@@ -340,6 +342,8 @@ export interface NativeSdkCreateNativeViewOptions extends NativeSdkCreateViewBas
   gpuPresentMode?: NativeSdkGpuSurfacePresentMode;
   /** Only valid for gpu_surface views. */
   gpuAlphaMode?: NativeSdkGpuSurfaceAlphaMode;
+  /** Host-owned material visible through transparent GPU-surface pixels. */
+  gpuMaterial?: NativeSdkGpuSurfaceMaterial;
   /** Only valid for gpu_surface views. */
   gpuColorSpace?: NativeSdkGpuSurfaceColorSpace;
   /** Only valid for gpu_surface views. */
@@ -443,6 +447,8 @@ export type NativeSdkPlatformFeature =
   | "appActivationEvents"
   | "gpu_surfaces"
   | "gpuSurfaces"
+  | "gpu_surface_material"
+  | "gpuSurfaceMaterial"
   | "gpu_surface_scroll_drivers"
   | "gpuSurfaceScrollDrivers"
   | "context_menus"
