@@ -87,6 +87,9 @@ fn panelWindowView(ui: *PanelApp.Ui, model: *const PanelModel, window_label: []c
 const panel_views = [_]app_manifest.ShellView{
     .{ .label = canvas_label, .kind = .gpu_surface, .fill = true, .gpu_backend = .metal },
 };
+const glass_panel_views = [_]app_manifest.ShellView{
+    .{ .label = canvas_label, .kind = .gpu_surface, .fill = true, .gpu_backend = .metal, .gpu_material = .glass },
+};
 const panel_windows_scene = [_]app_manifest.ShellWindow{.{
     .label = "main",
     .title = "Panel",
@@ -95,6 +98,14 @@ const panel_windows_scene = [_]app_manifest.ShellWindow{.{
     .views = &panel_views,
 }};
 const panel_scene: app_manifest.ShellConfig = .{ .windows = &panel_windows_scene };
+const glass_panel_windows_scene = [_]app_manifest.ShellWindow{.{
+    .label = "main",
+    .title = "Panel",
+    .width = 400,
+    .height = 300,
+    .views = &glass_panel_views,
+}};
+const glass_panel_scene: app_manifest.ShellConfig = .{ .windows = &glass_panel_windows_scene };
 
 const Fixture = struct {
     harness: *core.TestHarness(),
@@ -102,12 +113,17 @@ const Fixture = struct {
     app: core.App,
 
     fn create() !Fixture {
+        return createWithScene(panel_scene, false);
+    }
+
+    fn createWithScene(scene: app_manifest.ShellConfig, material_supported: bool) !Fixture {
         const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
         errdefer harness.destroy(std.testing.allocator);
         harness.null_platform.gpu_surfaces = true;
+        harness.null_platform.gpu_surface_material = material_supported;
         const app_state = try PanelApp.create(std.heap.page_allocator, .{
             .name = "ui-app-panel",
-            .scene = panel_scene,
+            .scene = scene,
             .canvas_label = canvas_label,
             .update = panelUpdate,
             .view = panelView,
@@ -340,6 +356,50 @@ test "a transparent descriptor selects premultiplied canvas alpha and an alpha-z
     const corrected_present_count = fixture.harness.null_platform.gpu_surface_present_count;
     try fixture.dispatchSettingsCanvasFrame(info.id, 6, 8_000_000);
     try std.testing.expectEqual(corrected_present_count, fixture.harness.null_platform.gpu_surface_present_count);
+}
+
+test "supported glass clears main and secondary canvases without changing their GPU options" {
+    const fixture = try Fixture.createWithScene(glass_panel_scene, true);
+    defer fixture.destroy();
+
+    try std.testing.expectEqual(@as(u8, 0), fixture.harness.null_platform.gpu_surface_packet_present_clear_color_rgba8[3]);
+    try fixture.clickSettingsButton();
+    const info = fixture.settingsWindowInfo() orelse return error.TestUnexpectedResult;
+    try fixture.installSettingsCanvas(info.id);
+    try std.testing.expectEqualStrings(settings_canvas_label, fixture.harness.null_platform.gpu_surface_packet_present_label_storage[0..fixture.harness.null_platform.gpu_surface_packet_present_label_len]);
+    try std.testing.expectEqual(@as(u8, 0), fixture.harness.null_platform.gpu_surface_packet_present_clear_color_rgba8[3]);
+
+    var views_buffer: [2]support.platform.ViewInfo = undefined;
+    const views = fixture.harness.runtime.listViews(info.id, &views_buffer);
+    try std.testing.expectEqual(support.platform.GpuSurfaceMaterial.glass, views[0].gpu_material);
+}
+
+test "glass stays opaque on an unsupported host and default material stays opaque when supported" {
+    const unsupported = try Fixture.createWithScene(glass_panel_scene, false);
+    defer unsupported.destroy();
+    try std.testing.expectEqual(@as(u8, 255), unsupported.harness.null_platform.gpu_surface_packet_present_clear_color_rgba8[3]);
+    try unsupported.clickSettingsButton();
+    const unsupported_info = unsupported.settingsWindowInfo() orelse return error.TestUnexpectedResult;
+    try unsupported.installSettingsCanvas(unsupported_info.id);
+    try std.testing.expectEqual(@as(u8, 255), unsupported.harness.null_platform.gpu_surface_packet_present_clear_color_rgba8[3]);
+
+    const default_material = try Fixture.createWithScene(panel_scene, true);
+    defer default_material.destroy();
+    try std.testing.expectEqual(@as(u8, 255), default_material.harness.null_platform.gpu_surface_packet_present_clear_color_rgba8[3]);
+    try default_material.clickSettingsButton();
+    const default_info = default_material.settingsWindowInfo() orelse return error.TestUnexpectedResult;
+    try default_material.installSettingsCanvas(default_info.id);
+    try std.testing.expectEqual(@as(u8, 255), default_material.harness.null_platform.gpu_surface_packet_present_clear_color_rgba8[3]);
+}
+
+test "transparent secondary keeps its alpha-zero clear without glass material support" {
+    const fixture = try Fixture.createWithScene(panel_scene, false);
+    defer fixture.destroy();
+    fixture.app_state.model.transparent_settings = true;
+    try fixture.clickSettingsButton();
+    const info = fixture.settingsWindowInfo() orelse return error.TestUnexpectedResult;
+    try fixture.installSettingsCanvas(info.id);
+    try std.testing.expectEqual(@as(u8, 0), fixture.harness.null_platform.gpu_surface_packet_present_clear_color_rgba8[3]);
 }
 
 test "a user close dispatches on_close and the model owns the consequence" {

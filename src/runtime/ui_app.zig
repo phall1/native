@@ -943,6 +943,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             /// an alpha-capable native window still receives an opaque
             /// canvas inherited from the main scene.
             transparent: bool = false,
+            gpu_material: app_manifest.GpuSurfaceMaterial = .none,
             installed: bool = false,
             /// This slot's handler-tree currency (the per-slot half of
             /// `main_tree_current`): false only between handing the
@@ -2989,6 +2990,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             slot.window_id = info.id;
             self.setWindowSlotOnClose(slot, descriptor.on_close);
             slot.transparent = descriptor.transparent;
+            slot.gpu_material = self.mainCanvasMaterial();
             slot.installed = false;
             slot.canvas_size = .{ .width = descriptor.width, .height = descriptor.height };
             // Until this window's first frame reports its real density,
@@ -3037,6 +3039,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                     view.gpu_pixel_format = scene_view.gpu_pixel_format;
                     view.gpu_present_mode = scene_view.gpu_present_mode;
                     view.gpu_alpha_mode = scene_view.gpu_alpha_mode;
+                    view.gpu_material = scene_view.gpu_material;
                     view.gpu_color_space = scene_view.gpu_color_space;
                     view.gpu_vsync = scene_view.gpu_vsync;
                     break :scene;
@@ -3047,6 +3050,22 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             // mode and accidentally erase the desktop behind the slot.
             if (descriptor.transparent) view.gpu_alpha_mode = .premultiplied;
             return view;
+        }
+
+        fn mainCanvasMaterial(self: *const Self) app_manifest.GpuSurfaceMaterial {
+            for (self.options.scene.windows) |window| {
+                for (window.views) |view| {
+                    if (view.kind == .gpu_surface and std.mem.eql(u8, view.label, self.options.canvas_label)) {
+                        return view.gpu_material orelse .none;
+                    }
+                }
+            }
+            return .none;
+        }
+
+        fn usesSupportedGlassMaterial(self: *const Self, runtime: *Runtime, material: app_manifest.GpuSurfaceMaterial) bool {
+            _ = self;
+            return material == .glass and runtime.supports(.gpu_surface_material);
         }
 
         /// Remove the slot and close its runtime window (the reconcile
@@ -4864,12 +4883,14 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
             if (comptime terminal_session.enabled) {
                 _ = self.terminal_sessions.flushPending();
             }
+            var clear_color = self.effectiveTokens().colors.background;
+            if (self.usesSupportedGlassMaterial(runtime, self.mainCanvasMaterial())) clear_color.a = 0;
             try self.presentFrame(
                 runtime,
                 frame_event,
                 self.options.canvas_label,
                 installing,
-                self.effectiveTokens().colors.background,
+                clear_color,
             );
             if (installing) return;
             const on_frame = self.options.on_frame orelse return;
@@ -4933,7 +4954,7 @@ pub fn UiAppWithFeatures(comptime ModelT: type, comptime MsgT: type, comptime fe
                 try self.rebuildForRegisteredFonts(runtime);
             }
             var clear_color = self.slotEffectiveTokens(slot).colors.background;
-            if (slot.transparent) clear_color.a = 0;
+            if (slot.transparent or self.usesSupportedGlassMaterial(runtime, slot.gpu_material)) clear_color.a = 0;
             // Packet hosts retain each surface independently. The CPU
             // fallback shares one UiApp pixel buffer, whose ownership is
             // handled inside `presentFrame`: a surface handoff repaints

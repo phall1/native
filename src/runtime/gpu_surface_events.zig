@@ -198,6 +198,25 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
             try self.dispatchEvent(app, .{ .gpu_surface_resized = resize_event });
         }
 
+        fn endCanvasWidgetInputRefreshBatch(self: *Runtime, refresh_batch_active: *bool) anyerror!void {
+            if (!refresh_batch_active.*) return;
+            try CanvasWidgetDisplayMethods().endCanvasWidgetDisplayListRefreshBatch(self);
+            refresh_batch_active.* = false;
+        }
+
+        fn finishCanvasWidgetModalDismissContinuation(self: *Runtime, input_event: platform.GpuSurfaceInputEvent, refresh_batch_active: *bool) anyerror!void {
+            try CanvasWidgetEventMethods().reconcileCanvasTooltipIntentForConsumedPointerInput(self, input_event);
+            try endCanvasWidgetInputRefreshBatch(self, refresh_batch_active);
+        }
+
+        fn dispatchCanvasWidgetModalDismissAndFinishInput(self: *Runtime, app: runtime_api.App(Runtime), input_event: platform.GpuSurfaceInputEvent, dismissed_surface_id: canvas.ObjectId, refresh_batch_active: *bool) anyerror!void {
+            try CanvasWidgetEventMethods().reconcileCanvasTooltipIntentForConsumedPointerInput(self, input_event);
+            if (runtimeFindViewIndex(self, input_event.window_id, input_event.label)) |index| {
+                try CanvasWidgetEventMethods().dispatchCanvasWidgetDismissEvent(self, app, index, dismissed_surface_id);
+            }
+            try endCanvasWidgetInputRefreshBatch(self, refresh_batch_active);
+        }
+
         pub fn dispatchGpuSurfaceInput(self: *Runtime, app: runtime_api.App(Runtime), input_event: platform.GpuSurfaceInputEvent) anyerror!void {
             // Tell the host input landed BEFORE anything dispatches:
             // hosts that throttle occluded/minimized frame completions
@@ -288,6 +307,10 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
             if (runtimeFindViewIndex(self, input_event.window_id, input_event.label)) |index| {
                 self.views[index].recordGpuSurfaceInputTimestamp(input_event.timestamp_ns);
             }
+            if (CanvasWidgetEventMethods().consumeCanvasWidgetModalDismissPointerInput(self, input_event)) {
+                try finishCanvasWidgetModalDismissContinuation(self, input_event, &canvas_widget_refresh_batch_active);
+                return;
+            }
             switch (input_event.kind) {
                 .pointer_down,
                 .key_down,
@@ -331,12 +354,24 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
             var dismissed_surface_id: canvas.ObjectId = 0;
             var window_drag_started = false;
             if (widget_pointer_event) |*pointer_event| {
-                // Click count stamps first: every pass below (and the
-                // app's `canvas_widget_pointer` dispatch at the end)
-                // sees the same double/triple-click verdict for this
-                // input.
+                // Classify modal dismissal before advancing multi-click
+                // history: a consumed outside down never happened to the
+                // routed background target and cannot donate click one to
+                // that target's next legitimate gesture.
+                const dismissal = try CanvasWidgetEventMethods().dismissCanvasWidgetSurfaceFromPointerInput(self, pointer_event.*);
+                if (dismissal.consumes_gesture) {
+                    // Nothing later is owed for this down: control,
+                    // interaction, text, scroll, focus, command/Msg, pending
+                    // changes, and raw input all belong to the modal-owned
+                    // gesture. Dispatch its dismissal and rebuild only after
+                    // routing has stopped touching the old tree, then return.
+                    try dispatchCanvasWidgetModalDismissAndFinishInput(self, app, input_event, dismissal.id, &canvas_widget_refresh_batch_active);
+                    return;
+                }
+                dismissed_surface_id = dismissal.id;
+                // Every ordinary pass below (and the app's pointer dispatch)
+                // sees the same double/triple-click verdict for this input.
                 CanvasWidgetEventMethods().updateCanvasWidgetClickCountFromPointer(self, input_event, pointer_event);
-                dismissed_surface_id = try CanvasWidgetEventMethods().dismissCanvasWidgetSurfaceFromPointerInput(self, pointer_event.*);
                 // A down consumed by a window-drag region skips the whole
                 // widget press pipeline: the OS owns the pointer from here
                 // (the matching move/up may never reach the view), so no

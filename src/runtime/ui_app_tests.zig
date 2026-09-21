@@ -3893,9 +3893,9 @@ test "ui app autofocus moves the keyboard to a freshly mounted editor through th
     defer harness.destroy(std.testing.allocator);
     harness.null_platform.gpu_surfaces = true;
 
-    const app_state = try std.testing.allocator.create(AutofocusApp);
-    defer std.testing.allocator.destroy(app_state);
-    app_state.* = AutofocusApp.init(std.heap.page_allocator, .{}, .{
+    // By-value init reserves more than the macOS test binary's 16 MiB stack.
+    // Construct the fixture in place so the autofocus assertions can run.
+    const app_state = try AutofocusApp.create(std.heap.page_allocator, .{
         .name = "ui-app-autofocus",
         .scene = autofocus_scene,
         .canvas_label = autofocus_canvas_label,
@@ -3903,7 +3903,7 @@ test "ui app autofocus moves the keyboard to a freshly mounted editor through th
         .view = autofocusView,
         .on_command = autofocusCommand,
     });
-    defer app_state.deinit();
+    defer app_state.destroy();
     const app = app_state.app();
     try harness.start(app);
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{

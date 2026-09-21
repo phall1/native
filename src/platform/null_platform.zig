@@ -92,6 +92,7 @@ const GpuSurfaceBackend = types.GpuSurfaceBackend;
 const GpuSurfacePixelFormat = types.GpuSurfacePixelFormat;
 const GpuSurfacePresentMode = types.GpuSurfacePresentMode;
 const GpuSurfaceAlphaMode = types.GpuSurfaceAlphaMode;
+const GpuSurfaceMaterial = types.GpuSurfaceMaterial;
 const GpuSurfaceColorSpace = types.GpuSurfaceColorSpace;
 const GpuSurfaceStatus = types.GpuSurfaceStatus;
 const CanvasFrameProfileRisk = types.CanvasFrameProfileRisk;
@@ -351,6 +352,9 @@ pub const NullPlatform = struct {
     web_engine: WebEngine = .system,
     app_info: AppInfo = .{},
     gpu_surfaces: bool = false,
+    /// Lets runtime tests model the macOS material host without pretending
+    /// that the default deterministic null host composites system effects.
+    gpu_surface_material: bool = false,
     gpu_surface_packets: bool = true,
     /// Model a host that decodes the compact binary packet encoding.
     /// Off by default so existing JSON-asserting tests keep exercising
@@ -1024,6 +1028,7 @@ pub const NullPlatform = struct {
             .app_activation_events,
             => true,
             .gpu_surfaces => self.gpu_surfaces,
+            .gpu_surface_material => self.gpu_surface_material,
             .gpu_surface_scroll_drivers => self.gpu_surface_scroll_drivers,
             .context_menus => self.context_menus,
             .tray => self.web_engine == .system,
@@ -1426,6 +1431,7 @@ pub const NullPlatform = struct {
             .gpu_pixel_format = if (options.kind == .gpu_surface) options.gpu_surface.pixel_format else .none,
             .gpu_present_mode = if (options.kind == .gpu_surface) options.gpu_surface.present_mode else .none,
             .gpu_alpha_mode = if (options.kind == .gpu_surface) options.gpu_surface.alpha_mode else .none,
+            .gpu_material = if (options.kind == .gpu_surface) options.gpu_surface.material else .none,
             .gpu_color_space = if (options.kind == .gpu_surface) options.gpu_surface.color_space else .none,
             .gpu_vsync = options.kind == .gpu_surface and options.gpu_surface.vsync,
             .gpu_status = if (options.kind == .gpu_surface) .ready else .unavailable,
@@ -3459,6 +3465,7 @@ pub const NullView = struct {
     gpu_pixel_format: GpuSurfacePixelFormat = .none,
     gpu_present_mode: GpuSurfacePresentMode = .none,
     gpu_alpha_mode: GpuSurfaceAlphaMode = .none,
+    gpu_material: GpuSurfaceMaterial = .none,
     gpu_color_space: GpuSurfaceColorSpace = .none,
     gpu_vsync: bool = false,
     gpu_status: GpuSurfaceStatus = .unavailable,

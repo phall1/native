@@ -103,6 +103,8 @@ pub const PlatformFeature = enum {
     file_drops,
     app_activation_events,
     gpu_surfaces,
+    /// Host-owned semantic material behind a GPU surface's transparent pixels.
+    gpu_surface_material,
     /// Per-scrollable-region native scroll drivers for gpu-surface canvas
     /// views (macOS: invisible `NSScrollView`s that own scroll input,
     /// momentum, rubber-band, and overlay scrollbars).
@@ -942,6 +944,13 @@ pub const GpuSurfaceAlphaMode = enum {
     premultiplied,
 };
 
+/// A host-owned backing treatment for a GPU surface. This is deliberately a
+/// surface property: canvas commands describe app pixels, not platform chrome.
+pub const GpuSurfaceMaterial = enum {
+    none,
+    glass,
+};
+
 pub const GpuSurfaceColorSpace = enum {
     none,
     srgb,
@@ -967,6 +976,7 @@ pub const GpuSurfaceOptions = struct {
     pixel_format: GpuSurfacePixelFormat = .bgra8_unorm,
     present_mode: GpuSurfacePresentMode = .timer,
     alpha_mode: GpuSurfaceAlphaMode = .@"opaque",
+    material: GpuSurfaceMaterial = .none,
     color_space: GpuSurfaceColorSpace = .srgb,
     vsync: bool = true,
 
@@ -1075,6 +1085,7 @@ pub const ViewInfo = struct {
     gpu_pixel_format: GpuSurfacePixelFormat = .none,
     gpu_present_mode: GpuSurfacePresentMode = .none,
     gpu_alpha_mode: GpuSurfaceAlphaMode = .none,
+    gpu_material: GpuSurfaceMaterial = .none,
     gpu_color_space: GpuSurfaceColorSpace = .none,
     gpu_vsync: bool = false,
     gpu_status: GpuSurfaceStatus = .unavailable,
@@ -3804,6 +3815,7 @@ fn defaultSupportsFeature(services: PlatformServices, feature: PlatformFeature) 
         .file_drops => false,
         .app_activation_events => false,
         .gpu_surfaces => false,
+        .gpu_surface_material => false,
         .gpu_surface_scroll_drivers => services.set_gpu_surface_scroll_drivers_fn != null,
         .context_menus => services.show_context_menu_fn != null,
         .view_surface_adoption => services.adopt_view_surface_fn != null,

@@ -671,7 +671,11 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
 
             try self.refreshCanvasWidgetSemantics();
             self.widget_revision += 1;
-            return .{ .id = surface.id, .dirty = dirty };
+            return .{
+                .id = surface.id,
+                .dirty = dirty,
+                .consumes_pointer_gesture = canvas.widgetIsRootRelativeModal(surface),
+            };
         }
 
         /// Which anchored dismissible surfaces a lookup means to see. A

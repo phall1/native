@@ -428,6 +428,11 @@ pub const GpuSurfaceAlphaMode = enum {
     premultiplied,
 };
 
+pub const GpuSurfaceMaterial = enum {
+    none,
+    glass,
+};
+
 pub const GpuSurfaceColorSpace = enum {
     none,
     srgb,
@@ -473,6 +478,8 @@ pub const ShellView = struct {
     gpu_pixel_format: ?GpuSurfacePixelFormat = null,
     gpu_present_mode: ?GpuSurfacePresentMode = null,
     gpu_alpha_mode: ?GpuSurfaceAlphaMode = null,
+    /// Host-owned material visible through this surface's transparent pixels.
+    gpu_material: ?GpuSurfaceMaterial = null,
     gpu_color_space: ?GpuSurfaceColorSpace = null,
     gpu_vsync: ?bool = null,
 
@@ -481,6 +488,7 @@ pub const ShellView = struct {
             self.gpu_pixel_format != null or
             self.gpu_present_mode != null or
             self.gpu_alpha_mode != null or
+            self.gpu_material != null or
             self.gpu_color_space != null or
             self.gpu_vsync != null;
     }

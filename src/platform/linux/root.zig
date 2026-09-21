@@ -450,6 +450,7 @@ pub const LinuxPlatform = struct {
             .app_activation_events,
             .gpu_surfaces,
             => self.web_engine == .system,
+            .gpu_surface_material => false,
             .credentials => credentialsAvailable(self.host),
             // Audio rides GStreamer (playbin), runtime-loaded like
             // libsecret: the report is a live probe, so a host without

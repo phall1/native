@@ -61,6 +61,11 @@ pub fn canvasWidgetDragCrossedSlop(delta: geometry.OffsetF) bool {
     return @abs(delta.dx) >= canvas_widget_drag_slop or @abs(delta.dy) >= canvas_widget_drag_slop;
 }
 
+const CanvasWidgetPointerDismissal = struct {
+    id: canvas.ObjectId = 0,
+    consumes_gesture: bool = false,
+};
+
 pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
     return struct {
         pub fn routeCanvasWidgetPointerInput(self: *const Runtime, input_event: GpuSurfaceInputEvent, output: []canvas.WidgetEventRouteEntry) anyerror!?CanvasWidgetPointerEvent {
@@ -2516,22 +2521,61 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             _ = try runtime_canvas_widget_display.RuntimeCanvasWidgetDisplay(Runtime).refreshCanvasWidgetDisplayListIfOwned(self, index);
         }
 
-        /// Returns the dismissed surface's widget id (0 when nothing was
-        /// dismissed). The caller dispatches the `canvas_widget_dismiss`
-        /// app event at the END of input processing — an app dispatch
-        /// rebuilds the tree, and the rest of the input pipeline still
-        /// routes into the current one.
-        pub fn dismissCanvasWidgetSurfaceFromPointerInput(self: *Runtime, pointer_event: CanvasWidgetPointerEvent) anyerror!canvas.ObjectId {
-            if (pointer_event.pointer.phase != .down) return 0;
-            const index = runtimeFindViewIndex(self, pointer_event.window_id, pointer_event.view_label) orelse return 0;
-            if (self.views[index].kind != .gpu_surface or !self.views[index].focused) return 0;
+        /// Returns the dismissed surface when one was hidden. The caller
+        /// dispatches `canvas_widget_dismiss` only after routing has stopped
+        /// touching this tree: immediately before returning for a consumed
+        /// modal gesture, or at the end of ordinary light-dismiss input.
+        pub fn dismissCanvasWidgetSurfaceFromPointerInput(self: *Runtime, pointer_event: CanvasWidgetPointerEvent) anyerror!CanvasWidgetPointerDismissal {
+            if (pointer_event.pointer.phase != .down) return .{};
+            const index = runtimeFindViewIndex(self, pointer_event.window_id, pointer_event.view_label) orelse return .{};
+            if (self.views[index].kind != .gpu_surface or !self.views[index].focused) return .{};
             const focused_id = self.views[index].canvas_widget_focused_id;
 
             const previous_cursor = self.views[index].canvas_widget_cursor;
-            const dismissal = try self.views[index].dismissCanvasWidgetSurfaceForPointerOutsideFocusedTarget(focused_id, pointer_event.route) orelse return 0;
+            const dismissal = try self.views[index].dismissCanvasWidgetSurfaceForPointerOutsideFocusedTarget(focused_id, pointer_event.route) orelse return .{};
             if (previous_cursor != self.views[index].canvas_widget_cursor) try syncCanvasWidgetCursorForView(self, index);
             try invalidateForCanvasWidgetDirty(self, index, dismissal.dirty);
-            return dismissal.id;
+            armCanvasWidgetModalDismissPointerInput(self, index, pointer_event.pointer.pointer_id, dismissal.consumes_pointer_gesture);
+            return .{ .id = dismissal.id, .consumes_gesture = dismissal.consumes_pointer_gesture };
+        }
+
+        pub fn consumeCanvasWidgetModalDismissPointerInput(self: *Runtime, input_event: GpuSurfaceInputEvent) bool {
+            const index = runtimeFindViewIndex(self, input_event.window_id, input_event.label) orelse return false;
+            const view = &self.views[index];
+            if (!view.canvas_widget_modal_dismiss_pointer_active or
+                view.canvas_widget_modal_dismiss_pointer_id != input_event.pointer_id)
+            {
+                return false;
+            }
+            return switch (input_event.kind) {
+                // A new down proves the old sequence lost its terminal edge.
+                // Retire the stale latch and let this fresh gesture route.
+                .pointer_down => blk: {
+                    view.canvas_widget_modal_dismiss_pointer_active = false;
+                    break :blk false;
+                },
+                .pointer_up, .pointer_cancel => blk: {
+                    view.canvas_widget_modal_dismiss_pointer_active = false;
+                    break :blk true;
+                },
+                .pointer_move, .pointer_drag => true,
+                else => false,
+            };
+        }
+
+        fn armCanvasWidgetModalDismissPointerInput(self: *Runtime, index: usize, pointer_id: u64, consumed: bool) void {
+            if (!consumed) return;
+            const view = &self.views[index];
+            view.canvas_widget_modal_dismiss_pointer_active = true;
+            view.canvas_widget_modal_dismiss_pointer_id = pointer_id;
+            // Drag routing sees pointer-down before outside dismissal. Retire
+            // only the candidate this same pointer just opened; never disturb
+            // another pointer's live drag.
+            if (view.canvas_widget_drag_source_id == 0 and
+                view.canvas_widget_drag_pointer_id == pointer_id)
+            {
+                view.canvas_widget_drag_pointer_id = 0;
+            }
         }
 
         /// Same contract as the pointer variant: returns the dismissed

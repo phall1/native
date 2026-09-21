@@ -120,6 +120,8 @@ pub fn writeViewJsonToWriter(view: platform.ViewInfo, writer: anytype) !void {
     try json.writeString(writer, @tagName(view.gpu_present_mode));
     try writer.writeAll(",\"gpuAlphaMode\":");
     try json.writeString(writer, @tagName(view.gpu_alpha_mode));
+    try writer.writeAll(",\"gpuMaterial\":");
+    try json.writeString(writer, @tagName(view.gpu_material));
     try writer.writeAll(",\"gpuColorSpace\":");
     try json.writeString(writer, @tagName(view.gpu_color_space));
     try writer.print(",\"gpuVsync\":{}", .{view.gpu_vsync});

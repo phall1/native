@@ -246,6 +246,7 @@ pub const RuntimeView = struct {
     gpu_pixel_format: platform.GpuSurfacePixelFormat = .none,
     gpu_present_mode: platform.GpuSurfacePresentMode = .none,
     gpu_alpha_mode: platform.GpuSurfaceAlphaMode = .none,
+    gpu_material: platform.GpuSurfaceMaterial = .none,
     gpu_color_space: platform.GpuSurfaceColorSpace = .none,
     gpu_vsync: bool = false,
     gpu_status: platform.GpuSurfaceStatus = .unavailable,
@@ -617,6 +618,12 @@ pub const RuntimeView = struct {
     canvas_widget_focus_visible_keyboard: bool = false,
     canvas_widget_hovered_id: canvas.ObjectId = 0,
     canvas_widget_pressed_id: canvas.ObjectId = 0,
+    /// A pointer-down outside a root-relative modal dismisses it and owns
+    /// that physical sequence through its terminal edge. Without this latch,
+    /// the modal's synchronous model rebuild exposes underlying content to
+    /// the matching release (and raw input consumer) mid-gesture.
+    canvas_widget_modal_dismiss_pointer_active: bool = false,
+    canvas_widget_modal_dismiss_pointer_id: u64 = 0,
     /// The resolved draggable ancestor that owns the live pointer gesture.
     /// `pressed_id` deliberately stays the raw text hit for ordinary text
     /// selection; this separate latch lets a draggable card own that drag.
@@ -1158,6 +1165,7 @@ pub const RuntimeView = struct {
             .gpu_pixel_format = self.gpu_pixel_format,
             .gpu_present_mode = self.gpu_present_mode,
             .gpu_alpha_mode = self.gpu_alpha_mode,
+            .gpu_material = self.gpu_material,
             .gpu_color_space = self.gpu_color_space,
             .gpu_vsync = self.gpu_vsync,
             .gpu_status = self.gpu_status,

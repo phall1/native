@@ -196,6 +196,33 @@ const hasNativeViews = await window.zero.platform.supports("native_views");
 
 `gpu_surface` views report GPU presentation state through `ViewInfo` and `GpuSurfaceFrameEvent`, including the selected backend, pixel format, present mode, alpha mode, color space, vsync flag, status, frame size, frame index, timestamp, nonblank sample status, input latency budget, first-frame latency budget, retained canvas frame counters, widget revision, widget node count, and current cursor intent.
 
+### macOS glass material
+
+`gpu_material` is an optional surface property with a default of `none`. Set it to
+`glass` only after checking `runtime.supports(.gpu_surface_material)` when the
+effect is essential:
+
+```zig
+.{ .label = "header-canvas", .kind = .gpu_surface, .fill = true, .gpu_material = .glass }
+```
+
+On macOS 26 and later the system host uses the native glass material. Older macOS
+system hosts use a semantic visual-effect fallback; other hosts report the feature
+unsupported and do not synthesize a fake effect. Material follows the window's
+native system appearance, including accessibility appearance choices, rather than
+an app token palette.
+
+Glass is visible only through transparent pixels in the GPU canvas. Render opaque
+terminal or application content normally: it remains opaque and unchanged above
+the material. The registered GPU surface remains the accessibility and input owner;
+the host's material and Metal-content views are passive. A visible material surface
+temporarily makes its owning window alpha-capable and restores that window's prior
+opaque/background state when its final material surface is hidden or closed.
+
+For visual verification, capture the **screen** with a known backdrop behind the
+window. Layer-only or window-only captures omit the desktop/backdrop that native
+material samples and can look uniformly gray even when composition is correct.
+
 See [Platform Support](/docs/platform-support) for the current host matrix.
 
 ## Related Docs

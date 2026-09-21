@@ -133,6 +133,7 @@ fn shellViewFrom(comptime view: anytype) types.ShellView {
     if (@hasField(@TypeOf(view), "gpu_pixel_format")) out.gpu_pixel_format = enumField(types.GpuSurfacePixelFormat, view.gpu_pixel_format, "gpu_pixel_format");
     if (@hasField(@TypeOf(view), "gpu_present_mode")) out.gpu_present_mode = enumField(types.GpuSurfacePresentMode, view.gpu_present_mode, "gpu_present_mode");
     if (@hasField(@TypeOf(view), "gpu_alpha_mode")) out.gpu_alpha_mode = enumField(types.GpuSurfaceAlphaMode, view.gpu_alpha_mode, "gpu_alpha_mode");
+    if (@hasField(@TypeOf(view), "gpu_material")) out.gpu_material = enumField(types.GpuSurfaceMaterial, view.gpu_material, "gpu_material");
     if (@hasField(@TypeOf(view), "gpu_color_space")) out.gpu_color_space = enumField(types.GpuSurfaceColorSpace, view.gpu_color_space, "gpu_color_space");
     if (@hasField(@TypeOf(view), "gpu_vsync")) out.gpu_vsync = view.gpu_vsync;
     return out;

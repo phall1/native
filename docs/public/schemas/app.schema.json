@@ -336,6 +336,7 @@
         "gpu_pixel_format": { "enum": ["none", "bgra8_unorm"] },
         "gpu_present_mode": { "enum": ["none", "timer"] },
         "gpu_alpha_mode": { "enum": ["none", "opaque", "premultiplied"] },
+        "gpu_material": { "enum": ["none", "glass"] },
         "gpu_color_space": { "enum": ["none", "srgb", "display_p3"] },
         "gpu_vsync": { "type": "boolean" }
       }

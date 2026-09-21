@@ -563,6 +563,9 @@ pub fn canvasWidgetRuntimeHitTarget(widget: canvas.Widget) bool {
 pub const CanvasWidgetSurfaceDismissal = struct {
     id: canvas.ObjectId,
     dirty: geometry.RectF,
+    /// Root-relative modals own the outside-dismiss pointer sequence.
+    /// Anchored light-dismiss surfaces deliberately keep click-through.
+    consumes_pointer_gesture: bool = false,
 };
 
 pub fn canvasWidgetDismissibleSurfaceKind(kind: canvas.WidgetKind) bool {

@@ -300,6 +300,7 @@ fn shellGpuSurfaceOptions(view: app_manifest.ShellView) platform.GpuSurfaceOptio
     if (view.gpu_pixel_format) |value| options.pixel_format = shellGpuSurfacePixelFormat(value);
     if (view.gpu_present_mode) |value| options.present_mode = shellGpuSurfacePresentMode(value);
     if (view.gpu_alpha_mode) |value| options.alpha_mode = shellGpuSurfaceAlphaMode(value);
+    if (view.gpu_material) |value| options.material = shellGpuSurfaceMaterial(value);
     if (view.gpu_color_space) |value| options.color_space = shellGpuSurfaceColorSpace(value);
     if (view.gpu_vsync) |value| options.vsync = value;
     return options;
@@ -332,6 +333,13 @@ fn shellGpuSurfaceAlphaMode(value: app_manifest.GpuSurfaceAlphaMode) platform.Gp
         .none => .none,
         .@"opaque" => .@"opaque",
         .premultiplied => .premultiplied,
+    };
+}
+
+fn shellGpuSurfaceMaterial(value: app_manifest.GpuSurfaceMaterial) platform.GpuSurfaceMaterial {
+    return switch (value) {
+        .none => .none,
+        .glass => .glass,
     };
 }
 

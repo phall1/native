@@ -43,6 +43,17 @@ static const uint32_t NativeSdkShortcutModifierControl = 1u << 2;
 static const uint32_t NativeSdkShortcutModifierOption = 1u << 3;
 static const uint32_t NativeSdkShortcutModifierShift = 1u << 4;
 
+#if NATIVE_SDK_APPKIT_CELL_GRID_TESTING
+static Class NativeSdkGlassEffectViewClassOverride = Nil;
+#endif
+
+static Class NativeSdkGlassEffectViewClass(void) {
+#if NATIVE_SDK_APPKIT_CELL_GRID_TESTING
+    if (NativeSdkGlassEffectViewClassOverride) return NativeSdkGlassEffectViewClassOverride;
+#endif
+    return NSClassFromString(@"NSGlassEffectView");
+}
+
 // SMAppService is resolved dynamically so the host keeps its existing
 // deployment target. Class lookup alone does not load the framework, so
 // load it explicitly on first use; older macOS releases simply leave the
@@ -500,6 +511,9 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
 @property(nonatomic, strong) id<MTLDevice> device;
 @property(nonatomic, strong) id<MTLCommandQueue> commandQueue;
 @property(nonatomic, strong) CAMetalLayer *metalLayer;
+@property(nonatomic, strong) NSView *materialEffectView;
+@property(nonatomic, strong) NSView *metalContentView;
+@property(nonatomic, assign) BOOL materialEnabled;
 @property(nonatomic, strong) id<MTLBuffer> sampleBuffer;
 @property(nonatomic, strong) id<MTLTexture> canvasTexture;
 /* Reused conversion storage for the CPU reference renderer's
@@ -717,6 +731,7 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
 @property(nonatomic, assign) BOOL controlClickActive;
 @property(nonatomic, assign) BOOL pinchGestureActive;
 - (void)configureWithHost:(NativeSdkAppKitHost *)host windowId:(uint64_t)windowId label:(NSString *)label;
+- (void)configureMaterial:(BOOL)enabled;
 - (BOOL)isAvailable;
 - (void)updateDrawableSize;
 - (BOOL)presentPixelsWithWidth:(NSUInteger)width height:(NSUInteger)height scale:(CGFloat)scale hasDirtyRect:(BOOL)hasDirtyRect dirtyX:(CGFloat)dirtyX dirtyY:(CGFloat)dirtyY dirtyWidth:(CGFloat)dirtyWidth dirtyHeight:(CGFloat)dirtyHeight dirtyRects:(NSArray<NSValue *> *)dirtyRects sourceIsPremultiplied:(BOOL)sourceIsPremultiplied rgba8:(const uint8_t *)rgba8 byteLength:(NSUInteger)byteLength;
@@ -774,6 +789,15 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
 - (void)setScrollDrivers:(const native_sdk_appkit_scroll_driver_t *)drivers count:(NSUInteger)count occluders:(const native_sdk_appkit_scroll_occluder_t *)occluders occluderCount:(NSUInteger)occluderCount;
 @end
 
+/// Material and canvas content are intentionally passive: the existing metal
+/// surface remains the sole input and accessibility owner.
+@interface NativeSdkPassiveView : NSView
+@end
+
+@implementation NativeSdkPassiveView
+- (NSView *)hitTest:(NSPoint)point { (void)point; return nil; }
+@end
+
 @interface NativeSdkAssetSchemeHandler : NSObject <WKURLSchemeHandler>
 @property(nonatomic, strong) NSString *rootPath;
 @property(nonatomic, strong) NSString *entryPath;
@@ -829,6 +853,10 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
 /// color, packed RGBA8 per window — so residual gaps (resize slack,
 /// titlebar bands) show the app's background, never a blank default.
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSNumber *> *windowClearColors;
+/// Original window compositing state captured while one or more visible
+/// material surfaces borrow the window's transparent backing.
+@property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSNumber *> *materialWindowOpaqueStates;
+@property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSColor *> *materialWindowBackgroundColors;
 /// close_policy per window (0 = quit, the default; 1 = hide). Applied
 /// by native_sdk_appkit_set_window_close_policy right after create —
 /// the delegate's windowShouldClose: consults it, so the user's close
@@ -1060,7 +1088,12 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
 - (BOOL)createWindowWithId:(uint64_t)windowId title:(NSString *)title label:(NSString *)label x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame initialPlacement:(int)initialPlacement restorePolicy:(int)restorePolicy resizable:(BOOL)resizable titlebarStyle:(int)titlebarStyle showPolicy:(int)showPolicy windowFlags:(uint32_t)windowFlags makeMain:(BOOL)makeMain;
 - (void)orderWindowForImplicitShow:(uint64_t)windowId;
 - (void)showDeferredWindowIfPending:(uint64_t)windowId reason:(const char *)reason;
-- (void)applyWindowClearColor:(uint64_t)windowId red:(uint8_t)red green:(uint8_t)green blue:(uint8_t)blue alpha:(uint8_t)alpha;
+- (void)applyWindowClearColor:(uint64_t)windowId label:(NSString *)label red:(uint8_t)red green:(uint8_t)green blue:(uint8_t)blue alpha:(uint8_t)alpha;
+- (void)refreshMaterialWindowAppearance:(uint64_t)windowId;
+- (BOOL)hasVisibleMaterialSurfaceInWindow:(uint64_t)windowId;
+- (BOOL)isVisibleMaterialSurface:(NSView *)view;
+- (void)enableMaterialWindowAppearance:(NSWindow *)window key:(NSNumber *)key;
+- (void)restoreMaterialWindowAppearance:(NSWindow *)window key:(NSNumber *)key;
 - (void)focusWindowWithId:(uint64_t)windowId;
 - (void)closeWindowWithId:(uint64_t)windowId;
 - (void)hideWindowWithId:(uint64_t)windowId;
@@ -1080,7 +1113,7 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
 - (void)applySegmentedControl:(NSSegmentedControl *)control text:(NSString *)text;
 - (void)configureNativeView:(NSView *)view command:(NSString *)command key:(NSString *)key;
 - (void)emitNativeCommandForSender:(id)sender;
-- (BOOL)createNativeViewInWindow:(uint64_t)windowId label:(NSString *)label kind:(NSInteger)kind parent:(NSString *)parent x:(double)x y:(double)y width:(double)width height:(double)height layer:(NSInteger)layer visible:(BOOL)visible enabled:(BOOL)enabled role:(NSString *)role accessibilityLabel:(NSString *)accessibilityLabel text:(NSString *)text command:(NSString *)command;
+- (BOOL)createNativeViewInWindow:(uint64_t)windowId label:(NSString *)label kind:(NSInteger)kind parent:(NSString *)parent x:(double)x y:(double)y width:(double)width height:(double)height layer:(NSInteger)layer visible:(BOOL)visible enabled:(BOOL)enabled role:(NSString *)role accessibilityLabel:(NSString *)accessibilityLabel text:(NSString *)text command:(NSString *)command gpuMaterial:(NSInteger)gpuMaterial;
 - (BOOL)updateNativeViewInWindow:(uint64_t)windowId label:(NSString *)label hasFrame:(BOOL)hasFrame x:(double)x y:(double)y width:(double)width height:(double)height hasLayer:(BOOL)hasLayer layer:(NSInteger)layer hasVisible:(BOOL)hasVisible visible:(BOOL)visible hasEnabled:(BOOL)hasEnabled enabled:(BOOL)enabled hasRole:(BOOL)hasRole role:(NSString *)role hasAccessibilityLabel:(BOOL)hasAccessibilityLabel accessibilityLabel:(NSString *)accessibilityLabel hasText:(BOOL)hasText text:(NSString *)text hasCommand:(BOOL)hasCommand command:(NSString *)command;
 - (BOOL)setNativeViewFrameInWindow:(uint64_t)windowId label:(NSString *)label x:(double)x y:(double)y width:(double)width height:(double)height;
 - (BOOL)setNativeViewVisibleInWindow:(uint64_t)windowId label:(NSString *)label visible:(BOOL)visible;
@@ -4505,6 +4538,51 @@ static void NativeSdkPremultiplyStraightRgba8(const uint8_t *source, uint8_t *de
     self.surfaceLabel = viewLabel ?: @"";
 }
 
+- (void)configureMaterial:(BOOL)enabled {
+    if (!enabled || self.materialEnabled) return;
+
+    // Do not name NSGlassEffectView directly: the SDK still builds against
+    // macOS 14 headers while a macOS 26 runtime may provide the class.
+    // Its documented contentView contract, not arbitrary subview ordering,
+    // keeps the canvas above the glass effect.
+    NativeSdkPassiveView *content = [[NativeSdkPassiveView alloc] initWithFrame:self.bounds];
+    content.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    content.accessibilityElement = NO;
+    content.wantsLayer = YES;
+    content.layer = self.metalLayer;
+
+    NSView *effect = nil;
+    Class glassClass = NativeSdkGlassEffectViewClass();
+    SEL setContentView = NSSelectorFromString(@"setContentView:");
+    if (glassClass && NSProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 26 && [glassClass instancesRespondToSelector:setContentView]) {
+        effect = [[glassClass alloc] initWithFrame:self.bounds];
+        ((void (*)(id, SEL, id))[effect methodForSelector:setContentView])(effect, setContentView, content);
+    } else {
+        NSVisualEffectView *visual = [[NSVisualEffectView alloc] initWithFrame:self.bounds];
+        visual.material = NSVisualEffectMaterialUnderWindowBackground;
+        visual.blendingMode = NSVisualEffectBlendingModeBehindWindow;
+        visual.state = NSVisualEffectStateFollowsWindowActiveState;
+        [visual addSubview:content];
+        effect = visual;
+    }
+    effect.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    effect.accessibilityElement = NO;
+    NativeSdkPassiveView *materialContainer = [[NativeSdkPassiveView alloc] initWithFrame:self.bounds];
+    materialContainer.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    materialContainer.accessibilityElement = NO;
+    [materialContainer addSubview:effect];
+
+    // The root remains the registered input/accessibility view. Its ordinary
+    // layer hosts the passive material hierarchy; the retained CAMetalLayer
+    // moves exactly once to the content view above the effect.
+    self.layer = [CALayer layer];
+    [self addSubview:materialContainer];
+    self.materialEffectView = materialContainer;
+    self.metalContentView = content;
+    self.materialEnabled = YES;
+    self.metalLayer.opaque = NO;
+}
+
 - (instancetype)initWithFrame:(NSRect)frameRect {
     self = [super initWithFrame:frameRect];
     if (!self) return nil;
@@ -4595,12 +4673,12 @@ static void NativeSdkPremultiplyStraightRgba8(const uint8_t *source, uint8_t *de
 }
 
 - (BOOL)isOpaque {
-    return self.window ? self.window.opaque : YES;
+    return !self.materialEnabled && (self.window ? self.window.opaque : YES);
 }
 
 - (void)viewDidMoveToWindow {
     [super viewDidMoveToWindow];
-    self.metalLayer.opaque = self.window ? self.window.opaque : YES;
+    self.metalLayer.opaque = self.materialEnabled ? NO : (self.window ? self.window.opaque : YES);
     self.window.acceptsMouseMovedEvents = YES;
     [self updateDrawableSize];
     [self updateSurfaceTrackingArea];
@@ -8667,6 +8745,8 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
     self.windowLabels = [[NSMutableDictionary alloc] init];
     self.deferredShowWindows = [[NSMutableDictionary alloc] init];
     self.windowClearColors = [[NSMutableDictionary alloc] init];
+    self.materialWindowOpaqueStates = [[NSMutableDictionary alloc] init];
+    self.materialWindowBackgroundColors = [[NSMutableDictionary alloc] init];
     self.windowClosePolicies = [[NSMutableDictionary alloc] init];
     self.passiveShowWindows = [[NSMutableSet alloc] init];
     self.policyHiddenWindows = [[NSMutableSet alloc] init];
@@ -8932,15 +9012,73 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
 // residual gap (resize slack, the titlebar band before content lands)
 // shows the app's background instead of the system default. Applied on
 // change only; presents carry the color on every packet.
-- (void)applyWindowClearColor:(uint64_t)windowId red:(uint8_t)red green:(uint8_t)green blue:(uint8_t)blue alpha:(uint8_t)alpha {
+- (void)applyWindowClearColor:(uint64_t)windowId label:(NSString *)label red:(uint8_t)red green:(uint8_t)green blue:(uint8_t)blue alpha:(uint8_t)alpha {
     NSNumber *key = @(windowId);
     const uint32_t packed = ((uint32_t)red << 24) | ((uint32_t)green << 16) | ((uint32_t)blue << 8) | (uint32_t)alpha;
     NSNumber *previous = self.windowClearColors[key];
-    if (previous && previous.unsignedIntValue == packed) return;
+    // While material owns the window, identical pixels can still come from a
+    // different surface and change the background owed when material leaves.
+    if (previous && previous.unsignedIntValue == packed && !self.materialWindowOpaqueStates[key]) return;
     NSWindow *window = self.windows[key];
     if (!window) return;
     self.windowClearColors[key] = @(packed);
-    window.backgroundColor = [NSColor colorWithSRGBRed:red / 255.0 green:green / 255.0 blue:blue / 255.0 alpha:alpha / 255.0];
+    NSColor *color = [NSColor colorWithSRGBRed:red / 255.0 green:green / 255.0 blue:blue / 255.0 alpha:alpha / 255.0];
+    if (self.materialWindowOpaqueStates[key]) {
+        NSView *source = self.nativeViews[[self nativeViewKeyForWindow:windowId label:label]];
+        if (![source isKindOfClass:[NativeSdkMetalSurfaceView class]] || !((NativeSdkMetalSurfaceView *)source).materialEnabled) {
+            // A normal sibling surface updated the window's intended clear
+            // while glass owned composition. Preserve that newer target for
+            // restoration; a glass surface's own alpha-zero packet must not
+            // overwrite the pre-material background.
+            self.materialWindowBackgroundColors[key] = color;
+        }
+        return;
+    }
+    window.backgroundColor = color;
+}
+
+- (void)refreshMaterialWindowAppearance:(uint64_t)windowId {
+    NSNumber *key = @(windowId);
+    NSWindow *window = self.windows[key] ?: (windowId == 1 ? self.window : nil);
+    if (!window) return;
+    if ([self hasVisibleMaterialSurfaceInWindow:windowId]) {
+        [self enableMaterialWindowAppearance:window key:key];
+        return;
+    }
+    [self restoreMaterialWindowAppearance:window key:key];
+}
+
+- (BOOL)hasVisibleMaterialSurfaceInWindow:(uint64_t)windowId {
+    NSString *prefix = [NSString stringWithFormat:@"%llu:", windowId];
+    for (NSString *viewKey in self.nativeViews) {
+        if (![viewKey hasPrefix:prefix]) continue;
+        if ([self isVisibleMaterialSurface:self.nativeViews[viewKey]]) return YES;
+    }
+    return NO;
+}
+
+- (BOOL)isVisibleMaterialSurface:(NSView *)view {
+    if (![view isKindOfClass:[NativeSdkMetalSurfaceView class]]) return NO;
+    if (view.isHiddenOrHasHiddenAncestor) return NO;
+    return ((NativeSdkMetalSurfaceView *)view).materialEnabled;
+}
+
+- (void)enableMaterialWindowAppearance:(NSWindow *)window key:(NSNumber *)key {
+    if (!self.materialWindowOpaqueStates[key]) {
+        self.materialWindowOpaqueStates[key] = @(window.opaque);
+        self.materialWindowBackgroundColors[key] = window.backgroundColor ?: NSColor.windowBackgroundColor;
+    }
+    window.opaque = NO;
+    window.backgroundColor = NSColor.clearColor;
+}
+
+- (void)restoreMaterialWindowAppearance:(NSWindow *)window key:(NSNumber *)key {
+    NSNumber *wasOpaque = self.materialWindowOpaqueStates[key];
+    if (!wasOpaque) return;
+    window.opaque = wasOpaque.boolValue;
+    window.backgroundColor = self.materialWindowBackgroundColors[key] ?: NSColor.windowBackgroundColor;
+    [self.materialWindowOpaqueStates removeObjectForKey:key];
+    [self.materialWindowBackgroundColors removeObjectForKey:key];
 }
 
 - (void)dealloc {
@@ -9478,7 +9616,7 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
     }];
 }
 
-- (BOOL)createNativeViewInWindow:(uint64_t)windowId label:(NSString *)label kind:(NSInteger)kind parent:(NSString *)parent x:(double)x y:(double)y width:(double)width height:(double)height layer:(NSInteger)layer visible:(BOOL)visible enabled:(BOOL)enabled role:(NSString *)role accessibilityLabel:(NSString *)accessibilityLabel text:(NSString *)text command:(NSString *)command {
+- (BOOL)createNativeViewInWindow:(uint64_t)windowId label:(NSString *)label kind:(NSInteger)kind parent:(NSString *)parent x:(double)x y:(double)y width:(double)width height:(double)height layer:(NSInteger)layer visible:(BOOL)visible enabled:(BOOL)enabled role:(NSString *)role accessibilityLabel:(NSString *)accessibilityLabel text:(NSString *)text command:(NSString *)command gpuMaterial:(NSInteger)gpuMaterial {
     if (label.length == 0 || x < 0 || y < 0 || width < 0 || height < 0) return NO;
     if (self.nativeViews.count >= NativeSdkMaxNativeViews) return NO;
     NSWindow *window = self.windows[@(windowId)] ?: (windowId == 1 ? self.window : nil);
@@ -9492,6 +9630,10 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
 
     NSView *view = [self makeNativeViewWithKind:kind label:label role:role text:text];
     if (!view) return NO;
+    if (gpuMaterial != 0 && ![view isKindOfClass:[NativeSdkMetalSurfaceView class]]) return NO;
+    if ([view isKindOfClass:[NativeSdkMetalSurfaceView class]]) {
+        [(NativeSdkMetalSurfaceView *)view configureMaterial:(gpuMaterial != 0)];
+    }
     view.frame = [self viewFrameForContainer:parentView x:x y:y width:width height:height];
     view.hidden = !visible;
     view.layer.zPosition = layer;
@@ -9505,6 +9647,7 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
         [(NativeSdkMetalSurfaceView *)view configureWithHost:self windowId:windowId label:label];
     }
     self.nativeViews[key] = view;
+    [self refreshMaterialWindowAppearance:windowId];
     if (text.length > 0) {
         [self.nativeViewExplicitTextKeys addObject:key];
     } else {
@@ -9529,7 +9672,10 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
         view.wantsLayer = YES;
         view.layer.zPosition = layer;
     }
-    if (hasVisible) view.hidden = !visible;
+    if (hasVisible) {
+        view.hidden = !visible;
+        [self refreshMaterialWindowAppearance:windowId];
+    }
     BOOL shouldApplyState = hasEnabled || hasRole || hasAccessibilityLabel || hasText;
     if (hasText) {
         if (text.length > 0) {
@@ -9605,7 +9751,7 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
     if (![view isKindOfClass:[NativeSdkMetalSurfaceView class]]) return -1;
     const NSInteger result = [(NativeSdkMetalSurfaceView *)view presentGpuPacketWithSurfaceWidth:surfaceWidth height:surfaceHeight scale:scale clearR:clearR clearG:clearG clearB:clearB clearA:clearA requiresRender:requiresRender commandCount:commandCount unsupportedCommandCount:unsupportedCommandCount representable:representable json:json byteLength:byteLength];
     if (result == 1) {
-        [self applyWindowClearColor:windowId red:clearR green:clearG blue:clearB alpha:clearA];
+        [self applyWindowClearColor:windowId label:label red:clearR green:clearG blue:clearB alpha:clearA];
         [self showDeferredWindowIfPending:windowId reason:"first-present"];
     }
     return result;
@@ -9622,7 +9768,7 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
     }
     const NSInteger result = [(NativeSdkMetalSurfaceView *)view presentGpuPacketBinaryWithSurfaceWidth:surfaceWidth height:surfaceHeight scale:scale clearR:clearR clearG:clearG clearB:clearB clearA:clearA requiresRender:requiresRender commandCount:commandCount unsupportedCommandCount:unsupportedCommandCount representable:representable packet:packet byteLength:byteLength];
     if (result == 1) {
-        [self applyWindowClearColor:windowId red:clearR green:clearG blue:clearB alpha:clearA];
+        [self applyWindowClearColor:windowId label:label red:clearR green:clearG blue:clearB alpha:clearA];
         [self showDeferredWindowIfPending:windowId reason:"first-present"];
     }
     return result;
@@ -9779,6 +9925,7 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
         [self.nativeViewCommands removeObjectForKey:viewKey];
         [self.nativeViewExplicitTextKeys removeObject:viewKey];
     }
+    [self refreshMaterialWindowAppearance:windowId];
     [self reorderWebViewsInWindow:windowId];
     [self scheduleFrame];
     return YES;
@@ -9796,6 +9943,7 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
         [self.nativeViewCommands removeObjectForKey:key];
         [self.nativeViewExplicitTextKeys removeObject:key];
     }
+    [self refreshMaterialWindowAppearance:windowId];
     [self reorderWebViewsInWindow:windowId];
 }
 
@@ -14127,7 +14275,7 @@ int native_sdk_appkit_window_chrome_insets(native_sdk_appkit_host_t *host, uint6
     return [object chromeInsetsForWindowId:window_id top:top left:left bottom:bottom right:right buttonsX:buttons_x buttonsY:buttons_y buttonsWidth:buttons_width buttonsHeight:buttons_height] ? 1 : 0;
 }
 
-int native_sdk_appkit_create_view(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, int kind, const char *parent, size_t parent_len, double x, double y, double width, double height, int layer, int visible, int enabled, const char *role, size_t role_len, const char *accessibility_label, size_t accessibility_label_len, const char *text, size_t text_len, const char *command, size_t command_len) {
+int native_sdk_appkit_create_view(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, int kind, const char *parent, size_t parent_len, double x, double y, double width, double height, int layer, int visible, int enabled, const char *role, size_t role_len, const char *accessibility_label, size_t accessibility_label_len, const char *text, size_t text_len, const char *command, size_t command_len, int gpu_material) {
     NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
     NSString *labelString = label ? [[NSString alloc] initWithBytes:label length:label_len encoding:NSUTF8StringEncoding] : @"";
     NSString *parentString = parent ? [[NSString alloc] initWithBytes:parent length:parent_len encoding:NSUTF8StringEncoding] : @"";
@@ -14135,7 +14283,7 @@ int native_sdk_appkit_create_view(native_sdk_appkit_host_t *host, uint64_t windo
     NSString *accessibilityLabelString = accessibility_label ? [[NSString alloc] initWithBytes:accessibility_label length:accessibility_label_len encoding:NSUTF8StringEncoding] : @"";
     NSString *textString = text ? [[NSString alloc] initWithBytes:text length:text_len encoding:NSUTF8StringEncoding] : @"";
     NSString *commandString = command ? [[NSString alloc] initWithBytes:command length:command_len encoding:NSUTF8StringEncoding] : @"";
-    return [object createNativeViewInWindow:window_id label:labelString ?: @"" kind:kind parent:parentString ?: @"" x:x y:y width:width height:height layer:layer visible:(visible != 0) enabled:(enabled != 0) role:roleString ?: @"" accessibilityLabel:accessibilityLabelString ?: @"" text:textString ?: @"" command:commandString ?: @""] ? 1 : 0;
+    return [object createNativeViewInWindow:window_id label:labelString ?: @"" kind:kind parent:parentString ?: @"" x:x y:y width:width height:height layer:layer visible:(visible != 0) enabled:(enabled != 0) role:roleString ?: @"" accessibilityLabel:accessibilityLabelString ?: @"" text:textString ?: @"" command:commandString ?: @"" gpuMaterial:gpu_material] ? 1 : 0;
 }
 
 int native_sdk_appkit_update_view(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, int has_frame, double x, double y, double width, double height, int has_layer, int layer, int has_visible, int visible, int has_enabled, int enabled, int has_role, const char *role, size_t role_len, int has_accessibility_label, const char *accessibility_label, size_t accessibility_label_len, int has_text, const char *text, size_t text_len, int has_command, const char *command, size_t command_len) {

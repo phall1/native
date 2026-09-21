@@ -229,6 +229,7 @@ pub const RawShellView = struct {
     gpu_pixel_format: ?[]const u8 = null,
     gpu_present_mode: ?[]const u8 = null,
     gpu_alpha_mode: ?[]const u8 = null,
+    gpu_material: ?[]const u8 = null,
     gpu_color_space: ?[]const u8 = null,
     gpu_vsync: ?bool = null,
 };
