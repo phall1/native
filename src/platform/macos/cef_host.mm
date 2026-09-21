@@ -2620,7 +2620,7 @@ void native_sdk_appkit_set_menus(native_sdk_appkit_host_t *host, const char *con
     (void)item_count;
 }
 
-int native_sdk_appkit_create_view(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, int kind, const char *parent, size_t parent_len, double x, double y, double width, double height, int layer, int visible, int enabled, const char *role, size_t role_len, const char *accessibility_label, size_t accessibility_label_len, const char *text, size_t text_len, const char *command, size_t command_len) {
+int native_sdk_appkit_create_view(native_sdk_appkit_host_t *host, uint64_t window_id, const char *label, size_t label_len, int kind, const char *parent, size_t parent_len, double x, double y, double width, double height, int layer, int visible, int enabled, const char *role, size_t role_len, const char *accessibility_label, size_t accessibility_label_len, const char *text, size_t text_len, const char *command, size_t command_len, int gpu_material) {
     (void)host;
     (void)window_id;
     (void)label;
@@ -2643,6 +2643,7 @@ int native_sdk_appkit_create_view(native_sdk_appkit_host_t *host, uint64_t windo
     (void)text_len;
     (void)command;
     (void)command_len;
+    (void)gpu_material;
     return 0;
 }
 

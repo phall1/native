@@ -59,6 +59,9 @@ pub fn gpuSurfaceOptionsFromJson(payload: []const u8, storage: *json.StringStora
     if (jsonStringField(payload, "gpuAlphaMode", storage) orelse jsonStringField(payload, "gpu_alpha_mode", storage)) |value| {
         options.alpha_mode = gpuSurfaceAlphaModeFromString(value) orelse return error.UnsupportedViewKind;
     }
+    if (jsonStringField(payload, "gpuMaterial", storage) orelse jsonStringField(payload, "gpu_material", storage)) |value| {
+        options.material = gpuSurfaceMaterialFromString(value) orelse return error.UnsupportedViewKind;
+    }
     if (jsonStringField(payload, "gpuColorSpace", storage) orelse jsonStringField(payload, "gpu_color_space", storage)) |value| {
         options.color_space = gpuSurfaceColorSpaceFromString(value) orelse return error.UnsupportedViewKind;
     }
@@ -96,6 +99,13 @@ fn gpuSurfaceAlphaModeFromString(value: []const u8) ?platform.GpuSurfaceAlphaMod
     return null;
 }
 
+fn gpuSurfaceMaterialFromString(value: []const u8) ?platform.GpuSurfaceMaterial {
+    inline for (@typeInfo(platform.GpuSurfaceMaterial).@"enum".fields) |field| {
+        if (std.mem.eql(u8, value, field.name)) return @field(platform.GpuSurfaceMaterial, field.name);
+    }
+    return null;
+}
+
 fn gpuSurfaceColorSpaceFromString(value: []const u8) ?platform.GpuSurfaceColorSpace {
     inline for (@typeInfo(platform.GpuSurfaceColorSpace).@"enum".fields) |field| {
         if (std.mem.eql(u8, value, field.name)) return @field(platform.GpuSurfaceColorSpace, field.name);
@@ -120,6 +130,7 @@ pub fn platformFeatureFromString(value: []const u8) ?platform.PlatformFeature {
     if (std.mem.eql(u8, value, "appActivationEvents")) return .app_activation_events;
     if (std.mem.eql(u8, value, "gpuSurfaces")) return .gpu_surfaces;
     if (std.mem.eql(u8, value, "gpuSurfaceScrollDrivers")) return .gpu_surface_scroll_drivers;
+    if (std.mem.eql(u8, value, "gpuSurfaceMaterial")) return .gpu_surface_material;
     if (std.mem.eql(u8, value, "contextMenus")) return .context_menus;
     if (std.mem.eql(u8, value, "viewSurfaceAdoption")) return .view_surface_adoption;
     if (std.mem.eql(u8, value, "audioPlayback")) return .audio_playback;

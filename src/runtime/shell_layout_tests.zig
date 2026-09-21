@@ -188,6 +188,7 @@ test "runtime applies GPU shell view presentation options" {
         .gpu_pixel_format = .bgra8_unorm,
         .gpu_present_mode = .timer,
         .gpu_alpha_mode = .@"opaque",
+        .gpu_material = .glass,
         .gpu_color_space = .srgb,
         .gpu_vsync = true,
     }};
@@ -202,6 +203,7 @@ test "runtime applies GPU shell view presentation options" {
     try std.testing.expectEqual(platform.GpuSurfacePixelFormat.bgra8_unorm, canvas_view.gpu_pixel_format);
     try std.testing.expectEqual(platform.GpuSurfacePresentMode.timer, canvas_view.gpu_present_mode);
     try std.testing.expectEqual(platform.GpuSurfaceAlphaMode.@"opaque", canvas_view.gpu_alpha_mode);
+    try std.testing.expectEqual(platform.GpuSurfaceMaterial.glass, canvas_view.gpu_material);
     try std.testing.expectEqual(platform.GpuSurfaceColorSpace.srgb, canvas_view.gpu_color_space);
     try std.testing.expect(canvas_view.gpu_vsync);
 }

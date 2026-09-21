@@ -533,6 +533,7 @@ pub const WindowsPlatform = struct {
             .microphone_capture,
             .system_audio_capture,
             => self.web_engine == .system,
+            .gpu_surface_material => false,
             // Credential Manager backs both core effects and the builtin
             // bridge and does not depend on WebView2 being selected.
             .credentials => true,

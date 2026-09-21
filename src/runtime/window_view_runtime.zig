@@ -488,6 +488,7 @@ pub fn RuntimeWindowViewRuntime(comptime Runtime: type) type {
                 .gpu_pixel_format = if (options.kind == .gpu_surface) options.gpu_surface.pixel_format else .none,
                 .gpu_present_mode = if (options.kind == .gpu_surface) options.gpu_surface.present_mode else .none,
                 .gpu_alpha_mode = if (options.kind == .gpu_surface) options.gpu_surface.alpha_mode else .none,
+                .gpu_material = if (options.kind == .gpu_surface) options.gpu_surface.material else .none,
                 .gpu_color_space = if (options.kind == .gpu_surface) options.gpu_surface.color_space else .none,
                 .gpu_vsync = options.kind == .gpu_surface and options.gpu_surface.vsync,
                 .gpu_status = if (options.kind == .gpu_surface) .ready else .unavailable,

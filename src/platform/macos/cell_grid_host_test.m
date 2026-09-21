@@ -451,6 +451,93 @@ static void NativeSdkCellGridTestRasterCacheLifecycle(void) {
     NativeSdkCellGridTestExpect(view.canvasCommandRasterCacheBytes == 0, @"scale invalidation retained byte accounting");
 }
 
+static void NativeSdkCellGridTestMaterialSurfaceComposition(void) {
+    NativeSdkMetalSurfaceView *view = NativeSdkCellGridTestView();
+    NativeSdkCellGridTestExpect(view.metalLayer != nil, @"material test needs a Metal layer");
+    [view configureMaterial:YES];
+    NativeSdkCellGridTestExpect(view.materialEnabled, @"material surface did not enable");
+    NativeSdkCellGridTestExpect(view.metalLayer.opaque == NO, @"material surface left its Metal layer opaque");
+    NativeSdkCellGridTestExpect(view.layer != view.metalLayer, @"material surface kept Metal as the input root layer");
+    NativeSdkCellGridTestExpect(view.materialEffectView.superview == view, @"material container is not owned by the registered surface");
+    NativeSdkCellGridTestExpect(view.metalContentView.layer == view.metalLayer, @"material content does not own the retained Metal layer");
+    NativeSdkCellGridTestExpect(view.metalContentView.superview != nil, @"material content is not installed above the effect");
+    NativeSdkCellGridTestExpect([view.materialEffectView hitTest:NSMakePoint(24, 9)] == nil, @"material hierarchy intercepts surface input");
+
+    NativeSdkGlassEffectViewClassOverride = NSVisualEffectView.class;
+    NativeSdkMetalSurfaceView *fallback = NativeSdkCellGridTestView();
+    [fallback configureMaterial:YES];
+    NativeSdkGlassEffectViewClassOverride = Nil;
+    NSVisualEffectView *effect = (NSVisualEffectView *)fallback.materialEffectView.subviews.firstObject;
+    NativeSdkCellGridTestExpect([effect isKindOfClass:NSVisualEffectView.class], @"forced material fallback did not construct a visual-effect view");
+    NativeSdkCellGridTestExpect(effect.blendingMode == NSVisualEffectBlendingModeBehindWindow, @"fallback material does not sample behind the transparent window");
+    NativeSdkCellGridTestExpect(fallback.metalContentView.superview == effect, @"fallback material did not retain Metal content above the effect");
+}
+
+static NativeSdkAppKitHost *NativeSdkCellGridTestMaterialHost(NSWindow *window) {
+    NativeSdkAppKitHost *host = [[NativeSdkAppKitHost alloc] init];
+    host.window = window;
+    host.windows = [@{ @1 : window } mutableCopy];
+    host.nativeViews = [[NSMutableDictionary alloc] init];
+    host.nativeViewCommands = [[NSMutableDictionary alloc] init];
+    host.nativeViewExplicitTextKeys = [[NSMutableSet alloc] init];
+    host.adoptedViewSurfaces = [[NSMutableDictionary alloc] init];
+    host.materialWindowOpaqueStates = [[NSMutableDictionary alloc] init];
+    host.materialWindowBackgroundColors = [[NSMutableDictionary alloc] init];
+    host.windowClearColors = [[NSMutableDictionary alloc] init];
+    return host;
+}
+
+static BOOL NativeSdkCellGridTestCreateMaterialView(NativeSdkAppKitHost *host, NSString *label, NSString *parent) {
+    return [host createNativeViewInWindow:1 label:label kind:NATIVE_SDK_APPKIT_VIEW_GPU_SURFACE parent:parent x:0 y:0 width:120 height:80 layer:0 visible:YES enabled:YES role:@"" accessibilityLabel:@"" text:@"" command:@"" gpuMaterial:1];
+}
+
+static void NativeSdkCellGridTestMaterialWindowLifecycle(void) {
+    [NSApplication sharedApplication];
+    NSWindow *window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 240, 160) styleMask:NSWindowStyleMaskTitled backing:NSBackingStoreBuffered defer:NO];
+    NSColor *originalBackground = [NSColor colorWithSRGBRed:0.2 green:0.3 blue:0.4 alpha:1];
+    window.opaque = YES;
+    window.backgroundColor = originalBackground;
+    NativeSdkAppKitHost *host = NativeSdkCellGridTestMaterialHost(window);
+    NativeSdkCellGridTestExpect([host createNativeViewInWindow:1 label:@"parent" kind:NATIVE_SDK_APPKIT_VIEW_TOOLBAR parent:@"" x:0 y:0 width:240 height:160 layer:0 visible:YES enabled:YES role:@"" accessibilityLabel:@"" text:@"" command:@"" gpuMaterial:0], @"could not create material test parent");
+    NativeSdkCellGridTestExpect(NativeSdkCellGridTestCreateMaterialView(host, @"first", @"parent"), @"could not create first material surface");
+    NativeSdkCellGridTestExpect(NativeSdkCellGridTestCreateMaterialView(host, @"second", @"parent"), @"could not create second material surface");
+    NativeSdkCellGridTestExpect(!window.opaque && [window.backgroundColor isEqual:NSColor.clearColor], @"visible material surfaces did not claim window transparency");
+
+    NativeSdkMetalSurfaceView *first = (NativeSdkMetalSurfaceView *)host.nativeViews[@"1:first"];
+    first.frame = NSMakeRect(0, 0, 180, 120);
+    [first layoutSubtreeIfNeeded];
+    NativeSdkCellGridTestExpect(NSEqualSizes(first.metalContentView.bounds.size, first.bounds.size), @"material content did not follow surface resize");
+
+    NativeSdkCellGridTestExpect([host updateNativeViewInWindow:1 label:@"parent" hasFrame:NO x:0 y:0 width:0 height:0 hasLayer:NO layer:0 hasVisible:YES visible:NO hasEnabled:NO enabled:YES hasRole:NO role:@"" hasAccessibilityLabel:NO accessibilityLabel:@"" hasText:NO text:@"" hasCommand:NO command:@""], @"could not hide material parent");
+    NativeSdkCellGridTestExpect(window.opaque && [window.backgroundColor isEqual:originalBackground], @"hidden material ancestor did not restore window state");
+    NativeSdkCellGridTestExpect([host updateNativeViewInWindow:1 label:@"parent" hasFrame:NO x:0 y:0 width:0 height:0 hasLayer:NO layer:0 hasVisible:YES visible:YES hasEnabled:NO enabled:YES hasRole:NO role:@"" hasAccessibilityLabel:NO accessibilityLabel:@"" hasText:NO text:@"" hasCommand:NO command:@""], @"could not reveal material parent");
+    NativeSdkCellGridTestExpect(!window.opaque && [window.backgroundColor isEqual:NSColor.clearColor], @"revealed material ancestor did not reclaim window state");
+    NativeSdkCellGridTestExpect([host closeNativeViewInWindow:1 label:@"first"], @"could not close first material surface");
+    NativeSdkCellGridTestExpect(!window.opaque, @"one remaining material surface did not retain window transparency");
+    NativeSdkCellGridTestExpect([host closeNativeViewInWindow:1 label:@"second"], @"could not close final material surface");
+    NativeSdkCellGridTestExpect(window.opaque && [window.backgroundColor isEqual:originalBackground], @"final material close did not restore original opaque window state");
+
+    NativeSdkCellGridTestExpect(NativeSdkCellGridTestCreateMaterialView(host, @"replacement", @"parent"), @"could not recreate material surface");
+    [host applyWindowClearColor:1 label:@"parent" red:12 green:34 blue:56 alpha:255];
+    NativeSdkCellGridTestExpect([host closeNativeViewInWindow:1 label:@"replacement"], @"could not close replacement material surface");
+    NSColor *updatedBackground = [NSColor colorWithSRGBRed:12.0 / 255.0 green:34.0 / 255.0 blue:56.0 / 255.0 alpha:1];
+    NativeSdkCellGridTestExpect([window.backgroundColor isEqual:updatedBackground], @"material teardown discarded a newer normal-surface clear color");
+
+    NativeSdkCellGridTestExpect(NativeSdkCellGridTestCreateMaterialView(host, @"same-color", @"parent"), @"could not create same-color material surface");
+    [host applyWindowClearColor:1 label:@"same-color" red:80 green:90 blue:100 alpha:0];
+    [host applyWindowClearColor:1 label:@"parent" red:80 green:90 blue:100 alpha:0];
+    NativeSdkCellGridTestExpect([host closeNativeViewInWindow:1 label:@"same-color"], @"could not close same-color material surface");
+    NSColor *sameColorBackground = [NSColor colorWithSRGBRed:80.0 / 255.0 green:90.0 / 255.0 blue:100.0 / 255.0 alpha:0];
+    NativeSdkCellGridTestExpect([window.backgroundColor isEqual:sameColorBackground], @"identical glass and normal clears lost the newer source's restoration target");
+
+    NSColor *transparentBackground = [NSColor colorWithSRGBRed:0.1 green:0.2 blue:0.3 alpha:0.4];
+    window.opaque = NO;
+    window.backgroundColor = transparentBackground;
+    NativeSdkCellGridTestExpect(NativeSdkCellGridTestCreateMaterialView(host, @"transparent", @"parent"), @"could not create transparent-window material surface");
+    NativeSdkCellGridTestExpect([host closeNativeViewInWindow:1 label:@"transparent"], @"could not close transparent-window material surface");
+    NativeSdkCellGridTestExpect(!window.opaque && [window.backgroundColor isEqual:transparentBackground], @"material close overwrote an originally transparent window state");
+}
+
 int main(void) {
     @autoreleasepool {
         const char *expectedShotEvery = getenv("NATIVE_SDK_GPU_SHOT_EVERY_EXPECT");
@@ -465,6 +552,8 @@ int main(void) {
         NativeSdkCellGridTestBackgroundPixelPartition();
         NativeSdkCellGridTestFractionalRowPartition();
         NativeSdkCellGridTestRasterCacheLifecycle();
+        NativeSdkCellGridTestMaterialSurfaceComposition();
+        NativeSdkCellGridTestMaterialWindowLifecycle();
         fprintf(stdout, "cell-grid-host-test: ok\n");
     }
     return 0;

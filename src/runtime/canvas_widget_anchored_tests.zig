@@ -253,6 +253,232 @@ fn AppFixture(comptime AppType: type, comptime appOptions: fn () AppType.Options
 
 const Fixture = AppFixture(PickerApp, pickerOptions);
 
+const ModalDismissModel = struct {
+    open: bool = true,
+    dismissals: u32 = 0,
+    activations: u32 = 0,
+    double_activations: u32 = 0,
+};
+
+const ModalDismissMsg = union(enum) {
+    dismiss,
+    activate,
+    double_activate,
+};
+
+const ModalDismissApp = ui_app_model.UiApp(ModalDismissModel, ModalDismissMsg);
+
+fn modalDismissUpdate(model: *ModalDismissModel, msg: ModalDismissMsg) void {
+    switch (msg) {
+        .dismiss => {
+            model.open = false;
+            model.dismissals += 1;
+        },
+        .activate => model.activations += 1,
+        .double_activate => model.double_activations += 1,
+    }
+}
+
+fn modalDismissView(ui: *ModalDismissApp.Ui, model: *const ModalDismissModel) ModalDismissApp.Ui.Node {
+    const underlying = ui.button(.{ .width = 96, .height = 32, .on_press = .activate, .on_double_press = .double_activate }, "Underlying");
+    if (!model.open) return ui.stack(.{ .grow = 1 }, .{underlying});
+    return ui.stack(.{ .grow = 1 }, .{
+        underlying,
+        ui.el(.dialog, .{ .width = 160, .height = 96, .on_dismiss = .dismiss }, .{
+            ui.el(.text_field, .{ .placeholder = "Modal", .autofocus = true }, .{}),
+        }),
+    });
+}
+
+fn modalDismissOptions() ModalDismissApp.Options {
+    return .{
+        .name = "ui-app-modal-dismiss",
+        .scene = picker_scene,
+        .canvas_label = canvas_label,
+        .update = modalDismissUpdate,
+        .view = modalDismissView,
+    };
+}
+
+const ModalDismissFixture = AppFixture(ModalDismissApp, modalDismissOptions);
+
+const RawInputObserver = struct {
+    inner: core.App,
+    pointer_events: u32 = 0,
+
+    fn app(self: *@This()) core.App {
+        return .{ .context = self, .name = "modal-dismiss-input-observer", .event_fn = event };
+    }
+
+    fn event(context: *anyopaque, runtime: *core.Runtime, event_value: core.Event) anyerror!void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        switch (event_value) {
+            .gpu_surface_input => |input| switch (input.kind) {
+                .pointer_down, .pointer_up, .pointer_cancel => self.pointer_events += 1,
+                else => {},
+            },
+            else => {},
+        }
+        try self.inner.event(runtime, event_value);
+    }
+};
+
+test "modal outside dismissal consumes its pointer gesture across rebuilds" {
+    const fixture = try ModalDismissFixture.create();
+    defer fixture.destroy();
+    var observer = RawInputObserver{ .inner = fixture.app };
+    const observed_app = observer.app();
+
+    const button_id = fixture.widgetIdByText(.button, "Underlying").?;
+    const dialog_id = fixture.widgetIdByText(.dialog, "").?;
+    const button_frame = (try fixture.retainedFrame(button_id)).?;
+    const dialog_frame = (try fixture.retainedFrame(dialog_id)).?;
+    const point = button_frame.center();
+    try std.testing.expect(point.x < dialog_frame.x or point.x > dialog_frame.maxX() or point.y < dialog_frame.y or point.y > dialog_frame.maxY());
+
+    try fixture.harness.runtime.dispatchPlatformEvent(observed_app, .{ .gpu_surface_input = .{
+        .label = canvas_label,
+        .kind = .pointer_down,
+        .pointer_id = 41,
+        .x = point.x,
+        .y = point.y,
+    } });
+    try std.testing.expectEqual(@as(u32, 1), fixture.app_state.model.dismissals);
+    try std.testing.expectEqual(@as(u32, 0), fixture.app_state.model.activations);
+
+    // Gesture ownership is pointer- and view-scoped. The owner's terminal
+    // edge in another view and a complete click from another pointer remain
+    // ordinary app input while this view awaits pointer 41's release.
+    _ = try fixture.harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "other-canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 400, 300),
+    });
+    try fixture.harness.runtime.dispatchPlatformEvent(observed_app, .{ .gpu_surface_input = .{
+        .label = "other-canvas",
+        .kind = .pointer_up,
+        .pointer_id = 41,
+        .x = point.x,
+        .y = point.y,
+    } });
+    inline for (.{ .pointer_down, .pointer_up }) |kind| {
+        try fixture.harness.runtime.dispatchPlatformEvent(observed_app, .{ .gpu_surface_input = .{
+            .label = canvas_label,
+            .kind = kind,
+            .pointer_id = 42,
+            .x = point.x,
+            .y = point.y,
+        } });
+    }
+    try std.testing.expectEqual(@as(u32, 1), fixture.app_state.model.activations);
+
+    try fixture.harness.runtime.dispatchPlatformEvent(observed_app, .{ .gpu_surface_input = .{
+        .label = canvas_label,
+        .kind = .pointer_up,
+        .pointer_id = 41,
+        .x = point.x,
+        .y = point.y,
+    } });
+    try std.testing.expectEqual(@as(u32, 1), fixture.app_state.model.activations);
+    try std.testing.expectEqual(@as(u32, 3), observer.pointer_events);
+
+    inline for (.{ .pointer_down, .pointer_up }) |kind| {
+        try fixture.harness.runtime.dispatchPlatformEvent(observed_app, .{ .gpu_surface_input = .{
+            .label = canvas_label,
+            .kind = kind,
+            .pointer_id = 41,
+            .x = point.x,
+            .y = point.y,
+        } });
+    }
+    try std.testing.expectEqual(@as(u32, 2), fixture.app_state.model.activations);
+    try std.testing.expectEqual(@as(u32, 5), observer.pointer_events);
+}
+
+test "modal outside dismissal releases gesture ownership on pointer cancel" {
+    const fixture = try ModalDismissFixture.create();
+    defer fixture.destroy();
+    var observer = RawInputObserver{ .inner = fixture.app };
+    const observed_app = observer.app();
+    const button_id = fixture.widgetIdByText(.button, "Underlying").?;
+    const point = (try fixture.retainedFrame(button_id)).?.center();
+
+    inline for (.{ .pointer_down, .pointer_cancel }) |kind| {
+        try fixture.harness.runtime.dispatchPlatformEvent(observed_app, .{ .gpu_surface_input = .{
+            .label = canvas_label,
+            .kind = kind,
+            .pointer_id = 73,
+            .x = point.x,
+            .y = point.y,
+        } });
+    }
+    try std.testing.expectEqual(@as(u32, 1), fixture.app_state.model.dismissals);
+    try std.testing.expectEqual(@as(u32, 0), fixture.app_state.model.activations);
+
+    inline for (.{ .pointer_down, .pointer_up }) |kind| {
+        try fixture.harness.runtime.dispatchPlatformEvent(observed_app, .{ .gpu_surface_input = .{
+            .label = canvas_label,
+            .kind = kind,
+            .pointer_id = 73,
+            .x = point.x,
+            .y = point.y,
+        } });
+    }
+    try std.testing.expectEqual(@as(u32, 1), fixture.app_state.model.activations);
+    try std.testing.expectEqual(@as(u32, 2), observer.pointer_events);
+}
+
+test "modal outside dismissal does not seed the next click's multi-click count" {
+    const fixture = try ModalDismissFixture.create();
+    defer fixture.destroy();
+    const button_id = fixture.widgetIdByText(.button, "Underlying").?;
+    const point = (try fixture.retainedFrame(button_id)).?.center();
+    const first_timestamp = 1_000_000_000;
+
+    // Another pointer's standing chain is independent state: consuming this
+    // modal gesture must neither replace nor clear it.
+    fixture.harness.runtime.views[0].canvas_widget_click_count = 2;
+    fixture.harness.runtime.views[0].canvas_widget_click_timestamp_ns = first_timestamp - 50_000_000;
+    fixture.harness.runtime.views[0].canvas_widget_click_point = point;
+    fixture.harness.runtime.views[0].canvas_widget_click_pointer_id = 77;
+    fixture.harness.runtime.views[0].canvas_widget_click_target_id = button_id;
+
+    try fixture.harness.runtime.dispatchPlatformEvent(fixture.app, .{ .gpu_surface_input = .{
+        .label = canvas_label,
+        .kind = .pointer_down,
+        .pointer_id = 91,
+        .timestamp_ns = first_timestamp,
+        .x = point.x,
+        .y = point.y,
+    } });
+    try std.testing.expectEqual(@as(u8, 2), fixture.harness.runtime.views[0].canvas_widget_click_count);
+    try std.testing.expectEqual(@as(u64, 77), fixture.harness.runtime.views[0].canvas_widget_click_pointer_id);
+    try fixture.harness.runtime.dispatchPlatformEvent(fixture.app, .{ .gpu_surface_input = .{
+        .label = canvas_label,
+        .kind = .pointer_up,
+        .pointer_id = 91,
+        .timestamp_ns = first_timestamp + 10_000_000,
+        .x = point.x,
+        .y = point.y,
+    } });
+
+    inline for (.{ .pointer_down, .pointer_up }, .{ first_timestamp + 100_000_000, first_timestamp + 110_000_000 }) |kind, timestamp_ns| {
+        try fixture.harness.runtime.dispatchPlatformEvent(fixture.app, .{ .gpu_surface_input = .{
+            .label = canvas_label,
+            .kind = kind,
+            .pointer_id = 91,
+            .timestamp_ns = timestamp_ns,
+            .x = point.x,
+            .y = point.y,
+        } });
+    }
+
+    try std.testing.expectEqual(@as(u32, 1), fixture.app_state.model.activations);
+    try std.testing.expectEqual(@as(u32, 0), fixture.app_state.model.double_activations);
+    try std.testing.expectEqual(@as(u8, 1), fixture.harness.runtime.views[0].canvas_widget_click_count);
+}
+
 test "anchored picker: trigger opens, menu floats, item click picks and closes" {
     const fixture = try Fixture.create();
     defer fixture.destroy();
@@ -365,6 +591,21 @@ test "outside click dismisses an anchored surface opened from a NON-focusable tr
     try std.testing.expectEqual(@as(u32, 1), fixture.app_state.model.switcher_dismissals);
     try std.testing.expect(!fixture.app_state.model.switcher_open);
     try std.testing.expect(fixture.widgetIdByText(.menu_item, "Sibling") == null);
+}
+
+test "anchored light dismissal preserves click-through to underlying content" {
+    const fixture = try Fixture.create();
+    defer fixture.destroy();
+
+    const trigger_id = fixture.widgetIdByText(.text, "Files").?;
+    try fixture.clickWidget(trigger_id);
+    try std.testing.expect(fixture.app_state.model.switcher_open);
+
+    const underlying_id = fixture.widgetIdByText(.button, "Crumb").?;
+    try fixture.clickWidget(underlying_id);
+    try std.testing.expectEqual(@as(u32, 1), fixture.app_state.model.switcher_dismissals);
+    try std.testing.expectEqual(@as(u32, 1), fixture.app_state.model.crumb_presses);
+    try std.testing.expect(!fixture.app_state.model.switcher_open);
 }
 
 test "outside click falls back from unrelated focus to the mounted anchored surface" {

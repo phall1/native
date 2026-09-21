@@ -214,7 +214,7 @@ extern fn native_sdk_appkit_set_launch_at_login(host: *AppKitHost, enabled: c_in
 extern fn native_sdk_appkit_set_window_close_policy(host: *AppKitHost, window_id: u64, close_policy: c_int) c_int;
 extern fn native_sdk_appkit_start_window_drag(host: *AppKitHost, window_id: u64) c_int;
 extern fn native_sdk_appkit_window_chrome_insets(host: *AppKitHost, window_id: u64, top: *f64, left: *f64, bottom: *f64, right: *f64, buttons_x: *f64, buttons_y: *f64, buttons_width: *f64, buttons_height: *f64) c_int;
-extern fn native_sdk_appkit_create_view(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize, kind: c_int, parent: [*]const u8, parent_len: usize, x: f64, y: f64, width: f64, height: f64, layer: c_int, visible: c_int, enabled: c_int, role: [*]const u8, role_len: usize, accessibility_label: [*]const u8, accessibility_label_len: usize, text: [*]const u8, text_len: usize, command: [*]const u8, command_len: usize) c_int;
+extern fn native_sdk_appkit_create_view(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize, kind: c_int, parent: [*]const u8, parent_len: usize, x: f64, y: f64, width: f64, height: f64, layer: c_int, visible: c_int, enabled: c_int, role: [*]const u8, role_len: usize, accessibility_label: [*]const u8, accessibility_label_len: usize, text: [*]const u8, text_len: usize, command: [*]const u8, command_len: usize, gpu_material: c_int) c_int;
 extern fn native_sdk_appkit_update_view(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize, has_frame: c_int, x: f64, y: f64, width: f64, height: f64, has_layer: c_int, layer: c_int, has_visible: c_int, visible: c_int, has_enabled: c_int, enabled: c_int, has_role: c_int, role: [*]const u8, role_len: usize, has_accessibility_label: c_int, accessibility_label: [*]const u8, accessibility_label_len: usize, has_text: c_int, text: [*]const u8, text_len: usize, has_command: c_int, command: [*]const u8, command_len: usize) c_int;
 extern fn native_sdk_appkit_set_view_frame(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize, x: f64, y: f64, width: f64, height: f64) c_int;
 extern fn native_sdk_appkit_set_view_visible(host: *AppKitHost, window_id: u64, label: [*]const u8, label_len: usize, visible: c_int) c_int;
@@ -903,6 +903,7 @@ pub const MacPlatform = struct {
             .menus,
             .file_drops,
             .gpu_surfaces,
+            .gpu_surface_material,
             .gpu_surface_scroll_drivers,
             .view_surface_adoption,
             // Audio lives in the AppKit host (one AVPlayer for local
@@ -1653,6 +1654,7 @@ fn createView(context: ?*anyopaque, options: platform_mod.ViewOptions) anyerror!
         options.text.len,
         options.command.ptr,
         options.command.len,
+        @intFromEnum(options.gpu_surface.material),
     ) == 0) return error.CreateFailed;
 }
 
