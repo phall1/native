@@ -451,6 +451,35 @@ static void NativeSdkCellGridTestRasterCacheLifecycle(void) {
     NativeSdkCellGridTestExpect(view.canvasCommandRasterCacheBytes == 0, @"scale invalidation retained byte accounting");
 }
 
+static void NativeSdkCellGridTestAwaitPresent(NativeSdkMetalSurfaceView *view) {
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:5];
+    while (!view.renderedFrame && deadline.timeIntervalSinceNow > 0) {
+        [[NSRunLoop mainRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.001]];
+    }
+    NativeSdkCellGridTestExpect(view.renderedFrame, @"Metal present did not complete");
+}
+
+static void NativeSdkCellGridTestColdCompositePresent(BOOL material) {
+    NativeSdkMetalSurfaceView *view = NativeSdkCellGridTestView();
+    NativeSdkCellGridTestAwaitPresent(view);
+    [view configureMaterial:material];
+    view.renderedFrame = NO;
+    view.verifiedNonblankFrame = NO;
+    // No pixel upload has initialized the final drawable presenter. Sampling
+    // the retained composite texture alone cannot catch a blank onscreen pass.
+    NSInteger result = [view presentCompositePacketWithCommands:@[] keys:@[]
+        pixelWidth:(NSUInteger)view.metalLayer.drawableSize.width
+        pixelHeight:(NSUInteger)view.metalLayer.drawableSize.height
+        scale:view.lastScale surfaceWidth:48 surfaceHeight:18
+        clearColor:[NSColor colorWithSRGBRed:1 green:0 blue:0 alpha:1]
+        loadAction:@"clear" fullSurfacePass:YES hasScissor:NO
+        scissorRect:NSZeroRect dirtyRects:@[] directRetainedDirtyUpdate:NO];
+    NativeSdkCellGridTestExpect(result == 1, @"cold composite packet was refused");
+    NativeSdkCellGridTestAwaitPresent(view);
+    NativeSdkCellGridTestExpect(view.lastSampleColor == 0xffff0000,
+        @"cold composite did not reach the presented drawable");
+}
+
 static void NativeSdkCellGridTestMaterialSurfaceComposition(void) {
     NativeSdkMetalSurfaceView *view = NativeSdkCellGridTestView();
     NativeSdkCellGridTestExpect(view.metalLayer != nil, @"material test needs a Metal layer");
@@ -552,6 +581,8 @@ int main(void) {
         NativeSdkCellGridTestBackgroundPixelPartition();
         NativeSdkCellGridTestFractionalRowPartition();
         NativeSdkCellGridTestRasterCacheLifecycle();
+        NativeSdkCellGridTestColdCompositePresent(NO);
+        NativeSdkCellGridTestColdCompositePresent(YES);
         NativeSdkCellGridTestMaterialSurfaceComposition();
         NativeSdkCellGridTestMaterialWindowLifecycle();
         fprintf(stdout, "cell-grid-host-test: ok\n");

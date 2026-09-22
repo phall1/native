@@ -5663,15 +5663,13 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
     return 1;
 }
 
-/* Composite-mode present: the packet's frame reaches the glass through
- * the GPU pass above; the CPU retained backing is untouched (and marked
- * stale). Refusal semantics mirror the CPU path: a dirty update against
- * a missing/resized/invalid target refuses (0) so the engine resyncs
- * with a full present. */
-- (NSInteger)presentCompositePacketWithCommands:(NSArray *)commands keys:(NSArray *)keys pixelWidth:(NSUInteger)pixelWidth pixelHeight:(NSUInteger)pixelHeight scale:(CGFloat)scale surfaceWidth:(CGFloat)surfaceWidth surfaceHeight:(CGFloat)surfaceHeight clearColor:(NSColor *)clearColor loadAction:(NSString *)loadAction fullSurfacePass:(BOOL)fullSurfacePass hasScissor:(BOOL)hasScissor scissorRect:(NSRect)scissorRect dirtyRects:(NSArray<NSValue *> *)dirtyRects directRetainedDirtyUpdate:(BOOL)directRetainedDirtyUpdate {
+- (NSInteger)prepareCompositeTargetWithWidth:(NSUInteger)pixelWidth height:(NSUInteger)pixelHeight fullSurfacePass:(BOOL)fullSurfacePass {
     const BOOL needNewTexture = !self.canvasTexture || !self.canvasTextureRenderable ||
         self.canvasTextureWidth != pixelWidth || self.canvasTextureHeight != pixelHeight;
     if (!fullSurfacePass && (needNewTexture || !self.canvasCompositeContentValid)) return 0;
+    // Composite-first startup bypasses presentPixels, but still needs the
+    // final texture-to-drawable pipeline before renderFrame can show the UI.
+    if (![self ensureCanvasPresenter]) return -1;
     if (needNewTexture) {
         MTLTextureDescriptor *descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:pixelWidth height:pixelHeight mipmapped:NO];
         descriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
@@ -5685,21 +5683,15 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         self.canvasCompositeContentValid = NO;
         self.canvasCompositeVerifyTexture = nil;
     }
-    const uint64_t traceDrawBeginNs = NativeSdkTimestampNanoseconds();
-    NSInteger result = [self compositePacketCommands:commands keys:keys target:self.canvasTexture pixelWidth:pixelWidth pixelHeight:pixelHeight scale:scale clearColor:clearColor fullSurfacePass:fullSurfacePass hasScissor:hasScissor scissorRect:scissorRect dirtyRects:dirtyRects waitUntilCompleted:NO];
-    const uint64_t traceDrawEndNs = NativeSdkTimestampNanoseconds();
-    if (result != 1) return result;
-    if (fullSurfacePass) self.canvasCompositeContentValid = YES;
-    self.canvasPacketPixelsValid = NO;
-    self.hasCanvasTexture = YES;
-    self.canvasCompositePresentCount += 1;
-    [self stopDisplayTimer];
-    [self renderFrame];
+    return 1;
+}
+
+- (void)traceCompositePresentWithLoadAction:(NSString *)loadAction hasScissor:(BOOL)hasScissor scissorRect:(NSRect)scissorRect dirtyRectCount:(NSUInteger)dirtyRectCount drawBeginNs:(uint64_t)traceDrawBeginNs drawEndNs:(uint64_t)traceDrawEndNs {
     if (NativeSdkGpuDrawTraceEnabled()) {
         const uint64_t tracePresentEndNs = NativeSdkTimestampNanoseconds();
         fprintf(stderr, "native-sdk: gpu draw-trace action=%s mode=gpu scissor=%d rect=%.0fx%.0f rects=%lu draw_us=%llu present_us=%llu drawn=%lu hit=%lu fill=%lu/%lluus direct=%lu/%lluus quads=%lu binds=%lu\n",
                 loadAction.UTF8String, hasScissor ? 1 : 0, scissorRect.size.width, scissorRect.size.height,
-                (unsigned long)dirtyRects.count,
+                (unsigned long)dirtyRectCount,
                 (unsigned long long)((traceDrawEndNs - traceDrawBeginNs) / 1000),
                 (unsigned long long)((tracePresentEndNs - traceDrawEndNs) / 1000),
                 (unsigned long)self.canvasTraceDrawnCount,
@@ -5711,6 +5703,27 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
                 (unsigned long)self.canvasTraceQuadCount,
                 (unsigned long)self.canvasTraceBindCount);
     }
+}
+
+/* Composite-mode present: the packet's frame reaches the glass through
+ * the GPU pass above; the CPU retained backing is untouched (and marked
+ * stale). Refusal semantics mirror the CPU path: a dirty update against
+ * a missing/resized/invalid target refuses (0) so the engine resyncs
+ * with a full present. */
+- (NSInteger)presentCompositePacketWithCommands:(NSArray *)commands keys:(NSArray *)keys pixelWidth:(NSUInteger)pixelWidth pixelHeight:(NSUInteger)pixelHeight scale:(CGFloat)scale surfaceWidth:(CGFloat)surfaceWidth surfaceHeight:(CGFloat)surfaceHeight clearColor:(NSColor *)clearColor loadAction:(NSString *)loadAction fullSurfacePass:(BOOL)fullSurfacePass hasScissor:(BOOL)hasScissor scissorRect:(NSRect)scissorRect dirtyRects:(NSArray<NSValue *> *)dirtyRects directRetainedDirtyUpdate:(BOOL)directRetainedDirtyUpdate {
+    NSInteger prepared = [self prepareCompositeTargetWithWidth:pixelWidth height:pixelHeight fullSurfacePass:fullSurfacePass];
+    if (prepared != 1) return prepared;
+    const uint64_t traceDrawBeginNs = NativeSdkTimestampNanoseconds();
+    NSInteger result = [self compositePacketCommands:commands keys:keys target:self.canvasTexture pixelWidth:pixelWidth pixelHeight:pixelHeight scale:scale clearColor:clearColor fullSurfacePass:fullSurfacePass hasScissor:hasScissor scissorRect:scissorRect dirtyRects:dirtyRects waitUntilCompleted:NO];
+    const uint64_t traceDrawEndNs = NativeSdkTimestampNanoseconds();
+    if (result != 1) return result;
+    if (fullSurfacePass) self.canvasCompositeContentValid = YES;
+    self.canvasPacketPixelsValid = NO;
+    self.hasCanvasTexture = YES;
+    self.canvasCompositePresentCount += 1;
+    [self stopDisplayTimer];
+    [self renderFrame];
+    [self traceCompositePresentWithLoadAction:loadAction hasScissor:hasScissor scissorRect:scissorRect dirtyRectCount:dirtyRects.count drawBeginNs:traceDrawBeginNs drawEndNs:traceDrawEndNs];
     if (directRetainedDirtyUpdate && NativeSdkGpuVerifyIncrementalEnabled()) {
         [self verifyCompositeIncrementalWithCommands:commands keys:keys pixelWidth:pixelWidth pixelHeight:pixelHeight scale:scale clearColor:clearColor scissorRect:scissorRect];
     }
