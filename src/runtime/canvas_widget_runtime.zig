@@ -843,7 +843,21 @@ pub fn canvasWidgetLayoutNodeWithControlReconcileState(
                 copy.widget.value = if (selected) 1 else 0;
             },
             .checkbox, .switch_control, .toggle => {
-                const selected = entry.state.selected or entry.value >= 0.5;
+                // A boolean control bound to an on_toggle handler is
+                // model-owned: the model binds `checked` and the engine
+                // never flips it on its own. The pointer/keyboard/AX
+                // echo is feedback between the input and the app's
+                // answer, and every rebuild's source IS the answer —
+                // accepted, refused, or replied with a value the echo
+                // did not guess. Retaining the echo here let a refused
+                // or synchronously answered toggle leave the switch
+                // showing the opposite of the model (and of what Save
+                // then wrote). Only a control with no toggle handler —
+                // nothing to answer — keeps its runtime-retained state.
+                const selected = if (copy.widget.semantics.actions.toggle)
+                    canvasWidgetBooleanSelected(copy.widget)
+                else
+                    entry.state.selected or entry.value >= 0.5;
                 copy.widget.state.selected = selected;
                 copy.widget.value = if (selected) 1 else 0;
             },
