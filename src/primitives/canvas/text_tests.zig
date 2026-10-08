@@ -479,6 +479,11 @@ test "widget keyboard control intents map activation keys" {
     var disabled_composed = composed;
     disabled_composed.state.disabled = true;
     try std.testing.expect(widgetKeyboardControlIntent(disabled_composed, .{ .phase = .key_down, .key = "space" }) == null);
+    // A text-entry surface (a terminal pane) keeps Enter and Space as input.
+    var text_entry = composed;
+    text_entry.semantics.role = .textbox;
+    for ([_][]const u8{ "enter", "space" }) |key|
+        try std.testing.expect(widgetKeyboardControlIntent(text_entry, .{ .phase = .key_down, .key = key }) == null);
     const press = widgetKeyboardControlIntent(.{ .kind = .button, .text = "Save" }, .{ .phase = .key_down, .key = "enter" }).?;
     try std.testing.expectEqual(WidgetControlIntentKind.press, press.kind);
     try std.testing.expect(press.actions.press);
