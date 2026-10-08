@@ -46,6 +46,13 @@ fn copyInto(buffer: []u8, value: []const u8) ![]const u8 {
 /// `start_ns` stays 0 until the first advancing frame stamps it, the
 /// same first-tick discipline the manual Msg idiom uses, so a tween
 /// armed mid-dispatch starts its 0..1 ramp on the frame clock.
+/// An open root-relative modal and the widget that held keyboard focus
+/// when it appeared (0 = nothing): where focus returns when it closes.
+pub const CanvasWidgetModalOpener = struct {
+    modal_id: canvas.ObjectId,
+    opener_id: canvas.ObjectId,
+};
+
 pub const CanvasWidgetLayoutTweenState = struct {
     spec: canvas.CanvasWidgetLayoutTween,
     from: f32,
@@ -549,6 +556,12 @@ pub const RuntimeView = struct {
     /// NOT in this set (newly mounted or freshly flipped on).
     widget_autofocus_ids: [canvas_limits.max_canvas_widget_autofocus_per_view]canvas.ObjectId = undefined,
     widget_autofocus_count: usize = 0,
+    /// Open root-relative modals, outermost first, each with its opener.
+    /// Layout adoption pushes newly visible modals and pops closed ones
+    /// (returning focus to the outermost closed modal's opener); engine
+    /// dismissal returns focus the same way before the model's rebuild.
+    canvas_widget_modal_openers: [canvas_limits.max_canvas_widget_modal_openers_per_view]CanvasWidgetModalOpener = undefined,
+    canvas_widget_modal_opener_count: usize = 0,
     /// Native scroll-driver tracking: each installed driver's id and
     /// the last offset it reported (or was pushed), so the sync only
     /// forces `set_offset` when a non-driver source moved the offset.

@@ -366,6 +366,12 @@ pub const max_canvas_widget_anchored_per_view: usize = 16;
 /// anyway).
 pub const max_canvas_widget_autofocus_per_view: usize = 16;
 
+/// Open root-relative modals (dialog/drawer/sheet) per view whose opener
+/// the runtime remembers for focus return. Modals nest a few deep at
+/// most (a confirm over a dialog); a deeper stack keeps the outer eight
+/// and the inner ones simply close without a focus return.
+pub const max_canvas_widget_modal_openers_per_view: usize = 8;
+
 /// COMMANDS carrying an engine-armed LOOPING render animation per view
 /// (spinner rotations, per-segment spinner opacity loops, skeleton
 /// pulses). Each armed command is one render animation slot plus one

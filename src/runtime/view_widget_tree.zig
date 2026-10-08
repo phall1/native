@@ -339,6 +339,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
                 // grants adoption-time tooltip reveals either.
                 self.canvas_widget_focus_visible_keyboard = false;
             }
+            reconcileCanvasWidgetModalOpeners(self);
             if (self.canvas_widget_focus_visible_id != 0 and (self.canvas_widget_focus_visible_id != self.canvas_widget_focused_id or self.widgetLayoutTree().focusTargetById(self.canvas_widget_focus_visible_id) == null)) {
                 self.canvas_widget_focus_visible_id = 0;
                 self.canvas_widget_focus_visible_keyboard = false;
@@ -634,12 +635,18 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
                     self.canvas_tooltip_deadline_ns = 0;
                 }
             }
-            if (self.canvasWidgetIdDescendsFromIndex(self.canvas_widget_focused_id, surface_index)) {
+            const modal = canvas.widgetIsRootRelativeModal(surface);
+            if (self.canvasWidgetIdDescendsFromIndex(self.canvas_widget_focused_id, surface_index) or
+                (modal and self.canvas_widget_focused_id == 0))
+            {
                 // A dismissal that swallows the focus returns it to the
                 // surface's own trigger when the surface is anchored (the
                 // Escape-closes-the-picker flow keeps the keyboard on the
-                // select), and clears it otherwise.
-                const return_id = self.canvasWidgetAnchorTriggerFocusId(surface_index) orelse 0;
+                // select), to the widget that opened it when it is a
+                // modal (also when a click on the modal's chrome had
+                // cleared the focus), and clears it otherwise.
+                const return_id = self.canvasWidgetAnchorTriggerFocusId(surface_index) orelse
+                    (if (modal) canvasWidgetModalOpenerFocusId(self, surface.id) else null) orelse 0;
                 self.canvas_widget_focused_id = return_id;
                 self.canvas_widget_focus_visible_id = return_id;
                 // Same rule as the rebuild's focus return: a returned
@@ -1057,10 +1064,7 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             }
             var attempts: usize = 0;
             while (attempts <= self.widget_layout_node_count) : (attempts += 1) {
-                const target = if (walk_id) |id|
-                    self.canvasWidgetScopedFocusTarget(id, direction) orelse layout.focusTarget(walk_id, direction) orelse return null
-                else
-                    layout.focusTarget(null, direction) orelse return null;
+                const target = canvasWidgetTabStepTarget(self, walk_id, direction) orelse return null;
 
                 if (canvas_widget_runtime.canvasWidgetRovingTabScope(layout, target.index)) |target_scope| {
                     // Radios after the first visible member do not create
@@ -1090,6 +1094,132 @@ pub fn RuntimeViewCanvasWidgetTree(comptime RuntimeView: type) type {
             // radio group wraps onto the group's one entry stop.
             if (current_scope) |scope| return canvas_widget_runtime.canvasWidgetRovingTabEntryTarget(layout, scope);
             return null;
+        }
+
+        /// One step of the flat Tab walk. An open modal (dialog, drawer,
+        /// sheet) contains it the way it already contains the pointer:
+        /// focus outside the topmost modal (its opener, left behind on
+        /// the page, or nothing after a click on the modal's chrome)
+        /// enters at the modal's first control (Shift+Tab: its last),
+        /// and focus inside wraps within it. A nearer trap inside the
+        /// modal (an anchored popover or menu) stays authoritative.
+        fn canvasWidgetTabStepTarget(self: *const RuntimeView, walk_id: ?canvas.ObjectId, direction: canvas.WidgetFocusDirection) ?canvas.WidgetFocusTarget {
+            const layout = self.widgetLayoutTree();
+            const modal_index = canvasWidgetTopmostModalIndex(self) orelse {
+                const id = walk_id orelse return layout.focusTarget(null, direction);
+                return self.canvasWidgetScopedFocusTarget(id, direction) orelse layout.focusTarget(id, direction);
+            };
+            if (walk_id) |id| {
+                if (self.canvasWidgetNodeIndexById(id)) |current_index| {
+                    if (self.canvasWidgetNodeIndexDescendsFrom(current_index, modal_index)) {
+                        return self.canvasWidgetScopedFocusTarget(id, direction) orelse
+                            self.canvasWidgetFocusTargetInScope(modal_index, current_index, direction);
+                    }
+                }
+            }
+            // The scoped walk from the modal's own index finds its first
+            // descendant forward and its last descendant backward.
+            return self.canvasWidgetFocusTargetInScope(modal_index, modal_index, direction);
+        }
+
+        /// The topmost visible root-relative modal (highest effective
+        /// `(layer, node index)`, the one painted on top), or null. A
+        /// modal hidden by the dismissal echo or inside a hidden branch
+        /// no longer holds the keyboard.
+        fn canvasWidgetTopmostModalIndex(self: *const RuntimeView) ?usize {
+            var found: ?usize = null;
+            var found_order: ?canvas.WidgetPaintOrder = null;
+            for (self.widget_layout_nodes[0..self.widget_layout_node_count], 0..) |node, index| {
+                if (!canvas.widgetIsRootRelativeModal(node.widget)) continue;
+                if (canvasWidgetNodeHiddenInTree(self, index)) continue;
+                const order = canvas.widgetLayoutWindowSurfaceOrder(self.widgetLayoutTree(), index, self.widget_tokens);
+                if (found_order == null or canvas.widgetPaintOrderLess(found_order.?, order)) {
+                    found = index;
+                    found_order = order;
+                }
+            }
+            return found;
+        }
+
+        fn canvasWidgetModalVisibleById(self: *const RuntimeView, id: canvas.ObjectId) bool {
+            const index = self.canvasWidgetNodeIndexById(id) orelse return false;
+            if (!canvas.widgetIsRootRelativeModal(self.widget_layout_nodes[index].widget)) return false;
+            return !canvasWidgetNodeHiddenInTree(self, index);
+        }
+
+        /// The recorded opener of an open modal, when it can still take
+        /// focus.
+        fn canvasWidgetModalOpenerFocusId(self: *const RuntimeView, modal_id: canvas.ObjectId) ?canvas.ObjectId {
+            for (self.canvas_widget_modal_openers[0..self.canvas_widget_modal_opener_count]) |entry| {
+                if (entry.modal_id != modal_id) continue;
+                if (entry.opener_id == 0 or self.widgetLayoutTree().focusTargetById(entry.opener_id) == null) return null;
+                return entry.opener_id;
+            }
+            return null;
+        }
+
+        fn canvasWidgetModalOpenerTracked(self: *const RuntimeView, modal_id: canvas.ObjectId) bool {
+            for (self.canvas_widget_modal_openers[0..self.canvas_widget_modal_opener_count]) |entry| {
+                if (entry.modal_id == modal_id) return true;
+            }
+            return false;
+        }
+
+        /// Layout-adoption bookkeeping for modal focus return, run after
+        /// the rebuild's own focus fix-up and before autofocus (an
+        /// explicit autofocus in the same rebuild still wins). Closed
+        /// modals pop; when the close left nothing focused (focus sat
+        /// inside the modal, or on its chrome), focus returns to the
+        /// outermost closed modal's opener. Newly visible modals push
+        /// with the focus they found as their opener.
+        fn reconcileCanvasWidgetModalOpeners(self: *RuntimeView) void {
+            const closed_opener_id = popClosedCanvasWidgetModalOpeners(self);
+            if (closed_opener_id) |opener_id| returnCanvasWidgetFocusToModalOpener(self, opener_id);
+            pushOpenedCanvasWidgetModalOpeners(self, closed_opener_id orelse 0);
+        }
+
+        /// Drops the entries whose modal closed (unmounted or hidden) and
+        /// returns the outermost one's opener.
+        fn popClosedCanvasWidgetModalOpeners(self: *RuntimeView) ?canvas.ObjectId {
+            const entries = &self.canvas_widget_modal_openers;
+            var closed_opener_id: ?canvas.ObjectId = null;
+            var kept: usize = 0;
+            for (entries[0..self.canvas_widget_modal_opener_count]) |entry| {
+                if (canvasWidgetModalVisibleById(self, entry.modal_id)) {
+                    entries[kept] = entry;
+                    kept += 1;
+                } else if (closed_opener_id == null) {
+                    closed_opener_id = entry.opener_id;
+                }
+            }
+            self.canvas_widget_modal_opener_count = kept;
+            return closed_opener_id;
+        }
+
+        fn returnCanvasWidgetFocusToModalOpener(self: *RuntimeView, opener_id: canvas.ObjectId) void {
+            if (self.canvas_widget_focused_id != 0 or opener_id == 0) return;
+            if (self.widgetLayoutTree().focusTargetById(opener_id) == null) return;
+            self.canvas_widget_focused_id = opener_id;
+            self.canvas_widget_focus_visible_id = opener_id;
+            // A returned ring is not a keyboard arrival (the anchored
+            // focus-return rule): it earns no tooltip reveal.
+            self.canvas_widget_focus_visible_keyboard = false;
+        }
+
+        /// Records each newly visible modal with the focus it found. A
+        /// modal that already holds the focus was rekeyed while open, so
+        /// it inherits the opener of the entry that just closed.
+        fn pushOpenedCanvasWidgetModalOpeners(self: *RuntimeView, inherited_opener_id: canvas.ObjectId) void {
+            for (self.widget_layout_nodes[0..self.widget_layout_node_count], 0..) |node, index| {
+                if (self.canvas_widget_modal_opener_count == self.canvas_widget_modal_openers.len) return;
+                if (node.widget.id == 0 or !canvas.widgetIsRootRelativeModal(node.widget)) continue;
+                if (canvasWidgetNodeHiddenInTree(self, index)) continue;
+                if (canvasWidgetModalOpenerTracked(self, node.widget.id)) continue;
+                const focused_id = self.canvas_widget_focused_id;
+                const opener_id = if (self.canvasWidgetIdDescendsFromIndex(focused_id, index)) inherited_opener_id else focused_id;
+                self.canvas_widget_modal_openers[self.canvas_widget_modal_opener_count] = .{ .modal_id = node.widget.id, .opener_id = opener_id };
+                self.canvas_widget_modal_opener_count += 1;
+            }
         }
 
         pub fn canvasWidgetFocusTargetInScope(
