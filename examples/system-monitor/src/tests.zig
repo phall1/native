@@ -246,6 +246,39 @@ const LiveApp = struct {
         try self.harness.runtime.dispatchPlatformEvent(self.app, .wake);
     }
 
+    /// A real press/release pair well outside the centered dialog.
+    fn clickOutsideDialog(self: LiveApp) !void {
+        for ([_]native_sdk.platform.GpuSurfaceInputKind{ .pointer_down, .pointer_up }) |kind| {
+            try self.harness.runtime.dispatchPlatformEvent(self.app, .{ .gpu_surface_input = .{
+                .window_id = 1,
+                .label = main.canvas_label,
+                .kind = kind,
+                .timestamp_ns = 2_000_000,
+                .x = 40,
+                .y = main.window_height - 40,
+                .button = 0,
+            } });
+        }
+    }
+
+    /// Walk keyboard focus with Tab until it rests on the labeled widget.
+    fn tabUntilFocused(self: LiveApp, label: []const u8) !void {
+        for (0..64) |_| {
+            try self.harness.runtime.dispatchPlatformEvent(self.app, .{ .gpu_surface_input = .{
+                .window_id = 1,
+                .label = main.canvas_label,
+                .kind = .key_down,
+                .key = "tab",
+            } });
+            for (self.harness.runtime.views[0..self.harness.runtime.view_count]) |*view| {
+                if (!std.mem.eql(u8, view.label, main.canvas_label)) continue;
+                const node = view.widgetLayoutTree().findById(view.canvas_widget_focused_id) orelse continue;
+                if (std.mem.eql(u8, node.widget.semantics.label, label)) return;
+            }
+        }
+        return error.FocusTargetNotReached;
+    }
+
     /// Feed one collect spawn's whole stdout and exit 0, then drain.
     fn finishSpawn(self: LiveApp, key: u64, output: []const u8) !void {
         try self.app_state.effects.feedLine(key, output);
@@ -702,6 +735,31 @@ test "a sample already in flight at kill time cannot retire the delivered notice
     try live.wake();
     try live.finishSpawn(model_mod.ps_key, ps_edge_fixture);
     try testing.expectEqual(@as(usize, 0), model.note().len);
+}
+
+test "a click outside the SIGTERM dialog cancels whether or not focus is inside it" {
+    if (!sampler.supported) return error.SkipZigTest;
+    const live = try LiveApp.start();
+    defer live.stop();
+    const model = &live.app_state.model;
+    try live.finishSpawn(model_mod.ps_key, ps_edge_fixture);
+    try live.finishSpawn(model_mod.mem_key, vm_stat_fixture);
+
+    // Unfocused: the press falls through to the full-bleed catcher panel.
+    try live.dispatch(.{ .request_kill = 842 });
+    try testing.expect(model.confirmingKill());
+    try live.clickOutsideDialog();
+    try testing.expect(!model.confirmingKill());
+
+    // Focused inside the dialog: the modal consumes the whole outside
+    // gesture and reports it only as the dialog's dismissal, so the
+    // cancel must come from the dialog's own on_dismiss.
+    try live.dispatch(.{ .request_kill = 842 });
+    try testing.expect(model.confirmingKill());
+    try live.tabUntilFocused("Cancel termination");
+    try live.clickOutsideDialog();
+    try testing.expect(!model.confirmingKill());
+    try testing.expect(live.spawnByKey(model_mod.kill_key) == null);
 }
 
 // ---------------------------------------------------------------- theming

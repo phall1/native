@@ -417,8 +417,11 @@ fn statusBarView(ui: *Ui, model: *const Model) Ui.Node {
 
 /// The SIGTERM confirmation: a centered dialog whose modal chrome
 /// paints the scrim (token-driven dim + backdrop blur across the whole
-/// window). The full-bleed panel underneath is the cancel catcher —
-/// clicking outside the dialog never terminates anything.
+/// window). Clicking outside the dialog cancels and never terminates
+/// anything, by two routes: while keyboard focus is inside the dialog the
+/// modal consumes the outside gesture and reports it only through the
+/// dialog's `on_dismiss`; otherwise the press lands on the full-bleed
+/// catcher panel underneath.
 fn confirmOverlay(ui: *Ui, model: *const Model) Ui.Node {
     const pending = model.pending_kill orelse unreachable;
     // A panel, not a column: the catcher must claim the press route
@@ -437,6 +440,7 @@ fn confirmOverlay(ui: *Ui, model: *const Model) Ui.Node {
             // Absorb body presses so they never fall through to the
             // scrim's cancel (deepest handler on the hit route wins).
             .on_press = .dialog_pressed,
+            .on_dismiss = .cancel_kill,
             .style_tokens = .{ .background = .surface, .radius = .lg, .border_color = .border },
             .semantics = .{ .role = .dialog, .label = "Send SIGTERM" },
         }, ui.column(.{ .gap = 12 }, .{

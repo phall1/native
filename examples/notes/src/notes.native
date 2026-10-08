@@ -190,12 +190,15 @@
   </column>
   <if test="{dialogOpen}">
     <!-- The dialog's modal chrome paints the real scrim (token-driven
-         dim + backdrop blur across the window); this panel is the
-         outside-click dismiss catcher, wearing the same scrim wash so
-         the pair reads as one overlay. -->
+         dim + backdrop blur across the window); this panel wears the
+         same scrim wash so the pair reads as one overlay. An outside
+         click closes by two routes: while focus is inside the dialog
+         (the field autofocuses) the modal consumes the gesture and
+         reports it only through the dialog's on-dismiss; otherwise the
+         press lands on this panel's on-press catcher. -->
     <panel background="scrim" on-press="close_dialog" label="Dialog backdrop">
       <column main="center" cross="center">
-        <dialog width="380" height="190" label="{dialogTitle}">
+        <dialog width="380" height="190" on-dismiss="close_dialog" label="{dialogTitle}">
           <column padding="18" gap="10">
             <text>{dialogTitle}</text>
             <!-- The field mounts with the dialog, so autofocus lands the

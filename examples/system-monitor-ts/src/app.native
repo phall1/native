@@ -146,14 +146,17 @@
     </column>
   </column>
   <if test="{confirmingKill}">
-    <!-- The dialog's modal chrome paints the real scrim; this panel is
-         the outside-click cancel catcher, wearing the same scrim wash so
-         the pair reads as one overlay. Clicking outside the dialog never
-         terminates anything; the dialog body is its own hit target, so a
+    <!-- The dialog's modal chrome paints the real scrim; this panel
+         wears the same scrim wash so the pair reads as one overlay.
+         Clicking outside the dialog cancels and never terminates
+         anything, by two routes: while focus is inside the dialog the
+         modal consumes the gesture and reports it only through the
+         dialog's on-dismiss; otherwise the press lands on this panel's
+         on-press catcher. The dialog body is its own hit target, so a
          press inside it never falls through to the cancel. -->
     <panel background="scrim" on-press="cancel_kill" label="Confirm termination">
       <column grow="1" main="center" cross="center">
-        <dialog width="420" padding="20" background="surface" radius="lg" border-color="border" label="Send SIGTERM">
+        <dialog width="420" padding="20" background="surface" radius="lg" border-color="border" on-dismiss="cancel_kill" label="Send SIGTERM">
           <column gap="12">
             <row gap="10" cross="center">
               <icon name="alert" width="20" height="20" foreground="warning" />
