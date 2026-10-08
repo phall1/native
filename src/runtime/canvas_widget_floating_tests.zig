@@ -549,6 +549,159 @@ test "runtime traps tab focus inside canvas floating surfaces" {
     try std.testing.expectEqual(@as(canvas.ObjectId, 4), harness.runtime.views[0].canvas_widget_focused_id);
 }
 
+const ModalFocusTestApp = struct {
+    fn app(self: *@This()) App {
+        return .{ .context = self, .name = "gpu-widget-modal-focus", .source = platform.WebViewSource.html("<h1>Hello</h1>") };
+    }
+};
+
+const modal_focus_dialog_children = [_]canvas.Widget{
+    .{ .id = 11, .kind = .button, .frame = geometry.RectF.init(12, 12, 96, 32), .text = "First" },
+    .{ .id = 12, .kind = .button, .frame = geometry.RectF.init(12, 52, 96, 32), .text = "Last" },
+};
+
+/// "Before" (2) and "After" (5) sit behind the modal, which is authored
+/// between them.
+fn modalFocusWidgets(comptime with_dialog: bool) [if (with_dialog) 3 else 2]canvas.Widget {
+    const before = canvas.Widget{ .id = 2, .kind = .button, .frame = geometry.RectF.init(10, 20, 90, 32), .text = "Before" };
+    const after = canvas.Widget{ .id = 5, .kind = .button, .frame = geometry.RectF.init(280, 20, 70, 32), .text = "After" };
+    if (!with_dialog) return .{ before, after };
+    return .{
+        before,
+        .{
+            .id = 10,
+            .kind = .dialog,
+            .frame = geometry.RectF.init(120, 20, 140, 104),
+            .semantics = .{ .label = "Confirm" },
+            .children = &modal_focus_dialog_children,
+        },
+        after,
+    };
+}
+
+fn setModalFocusLayout(harness: anytype, comptime with_dialog: bool) !void {
+    const widgets = modalFocusWidgets(with_dialog);
+    var nodes: [6]canvas.WidgetLayoutNode = undefined;
+    const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &widgets }, geometry.RectF.init(0, 0, 360, 200), &nodes);
+    _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+}
+
+fn pressModalFocusKey(harness: anytype, app: App, key: []const u8, shift: bool) !void {
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .key_down,
+        .key = key,
+        .modifiers = .{ .shift = shift },
+    } });
+}
+
+fn expectModalFocus(harness: anytype, expected: canvas.ObjectId) !void {
+    try std.testing.expectEqual(expected, harness.runtime.views[0].canvas_widget_focused_id);
+}
+
+fn startModalFocusHarness(harness: anytype, app: App) !void {
+    harness.null_platform.gpu_surfaces = true;
+    try harness.start(app);
+    _ = try harness.runtime.createView(.{
+        .window_id = 1,
+        .label = "canvas",
+        .kind = .gpu_surface,
+        .frame = geometry.RectF.init(0, 0, 360, 200),
+    });
+}
+
+test "runtime contains tab focus inside an open modal dialog" {
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    var app_state: ModalFocusTestApp = .{};
+    const app = app_state.app();
+    try startModalFocusHarness(harness, app);
+    try setModalFocusLayout(harness, true);
+    try harness.runtime.focusView(1, "canvas");
+
+    // Focus left behind the modal (its opener): Tab and Shift+Tab
+    // enter the dialog at its first/last control instead of walking on
+    // to the controls it covers.
+    // (Layout orders the modal stratum last, so the page's own walk
+    // from "Before" goes to "After" and back.)
+    harness.runtime.views[0].canvas_widget_focused_id = 2;
+    try pressModalFocusKey(harness, app, "tab", false);
+    try expectModalFocus(harness, 11);
+    harness.runtime.views[0].canvas_widget_focused_id = 5;
+    try pressModalFocusKey(harness, app, "tab", true);
+    try expectModalFocus(harness, 12);
+
+    // Inside the dialog both directions wrap within it.
+    try pressModalFocusKey(harness, app, "tab", false);
+    try expectModalFocus(harness, 11);
+    try pressModalFocusKey(harness, app, "tab", false);
+    try expectModalFocus(harness, 12);
+    try pressModalFocusKey(harness, app, "tab", false);
+    try expectModalFocus(harness, 11);
+    try pressModalFocusKey(harness, app, "tab", true);
+    try expectModalFocus(harness, 12);
+
+    // Nothing focused (a click on the dialog's chrome clears focus):
+    // the first Tab still lands inside the modal.
+    harness.runtime.views[0].canvas_widget_focused_id = 0;
+    try pressModalFocusKey(harness, app, "tab", false);
+    try expectModalFocus(harness, 11);
+    harness.runtime.views[0].canvas_widget_focused_id = 0;
+    try pressModalFocusKey(harness, app, "tab", true);
+    try expectModalFocus(harness, 12);
+}
+
+test "runtime returns focus to the modal opener when the model closes the dialog" {
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    var app_state: ModalFocusTestApp = .{};
+    const app = app_state.app();
+    try startModalFocusHarness(harness, app);
+    try setModalFocusLayout(harness, false);
+    try harness.runtime.focusView(1, "canvas");
+    harness.runtime.views[0].canvas_widget_focused_id = 5;
+
+    // The opener's press opens the dialog; the keyboard moves into it.
+    try setModalFocusLayout(harness, true);
+    try expectModalFocus(harness, 5);
+    try pressModalFocusKey(harness, app, "tab", false);
+    try expectModalFocus(harness, 11);
+
+    // The model closes it: focus returns to the opener, not to nothing.
+    try setModalFocusLayout(harness, false);
+    try expectModalFocus(harness, 5);
+    try std.testing.expectEqual(@as(canvas.ObjectId, 5), harness.runtime.views[0].canvas_widget_focus_visible_id);
+
+    // Without a modal, Tab walks the page again.
+    try pressModalFocusKey(harness, app, "tab", false);
+    try expectModalFocus(harness, 2);
+}
+
+test "runtime returns focus to the modal opener when escape dismisses the dialog" {
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    var app_state: ModalFocusTestApp = .{};
+    const app = app_state.app();
+    try startModalFocusHarness(harness, app);
+    try setModalFocusLayout(harness, false);
+    try harness.runtime.focusView(1, "canvas");
+    harness.runtime.views[0].canvas_widget_focused_id = 2;
+
+    try setModalFocusLayout(harness, true);
+    try pressModalFocusKey(harness, app, "tab", true);
+    try expectModalFocus(harness, 12);
+
+    // The engine's optimistic hide returns focus at once; the model's
+    // own close in the next rebuild keeps it there.
+    try pressModalFocusKey(harness, app, "escape", false);
+    const retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+    try std.testing.expect(retained.findById(10).?.widget.semantics.hidden);
+    try expectModalFocus(harness, 2);
+    try setModalFocusLayout(harness, false);
+    try expectModalFocus(harness, 2);
+}
+
 test "runtime keeps single focus target scoped inside canvas floating surface" {
     const TestApp = struct {
         fn app(self: *@This()) App {
