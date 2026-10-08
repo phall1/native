@@ -2028,6 +2028,7 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
         if (optimize == .Debug) test_app_mod.addObject(markupDataObject(b, target, optimize, stage.markup_c));
     }
     const tests = b.addTest(.{ .root_module = test_app_mod, .use_llvm = useLlvmWorkaround(target) });
+    tests.stack_size = test_stack_size;
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
     const extension_tests = extensionTestArtifact(b, target, optimize, app_options, ts_stage, test_app_mod);
@@ -2190,8 +2191,22 @@ fn extensionTestArtifact(b: *std.Build, target: std.Build.ResolvedTarget, optimi
     root.addObjectFile(stage.archive);
     if (stage.service_archive) |service_archive| root.addObjectFile(service_archive);
     root.addObject(markupDataObject(b, target, optimize, stage.markup_c));
-    return b.addTest(.{ .name = b.fmt("{s}-extension", .{app_options.name}), .root_module = root, .use_llvm = useLlvmWorkaround(target) });
+    const tests = b.addTest(.{ .name = b.fmt("{s}-extension", .{app_options.name}), .root_module = root, .use_llvm = useLlvmWorkaround(target) });
+    tests.stack_size = test_stack_size;
+    return tests;
 }
+
+/// Main-thread stack for every test binary the SDK builds (the root suites,
+/// `native test` app suites, and toolkit-extension suites). A canvas
+/// `Builder` carries its per-frame stores inline (cells, text bytes, path
+/// elements, chart labels) and is about 2.8 MB at the current display-list
+/// ceilings, so a test that holds several builders side by side - focused
+/// vs blurred, compact vs regular - needs well past the default 8 MB and
+/// otherwise dies with a stack-probe SIGSEGV at the test's own entry line.
+/// Runtime code never does this (it pools builders off the stack; see
+/// `Builder.initAt`), so only test binaries get the larger stack. Stays
+/// under macOS's 64 MB hard stack limit.
+pub const test_stack_size: u64 = 48 * 1024 * 1024;
 
 /// Zig 0.16.0's self-hosted x86_64 backend miscompiles the SysV C calling
 /// convention for f32-heavy signatures with interleaved pointer arguments

@@ -4297,7 +4297,9 @@ fn filteredTestArtifact(b: *std.Build, mod: *std.Build.Module, name: []const u8,
     // SysV C ABI for f32-heavy signatures (native_sdk_app_viewport); see
     // useLlvmWorkaround in build/app.zig for the full story and repro.
     const use_llvm = if (mod.resolved_target) |target| @import("build/app.zig").useLlvmWorkaround(target) else null;
-    return b.addTest(.{ .name = name, .root_module = mod, .filters = filters, .use_llvm = use_llvm });
+    const tests = b.addTest(.{ .name = name, .root_module = mod, .filters = filters, .use_llvm = use_llvm });
+    tests.stack_size = @import("build/app.zig").test_stack_size;
+    return tests;
 }
 
 /// One slice of the framework test suite, selected by test-name filters.
