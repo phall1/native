@@ -261,6 +261,34 @@ const Harness = struct {
         } });
     }
 
+    /// A real press/release pair well outside the centered dialog.
+    fn clickOutsideDialog(self: *Harness) !void {
+        for ([_]native_sdk.platform.GpuSurfaceInputKind{ .pointer_down, .pointer_up }) |kind| {
+            try self.harness.runtime.dispatchPlatformEvent(self.app, .{ .gpu_surface_input = .{
+                .window_id = 1,
+                .label = canvas_label,
+                .kind = kind,
+                .timestamp_ns = 2_000_000,
+                .x = 40,
+                .y = 720 - 40,
+                .button = 0,
+            } });
+        }
+    }
+
+    /// Walk keyboard focus with Tab until it rests on the labeled widget.
+    fn tabUntilFocused(self: *Harness, label: []const u8) !void {
+        for (0..64) |_| {
+            try self.keyDown("tab");
+            for (self.harness.runtime.views[0..self.harness.runtime.view_count]) |*view| {
+                if (!std.mem.eql(u8, view.label, canvas_label)) continue;
+                const node = view.widgetLayoutTree().findById(view.canvas_widget_focused_id) orelse continue;
+                if (std.mem.eql(u8, node.widget.semantics.label, label)) return;
+            }
+        }
+        return error.FocusTargetNotReached;
+    }
+
     fn fireSampleTimer(self: *Harness) !bool {
         self.app_state.effects.fireTimer(sample_timer_key) catch return false;
         try self.wake();
@@ -669,6 +697,30 @@ test "the SIGTERM round trip: request copies the target, cancel never signals, c
     try std.testing.expectEqual(@as(usize, 1), h.app_state.effects.pendingClipboardCount());
     try std.testing.expectEqualStrings("renderfarm-worker", h.app_state.effects.pendingClipboardAt(0).?.text);
     try std.testing.expect(h.hasText("name copy requested"));
+}
+
+test "a click outside the SIGTERM dialog cancels whether or not focus is inside it" {
+    const h = try Harness.create();
+    defer h.destroy();
+    try h.bootMac();
+    try h.spawnOutput(spawn_key_0, ps_edge_fixture, 0);
+    try h.spawnOutput(spawn_key_1, vm_stat_fixture, 0);
+
+    // Unfocused: the press falls through to the full-bleed catcher panel.
+    try h.menu("mon.kill.842");
+    try std.testing.expect(h.hasText("Send SIGTERM?"));
+    try h.clickOutsideDialog();
+    try std.testing.expect(!h.hasText("Send SIGTERM?"));
+
+    // Focused inside the dialog: the modal consumes the whole outside
+    // gesture and reports it only as the dialog's dismissal, so the
+    // cancel must come from the dialog's own on-dismiss.
+    try h.menu("mon.kill.842");
+    try std.testing.expect(h.hasText("Send SIGTERM?"));
+    try h.tabUntilFocused("Cancel termination");
+    try h.clickOutsideDialog();
+    try std.testing.expect(!h.hasText("Send SIGTERM?"));
+    try std.testing.expectEqual(@as(usize, 0), h.app_state.effects.pendingSpawnCount());
 }
 
 test "a sample already in flight at kill time cannot retire the delivered notice" {
