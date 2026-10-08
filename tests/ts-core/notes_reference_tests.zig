@@ -159,6 +159,21 @@ const Harness = struct {
         return self.harness.runtime.automationSnapshot("Notes");
     }
 
+    fn widgetAutomation(self: *Harness, comptime format: []const u8, id: u64) !void {
+        var command_buffer: [96]u8 = undefined;
+        const command = try std.fmt.bufPrint(&command_buffer, format, .{id});
+        try self.harness.runtime.dispatchAutomationCommand(self.app, command);
+    }
+
+    /// A key chord ("tab", "shift+tab") through the automation
+    /// widget-key verb, which dispatches the same gpu-surface key input
+    /// a physical key produces.
+    fn key(self: *Harness, chord: []const u8) !void {
+        var command_buffer: [96]u8 = undefined;
+        const command = try std.fmt.bufPrint(&command_buffer, "widget-key notes-canvas {s}", .{chord});
+        try self.harness.runtime.dispatchAutomationCommand(self.app, command);
+    }
+
     fn clickWidget(self: *Harness, id: u64) !void {
         var command_buffer: [96]u8 = undefined;
         const command = try std.fmt.bufPrint(&command_buffer, "widget-click notes-canvas {d}", .{id});
@@ -1209,6 +1224,44 @@ test "the folder dialog autofocuses its name field the moment it opens" {
     snapshot = h.snapshot();
     const refocused = snapshotWidgetNamed(snapshot, "textbox", "Folder name").?;
     try testing.expectEqual(@as(canvas.ObjectId, @intCast(refocused.id)), h.focusedWidgetId());
+}
+
+test "the folder dialog holds Tab inside it and returns focus to its opener" {
+    var clock = native_sdk.TestClock{};
+    var h = try Harness.create(model_mod.initialModel(testClock(&clock)));
+    defer h.destroy();
+    const model = &h.app_state.model;
+
+    // Keyboard-only: focus New Folder and press it with Enter.
+    var snapshot = h.snapshot();
+    const opener = snapshotWidgetNamed(snapshot, "button", "New folder").?;
+    try h.widgetAutomation("widget-action notes-canvas {d} focus", opener.id);
+    try testing.expectEqual(@as(canvas.ObjectId, @intCast(opener.id)), h.focusedWidgetId());
+    try h.key("enter");
+    try testing.expectEqual(model_mod.DialogMode.create_folder, model.dialog);
+
+    snapshot = h.snapshot();
+    const name_field: canvas.ObjectId = @intCast(snapshotWidgetNamed(snapshot, "textbox", "Folder name").?.id);
+    const cancel: canvas.ObjectId = @intCast(snapshotWidgetNamed(snapshot, "button", "Cancel dialog").?.id);
+    try testing.expectEqual(name_field, h.focusedWidgetId());
+
+    // Confirm is disabled while the name is empty, so the dialog's Tab
+    // ring is the field and Cancel. Neither direction ever reaches the
+    // sidebar, list, or editor behind the scrim.
+    try h.key("tab");
+    try testing.expectEqual(cancel, h.focusedWidgetId());
+    try h.key("tab");
+    try testing.expectEqual(name_field, h.focusedWidgetId());
+    try h.key("shift+tab");
+    try testing.expectEqual(cancel, h.focusedWidgetId());
+    try h.key("shift+tab");
+    try testing.expectEqual(name_field, h.focusedWidgetId());
+
+    // Escape dismisses through on-dismiss; the keyboard lands back on
+    // the button that opened the dialog.
+    try h.key("escape");
+    try testing.expectEqual(model_mod.DialogMode.closed, model.dialog);
+    try testing.expectEqual(@as(canvas.ObjectId, @intCast(opener.id)), h.focusedWidgetId());
 }
 
 test "a Recently Deleted note opens read-only with the restore affordance" {
