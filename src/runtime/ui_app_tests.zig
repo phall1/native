@@ -4188,6 +4188,171 @@ test "rapid-fire automation commands all dispatch, one per frame turn" {
     try std.testing.expectEqual(@as(usize, 0), harness.runtime.dispatchErrors().len);
 }
 
+// ------------------------------------------------- boolean control authority
+
+/// A settings model whose switch is answered by a "request" the update
+/// arm resolves synchronously, the way Cockpit's native config replies:
+/// accepted (the value flips), refused (the value stays), or answered
+/// with an explicit value that need not match the optimistic flip.
+const SwitchReply = enum { accept, refuse, force_off };
+
+const SwitchModel = struct {
+    on: bool = true,
+    reply: SwitchReply = .accept,
+    toggles: u32 = 0,
+};
+
+const SwitchMsg = union(enum) { toggle_on, toggle_plain };
+const SwitchApp = ui_app_model.UiApp(SwitchModel, SwitchMsg);
+
+fn switchUpdate(model: *SwitchModel, msg: SwitchMsg) void {
+    switch (msg) {
+        .toggle_on => {
+            model.toggles += 1;
+            switch (model.reply) {
+                .accept => model.on = !model.on,
+                .refuse => {},
+                .force_off => model.on = false,
+            }
+        },
+        .toggle_plain => {},
+    }
+}
+
+fn switchView(ui: *SwitchApp.Ui, model: *const SwitchModel) SwitchApp.Ui.Node {
+    return ui.column(.{ .gap = 8 }, .{
+        ui.el(.switch_control, .{ .text = "Blink", .checked = model.on, .on_toggle = .toggle_on }, .{}),
+        ui.el(.checkbox, .{ .text = "Uncontrolled" }, .{}),
+        ui.button(.{ .on_press = .toggle_plain }, "Rebuild"),
+    });
+}
+
+fn retainedSelected(runtime: *core.Runtime, id: canvas.ObjectId) !bool {
+    const layout = try runtime.canvasWidgetLayout(1, canvas_label);
+    const node = layout.findById(id) orelse return error.TestUnexpectedResult;
+    return node.widget.state.selected;
+}
+
+fn semanticsChecked(runtime: *core.Runtime, id: canvas.ObjectId) !bool {
+    for (runtime.views[0..runtime.view_count]) |*view| {
+        if (!std.mem.eql(u8, view.label, canvas_label)) continue;
+        for (view.widgetSemantics()) |node| {
+            if (node.id == id) return node.state.selected;
+        }
+    }
+    return error.TestUnexpectedResult;
+}
+
+test "a model-bound switch shows the model after every pointer and accessibility toggle" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+
+    const app_state = try std.testing.allocator.create(SwitchApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = SwitchApp.init(std.heap.page_allocator, .{}, .{
+        .name = "ui-app-switch-authority",
+        .scene = counter_scene,
+        .canvas_label = canvas_label,
+        .update = switchUpdate,
+        .view = switchView,
+    });
+    defer app_state.deinit();
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 1,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    try std.testing.expect(app_state.installed);
+
+    const io = std.testing.io;
+    const directory = ".zig-cache/test-ui-app-switch-authority";
+    var cwd = std.Io.Dir.cwd();
+    cwd.deleteTree(io, directory) catch {};
+    try cwd.createDirPath(io, directory);
+    defer cwd.deleteTree(io, directory) catch {};
+    harness.runtime.options.automation = automation.Server.init(io, directory, "SwitchAuthority");
+
+    const switch_id = findWidgetIdByText(app_state.tree.?, .switch_control, "Blink").?;
+    const checkbox_id = findWidgetIdByText(app_state.tree.?, .checkbox, "Uncontrolled").?;
+    const model = &app_state.model;
+    try std.testing.expect(try retainedSelected(&harness.runtime, switch_id));
+
+    const Driver = struct {
+        sequence: u64 = 0,
+        fn click(self: *@This(), h: anytype, a: anytype, d: []const u8, id: canvas.ObjectId) !void {
+            self.sequence += 1;
+            var path_buffer: [160]u8 = undefined;
+            var command_buffer: [128]u8 = undefined;
+            try std.Io.Dir.cwd().writeFile(std.testing.io, .{
+                .sub_path = try std.fmt.bufPrint(&path_buffer, "{s}/command-{d}.txt", .{ d, self.sequence }),
+                .data = try std.fmt.bufPrint(&command_buffer, "widget-click {s} {d}\n", .{ canvas_label, id }),
+            });
+            try h.runtime.dispatchPlatformEvent(a, .frame_requested);
+        }
+        fn toggle(h: anytype, a: anytype, id: canvas.ObjectId) !void {
+            _ = try h.runtime.dispatchCanvasWidgetAccessibilityAction(a, 1, canvas_label, .{ .id = id, .action = .toggle });
+        }
+    };
+    var driver: Driver = .{};
+
+    // Accepted pointer toggle: true -> false everywhere.
+    try driver.click(harness, app, directory, switch_id);
+    try std.testing.expectEqual(@as(u32, 1), model.toggles);
+    try std.testing.expect(!model.on);
+    try std.testing.expectEqual(model.on, try retainedSelected(&harness.runtime, switch_id));
+    try std.testing.expectEqual(model.on, try semanticsChecked(&harness.runtime, switch_id));
+
+    // Refused request: the optimistic flip must not outlive the reply.
+    model.reply = .refuse;
+    try driver.click(harness, app, directory, switch_id);
+    try std.testing.expectEqual(@as(u32, 2), model.toggles);
+    try std.testing.expect(!model.on);
+    try std.testing.expectEqual(model.on, try retainedSelected(&harness.runtime, switch_id));
+    try std.testing.expectEqual(model.on, try semanticsChecked(&harness.runtime, switch_id));
+    try Driver.toggle(harness, app, switch_id);
+    try std.testing.expectEqual(@as(u32, 3), model.toggles);
+    try std.testing.expectEqual(model.on, try retainedSelected(&harness.runtime, switch_id));
+    try std.testing.expectEqual(model.on, try semanticsChecked(&harness.runtime, switch_id));
+
+    // Accepted accessibility toggle: false -> true.
+    model.reply = .accept;
+    try Driver.toggle(harness, app, switch_id);
+    try std.testing.expect(model.on);
+    try std.testing.expectEqual(model.on, try retainedSelected(&harness.runtime, switch_id));
+    try std.testing.expectEqual(model.on, try semanticsChecked(&harness.runtime, switch_id));
+
+    // A synchronous reply that disagrees with the flip direction: the
+    // reply is the value, whichever way the echo guessed. From true the
+    // echo guesses false and the reply agrees; toggle once more from
+    // false (echo guesses true) and the reply still says false.
+    model.reply = .force_off;
+    try driver.click(harness, app, directory, switch_id);
+    try std.testing.expect(!model.on);
+    try std.testing.expectEqual(model.on, try retainedSelected(&harness.runtime, switch_id));
+    try driver.click(harness, app, directory, switch_id);
+    try std.testing.expect(!model.on);
+    try std.testing.expectEqual(model.on, try retainedSelected(&harness.runtime, switch_id));
+    try std.testing.expectEqual(model.on, try semanticsChecked(&harness.runtime, switch_id));
+
+    // An unrelated rebuild replays the model value, never a stale echo.
+    try driver.click(harness, app, directory, findWidgetIdByText(app_state.tree.?, .button, "Rebuild").?);
+    try std.testing.expectEqual(model.on, try retainedSelected(&harness.runtime, switch_id));
+
+    // A checkbox with no on_toggle has no model to defer to: its
+    // runtime-retained state survives rebuilds, as before.
+    try driver.click(harness, app, directory, checkbox_id);
+    try std.testing.expect(try retainedSelected(&harness.runtime, checkbox_id));
+    try driver.click(harness, app, directory, findWidgetIdByText(app_state.tree.?, .button, "Rebuild").?);
+    try std.testing.expect(try retainedSelected(&harness.runtime, checkbox_id));
+    try std.testing.expectEqual(@as(usize, 0), harness.runtime.dispatchErrors().len);
+}
+
 // ---------------------------------------------------------- webview panes
 
 const preview_canvas_label = "preview-canvas";
