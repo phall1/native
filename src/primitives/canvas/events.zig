@@ -1381,11 +1381,18 @@ pub fn widgetKeyboardControlIntent(widget: Widget, keyboard: WidgetKeyboardEvent
         // Composed controls can bind a press on an ordinary container
         // (timeline items use a focusable stack). Its declared semantic
         // action must answer the same activation keys as a button.
-        else => if (widget.semantics.focusable and widget.semantics.actions.press and isWidgetActivationKey(keyboard.key))
+        else => if (widgetComposedPressTakesActivationKeys(widget) and isWidgetActivationKey(keyboard.key))
             .{ .kind = .press, .actions = .{ .press = true } }
         else
             null,
     };
+}
+
+/// A composed container's declared press answers Enter/Space, except on a
+/// text-entry surface (`role = .textbox`, such as a terminal pane): there
+/// Enter and Space are input for the surface's owner, never activation.
+fn widgetComposedPressTakesActivationKeys(widget: Widget) bool {
+    return widget.semantics.focusable and widget.semantics.actions.press and widget.semantics.role != .textbox;
 }
 
 /// Stable kind/key projections for shared operation 15. The compiled policy
@@ -1411,7 +1418,9 @@ fn compiledKeyboardControlResult(widget: Widget, keyboard: WidgetKeyboardEvent, 
             @as(u8, if (keyboard.radio_group_selection) 4 else 0) |
             @as(u8, if (widget.command.len > 0) 8 else 0) |
             @as(u8, if (widget.semantics.focusable) 16 else 0) |
-            @as(u8, if (widget.semantics.actions.press) 32 else 0) |
+            // Eligibility is native: a text-entry surface's press never
+            // reaches the policy's composed-activation rule.
+            @as(u8, if (widget.semantics.actions.press and widget.semantics.role != .textbox) 32 else 0) |
             @as(u8, if (widget.layout.virtualized) 64 else 0),
         if (widget.state.expanded) |expanded| (if (expanded) @as(u8, 2) else 1) else 0,
     };
