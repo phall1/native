@@ -6,11 +6,11 @@
      Verify without writing:
        node packages/core/scripts/gen_service_surface.mjs --check -->
 
-# Service compile surface — scriptc 0.2.4
+# Service compile surface — scriptc 0.2.6
 
 What TypeScript under `src/services/` can use, as stated by the pinned
-compiler itself (surface manifest schema 1, 645 entries:
-516 static, 14 dynamic-only, 115 unsupported).
+compiler itself (surface manifest schema 1, 649 entries:
+520 static, 14 dynamic-only, 115 unsupported).
 
 How to read the tables:
 
@@ -156,6 +156,7 @@ manifest row in the Notes column:
 | `node-builtin.util` | util | static | recognized module (bare and node:-prefixed specifiers) |
 | `node-builtin.util.types` | util/types | static | recognized module (bare and node:-prefixed specifiers) |
 | `node-builtin.worker_threads` | worker_threads | static | recognized module (bare and node:-prefixed specifiers) |
+| `node-builtin.worker_threads.metadata` | worker_threads metadata | static | current-thread metadata and the worker's parent message port |
 | `node-builtin.zlib` | zlib | static | recognized module (bare and node:-prefixed specifiers) |
 
 ### Module member surface
@@ -348,7 +349,7 @@ manifest row in the Notes column:
 | `node-builtin.process.execPath` | process.execPath | static |  |  |
 | `node-builtin.process.exit` | process.exit | static |  | process.exit and the process._exiting flag read are one surface |
 | `node-builtin.process.exitCode` | process.exitCode | static |  | numeric writes in statement position set the implicit exit status; process.exit() reads it |
-| `node-builtin.process.getBuiltinModule` | process.getBuiltinModule | static |  | native path and os export subsets plus main-thread worker_threads metadata; other modules and exports throw SC2020 |
+| `node-builtin.process.getBuiltinModule` | process.getBuiltinModule | static |  | native path and os export subsets plus current-thread worker_threads metadata; other modules and exports throw SC2020 |
 | `node-builtin.process.getgid` | process.getgid | static |  |  |
 | `node-builtin.process.getuid` | process.getuid | static |  |  |
 | `node-builtin.process.hrtime` | process.hrtime | static |  | native monotonic tuple clock and bigint member; direct calls and stored JavaScript callable values |
@@ -416,6 +417,7 @@ manifest row in the Notes column:
 | `node-builtin.util.types.isUint8ClampedArray` | util/types.isUint8ClampedArray | static |  |  |
 | `node-builtin.util.types.isWeakMap` | util/types.isWeakMap | static |  |  |
 | `node-builtin.util.types.isWeakSet` | util/types.isWeakSet | static |  |  |
+| `node-builtin.worker_threads.Worker` | worker_threads.Worker | static |  | native threads with statically compiled entry points, workerData, argv and message events |
 | `node-builtin.worker_threads.isMainThread` | worker_threads.isMainThread | static |  | constant value read |
 | `node-builtin.worker_threads.threadId` | worker_threads.threadId | static |  | constant value read |
 | `node-builtin.zlib.brotliCompressSync` | zlib.brotliCompressSync | unsupported | `SC2020` | the default-options deflate/inflate, raw, gzip/gunzip, and unzip sync/callback forms plus crc32 are the lowered zlib surface |
@@ -484,6 +486,7 @@ manifest row in the Notes column:
 | `stdlib.array.toSpliced` | Array.prototype.toSpliced | static |  |  |
 | `stdlib.array.unshift` | Array.prototype.unshift | static |  |  |
 | `stdlib.array.with` | Array.prototype.with | static |  |  |
+| `stdlib.atomics` | Atomics | static |  | 8-, 16- and 32-bit integer operations, plus Int32Array wait and notify |
 | `stdlib.date.UTC` | Date.UTC | static |  | the lowered call form takes 1 to 7 number arguments |
 | `stdlib.date.constructor` | Date constructor | static |  | zero arguments, or one milliseconds/date-string argument; values are the read-only TimeClip scalar slice |
 | `stdlib.date.getDate` | Date.prototype.getDate | static |  |  |
@@ -677,6 +680,7 @@ manifest row in the Notes column:
 | `stdlib.set.symmetricDifference` | Set.prototype.symmetricDifference | static |  | compiles over Set receivers with Set arguments (the general ReadonlySetLike argument forms are refused per site) |
 | `stdlib.set.union` | Set.prototype.union | static |  | compiles over Set receivers with Set arguments (the general ReadonlySetLike argument forms are refused per site) |
 | `stdlib.set.values` | Set.prototype.values | static |  | live native iterators support next(), for...of, and drains; iterator helper methods are refused |
+| `stdlib.sharedArrayBuffer` | SharedArrayBuffer | static |  | fixed shared storage with context-local typed-array and DataView wrappers |
 | `stdlib.string.at` | string.prototype.at | static |  | the lowered call form takes 0 to 1 arguments |
 | `stdlib.string.charAt` | string.prototype.charAt | static |  | the lowered call form takes 0 to 1 arguments |
 | `stdlib.string.charCodeAt` | string.prototype.charCodeAt | static |  | the lowered call form takes 0 to 1 arguments |
