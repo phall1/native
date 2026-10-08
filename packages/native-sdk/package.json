@@ -36,7 +36,7 @@
   ],
   "dependencies": {
     "@typescript/old": "npm:typescript@6.0.3",
-    "scriptc": "0.1.1"
+    "scriptc": "0.1.7"
   },
   "optionalDependencies": {
     "@native-sdk/cli-darwin-arm64": "0.10.1",
